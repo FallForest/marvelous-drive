@@ -111,6 +111,34 @@ Motion as a layer, not a garnish. Plus a structural pass over the whole reposito
 - **The search field painted two focus rings** — the wrapper's `box-shadow` plus
   the inner input's outline, the inner one covering the `/` hint.
 
+## [0.19.1] - 2026-11-13
+
+An update that can read a private release, and one that does not copy the whole
+drive onto the same disk to do it.
+
+### Fixed
+
+- **The API read the release manifest anonymously.** `readManifest()` sent no
+  Authorization header while `update-agent.mjs` sent `UPDATE_MANIFEST_TOKEN`, so
+  a private repository answered 404 to the API's own check and the account menu
+  reported "已是最新" forever — even though the agent, which does send the token,
+  would have applied the release. `DRIVE_UPDATE_MANIFEST_TOKEN` is now read in
+  `config.update` and travels on that request, and a test asserts the header.
+
+### Changed
+
+- **The pre-update data tarball is opt-in.** `scripts/deploy/update.sh` tarred
+  the entire store into `./backups` on every update — the same disk the store
+  lives on. On a deployment holding 71 GB of blobs that produced a 71 GB tarball
+  and drove free space from 110 GB to 39 GB while eight containers were running.
+  The config snapshot (`.env`, compose files, `package.json`) is still taken
+  unconditionally and is still what a rollback restores; the data tarball now
+  needs `BACKUP_DATA=1` and, even then, refuses unless twice the store plus a
+  gigabyte is free, saying so instead of filling the disk.
+- **Both backup retentions are bounded.** A run leaves a `pre-update-<stamp>` set
+  and a `data-<stamp>.tar`, and nothing deleted them: one deployment reached 61
+  files and 21 MB in a month. `BACKUP_KEEP` (default 5) keeps the newest sets and
+  drops the rest.
 ## [0.19.0] - 2026-11-13
 
 Releases, and a deployment that can move to one without being ssh'd into.

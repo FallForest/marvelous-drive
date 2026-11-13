@@ -17,9 +17,13 @@ services:
       DRIVE_VERSION: ${DRIVE_VERSION:-}
       DRIVE_MAX_UPLOAD_BYTES: ${DRIVE_MAX_UPLOAD_BYTES:-2147483648}
       JWT_SECRET: ${JWT_SECRET:-}
-      # Self-update. All three empty means "no updates offered", which is the
+      # Self-update. All four empty means "no updates offered", which is the
       # right answer for a local build and harmless in the account menu.
+      # The manifest token is only needed for a private repository: the API
+      # fetches the same release asset as the agent, and an anonymous fetch of a
+      # private asset is a 404.
       DRIVE_UPDATE_MANIFEST_URL: ${DRIVE_UPDATE_MANIFEST_URL:-}
+      DRIVE_UPDATE_MANIFEST_TOKEN: ${DRIVE_UPDATE_MANIFEST_TOKEN:-}
       DRIVE_UPDATE_AGENT_URL: ${DRIVE_UPDATE_AGENT_URL:-}
       DRIVE_UPDATE_AGENT_TOKEN: ${DRIVE_UPDATE_AGENT_TOKEN:-}
     ports:

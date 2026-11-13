@@ -64,10 +64,50 @@ if [ -f package.json ]; then
   cp package.json "$BACKUP_DIR/pre-update-$timestamp.package.json"
 fi
 
+# Config snapshot above is the rollback unit; the data tarball is optional.
+#
+# A drive holds tens of gigabytes of blobs, and ./backups sits on the same disk
+# as the data. Tarring it needs a second copy of the whole store: on the box this
+# was measured on, 71 GB of data produced a 71 GB tarball and drove free space
+# from 110 GB to 39 GB mid-update. That is not a backup, it is a way to run out
+# of disk while eight containers are running. Schema changes are additive and
+# idempotent (CREATE TABLE IF NOT EXISTS), so the previous image reads the new
+# database and the tag rollback is enough to undo a bad release.
+#
+# Set BACKUP_DATA=1 to opt back in; it still refuses when the tarball would not
+# fit with headroom, and says so instead of filling the disk.
 echo "==> backing up data"
-# A backup that fails aborts the update: proceeding without one is how a failed
-# deploy loses the data it was supposed to protect.
-bash "$ROOT/scripts/deploy/backup.sh" "$timestamp"
+if [ "${BACKUP_DATA:-0}" = "1" ]; then
+  need_mb=$(du -sm "${DRIVE_DATA_DIR:-/drive-data}" 2>/dev/null | cut -f1)
+  need_mb=${need_mb:-0}
+  free_mb=$(df -m "$BACKUP_DIR" | awk 'NR==2 {print $4}')
+  # Twice the store plus 1 GiB: the tarball itself, and room for the image pull
+  # and the SQLite snapshot that happen in the same run.
+  reserve=$(( need_mb * 2 + 1024 ))
+  if [ "$free_mb" -lt "$reserve" ]; then
+    echo "    skipped: needs ${need_mb} MB of data, ${reserve} MB free required, ${free_mb} MB available"
+    echo "    (set BACKUP_DATA=1 only on a volume with room, or back up off the host)"
+  else
+    bash "$ROOT/scripts/deploy/backup.sh" "$timestamp"
+  fi
+else
+  echo "    skipped: config snapshot only (set BACKUP_DATA=1 to also tar the store)"
+fi
+# Retention. One run leaves a pre-update-<stamp> set plus one data-<stamp>.tar,
+# and nothing used to delete them: a real deployment accumulated 61 files and
+# 21 MB over a month. Keep the newest BACKUP_KEEP sets and drop the rest.
+KEEP="${BACKUP_KEEP:-5}"
+if [ "$KEEP" -gt 0 ]; then
+  ls -1 "$BACKUP_DIR" 2>/dev/null \
+    | sed -n 's/^\(pre-update-[0-9]\{8\}-[0-9]\{6\}\)\..*/\1/p' \
+    | sort -u | head -n -"$KEEP" \
+    | while IFS= read -r set; do rm -f "$BACKUP_DIR/$set".*; done
+  ls -1 "$BACKUP_DIR" 2>/dev/null \
+    | sed -n 's/^\(data-[0-9]\{8\}-[0-9]\{6\}\.tar\)$/\1/p' \
+    | sort | head -n -"$KEEP" \
+    | while IFS= read -r tar; do rm -f "$BACKUP_DIR/$tar"; done
+  echo "==> keeping the newest $KEEP backup sets in $BACKUP_DIR"
+fi
 
 echo "==> pinning $NEW_VERSION"
 # Both places an image is named: .env (compose interpolates it) and the compose
@@ -131,5 +171,7 @@ if [ -f "$BACKUP_DIR/pre-update-$timestamp.package.json" ]; then
 fi
 compose up -d --no-deps drive || true
 echo "==> rolled back to the previous release" >&2
-echo "    data backup: $BACKUP_DIR/data-$timestamp.tar" >&2
+if [ -f "$BACKUP_DIR/data-$timestamp.tar" ]; then
+  echo "    data backup: $BACKUP_DIR/data-$timestamp.tar" >&2
+fi
 exit 1

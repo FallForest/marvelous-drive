@@ -43,7 +43,11 @@ async function readManifest() {
   try {
     const response = await fetch(url, {
       signal: AbortSignal.timeout(MANIFEST_TIMEOUT_MS),
-      headers: { accept: 'application/json' },
+      // A private repository hides its release assets from anonymous requests,
+      // so the same token the agent uses has to travel here too.
+      headers: config.update.manifestToken
+        ? { accept: 'application/json', authorization: 'Bearer ' + config.update.manifestToken }
+        : { accept: 'application/json' },
     })
     if (!response.ok) return { manifest: null, error: 'release manifest returned ' + response.status }
     const manifest = parseManifest(await response.json())

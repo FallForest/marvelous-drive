@@ -44,6 +44,12 @@ export const config = {
    */
   update: {
     manifestUrl: (process.env.DRIVE_UPDATE_MANIFEST_URL || '').trim(),
+    // Only needed when the manifest lives in a private repository; a public
+    // release asset needs nothing. The agent already sends this, but the API
+    // fetches the same URL for its own check: without it here that check
+    // answers 404 and the panel reports "no update" forever while the agent
+    // would have succeeded.
+    manifestToken: (process.env.DRIVE_UPDATE_MANIFEST_TOKEN || '').trim(),
     agentUrl: (process.env.DRIVE_UPDATE_AGENT_URL || '').trim().replace(/\/+$/, ''),
     agentToken: (process.env.DRIVE_UPDATE_AGENT_TOKEN || '').trim(),
   },

@@ -19,6 +19,7 @@ let agent
 let agentCalls
 let agentState
 let manifest
+let manifestAuth
 
 /** A stand-in for the updater container. */
 async function startAgent() {
@@ -42,10 +43,17 @@ async function startAgent() {
   return server
 }
 
-/** A stand-in for the release asset the workflow uploads. */
+/**
+ * A stand-in for the release asset the workflow uploads.
+ *
+ * It records the Authorization header: a private repository answers 404 to an
+ * anonymous fetch and 200 to a token, so whether the API sends one is the
+ * difference between a panel that offers updates and one that never does.
+ */
 async function startManifestHost() {
   const { createServer } = await import('node:http')
   const server = createServer((request, response) => {
+    manifestAuth.push(request.headers.authorization)
     if (!manifest) { response.writeHead(404); response.end(); return }
     response.writeHead(200, { 'content-type': 'application/json' })
     response.end(JSON.stringify(manifest))
@@ -58,12 +66,14 @@ let manifestServer
 
 before(async () => {
   agentCalls = []
+  manifestAuth = []
   agentState = { status: 'idle', startedAt: null, finishedAt: null, output: '', error: null }
   agent = await startAgent()
   manifestServer = await startManifestHost()
   process.env.DRIVE_UPDATE_AGENT_URL = 'http://127.0.0.1:' + agent.address().port
   process.env.DRIVE_UPDATE_AGENT_TOKEN = 'test-agent-token'
   process.env.DRIVE_UPDATE_MANIFEST_URL = 'http://127.0.0.1:' + manifestServer.address().port + '/latest.json'
+  process.env.DRIVE_UPDATE_MANIFEST_TOKEN = 'test-manifest-token'
   app = await startServer()
   api = app.client
   const registered = await api('POST', '/api/v1/auth/register', { body: { email: uniqueEmail(), password: 'correct horse battery' } })
@@ -78,6 +88,7 @@ after(async () => {
   delete process.env.DRIVE_UPDATE_AGENT_URL
   delete process.env.DRIVE_UPDATE_AGENT_TOKEN
   delete process.env.DRIVE_UPDATE_MANIFEST_URL
+  delete process.env.DRIVE_UPDATE_MANIFEST_TOKEN
 })
 
 describe('release check', () => {
@@ -115,6 +126,12 @@ describe('release check', () => {
   it('never needs an account: the login screen can ask too', async () => {
     const response = await api('GET', '/api/v1/system/update-check')
     assert.equal(response.status, 200)
+  })
+
+  it('sends the manifest token, so a private repository answers instead of 404', async () => {
+    manifestAuth = []
+    await api('GET', '/api/v1/system/update-check')
+    assert.deepEqual(manifestAuth, ['Bearer test-manifest-token'])
   })
 })
 

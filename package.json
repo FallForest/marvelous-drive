@@ -1,7 +1,7 @@
 {
   "name": "marvelous-drive",
   "private": true,
-  "version": "0.19.0",
+  "version": "0.19.1",
   "type": "module",
   "description": "Self-hosted cloud drive with a web client, a CLI and a content-addressed blob store.",
   "engines": {
