@@ -174,3 +174,26 @@ curl -fsS http://127.0.0.1:4400/healthz
 Schema changes are applied at boot in `db.js` and are idempotent
 (`CREATE TABLE IF NOT EXISTS`), so a restart is the whole migration and the
 previous image can normally read the upgraded database.
+
+### A private repository
+
+If the repository is private, `releases/latest/download/latest.json` answers
+**404** to an anonymous fetch (GitHub hides private assets rather than refusing
+them), and GHCR images default to private too. Two settings fix it:
+
+- Leave `DRIVE_UPDATE_MANIFEST_URL` empty. The updater then reads
+  `release/latest.json` from the project directory, which it already sees through
+  the `/workspace` mount — that file is committed alongside the tag, so it names
+  the release the checkout is on.
+- Or keep the URL and set `DRIVE_UPDATE_MANIFEST_TOKEN` to a token that can read
+  the release asset. The agent sends it as a bearer token.
+
+For the image, either make the package public (Package settings → Change
+visibility) or authenticate the host once:
+
+```sh
+echo <PAT with read:packages> | docker login ghcr.io -u <username> --password-stdin
+```
+
+`DRIVE_UPDATE_AGENT_TOKEN` is unrelated to either: it authenticates the API to
+the updater inside the compose network.
