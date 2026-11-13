@@ -125,9 +125,12 @@ Rollback is: stop, restore the archive from step 1, start the previous code.
   calls 200 GB for a 214.7 GB (200 GiB) volume. Three labels, three units, one
   number: pick bytes and read the rendered figure back instead of assuming the
   field is GB.
-- Set the quota below the data volume's free space, not equal to it: the store,
-  the SQLite snapshot an update takes and any temporary upload spool share that
-  volume.
+- Compare the quota's *headroom* with the volume's free space, not the quota
+  with the volume's size. What filling the quota costs is `limit - used`, so a
+  139.7 GiB quota at 70.9 GiB used only needs 68.8 GiB more; against 109.8 GiB
+  free that still leaves ~41 GiB for the OS, the images and the other containers.
+  Reading it as "139.7 GiB quota on a 197.8 GiB disk" looks tighter than it is,
+  and comparing it with free space alone looks impossible.
 - Leave it at `0` (unlimited) only where the data volume is the only thing on
   the disk. Where the drive shares a volume with the OS and other containers, an
   unset quota lets a full upload take down every service on the host.
