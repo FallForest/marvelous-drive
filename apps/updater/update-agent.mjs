@@ -27,6 +27,9 @@ const port = Number(process.env.UPDATE_AGENT_PORT || 8080)
 const token = process.env.UPDATE_AGENT_TOKEN || ''
 const projectDir = process.env.UPDATE_PROJECT_DIR || '/workspace'
 const manifestUrl = process.env.UPDATE_MANIFEST_URL || ''
+// Only needed when the manifest lives behind a private repository; a public
+// release asset needs nothing.
+const manifestToken = process.env.UPDATE_MANIFEST_TOKEN || ''
 const composeProject = process.env.COMPOSE_PROJECT_NAME || 'marvelous-drive'
 
 /** Where the validated manifest is handed to update.sh. */
@@ -59,10 +62,25 @@ function composeFiles() {
  * a failed pull twenty seconds later.
  */
 async function fetchManifest() {
-  if (!manifestUrl) throw new Error('UPDATE_MANIFEST_URL is not set')
-  const response = await fetch(manifestUrl, { signal: AbortSignal.timeout(8000), headers: { accept: 'application/json' } })
-  if (!response.ok) throw new Error('release manifest returned ' + response.status)
-  const manifest = await response.json()
+  let manifest
+  if (!manifestUrl) {
+    // No URL configured: a checkout-driven deployment ships the manifest in the
+    // project, and the updater can see it through the /workspace mount.
+    try {
+      manifest = JSON.parse(await readFile(projectDir + '/release/latest.json', 'utf8'))
+    } catch {
+      throw new Error('no UPDATE_MANIFEST_URL and no release/latest.json in ' + projectDir)
+    }
+  } else {
+    const headers = { accept: 'application/json' }
+    if (manifestToken) headers.authorization = 'Bearer ' + manifestToken
+    const response = await fetch(manifestUrl, { headers, signal: AbortSignal.timeout(8000) })
+    if (!response.ok) {
+      throw new Error('release manifest returned ' + response.status
+        + (response.status === 404 ? ' (is the repository private? set UPDATE_MANIFEST_TOKEN)' : ''))
+    }
+    manifest = await response.json()
+  }
   if (!manifest || typeof manifest.version !== 'string' || !manifest.version.trim()) {
     throw new Error('release manifest has no version')
   }
