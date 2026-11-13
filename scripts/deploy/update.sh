@@ -129,15 +129,45 @@ if [ -f package.json ]; then
   node -e "const fs=require('node:fs');const p=JSON.parse(fs.readFileSync('package.json','utf8'));if(p.version!=='$NEW_VERSION'){p.version='$NEW_VERSION';fs.writeFileSync('package.json',JSON.stringify(p,null,2)+'\n')}"
 fi
 
+# One way back, used by every failure below.
+#
+# It restores the files the snapshot step copied. Without this, a pull that fails
+# leaves .env pinned to a version whose image does not exist: the container keeps
+# running the old one while "current version" reports the new one, and the next
+# update thinks it is already there. That is worse than the failed update.
+restore_snapshot() {
+  for f in $COMPOSE_FILES; do
+    snapshot="$BACKUP_DIR/pre-update-$timestamp.$(basename "$f")"
+    if [ -f "$snapshot" ]; then cp "$snapshot" "$f"; fi
+  done
+  if [ -f "$BACKUP_DIR/pre-update-$timestamp.env" ]; then
+    cp "$BACKUP_DIR/pre-update-$timestamp.env" .env
+  fi
+  if [ -f "$BACKUP_DIR/pre-update-$timestamp.package.json" ]; then
+    cp "$BACKUP_DIR/pre-update-$timestamp.package.json" package.json
+  fi
+  echo "    restored the previous .env and compose files" >&2
+}
+
 echo "==> pulling images"
-# pull exits non-zero when a service is built locally rather than pulled, so a
-# failure here is only fatal if it leaves no image to run.
-if ! compose pull drive 2>/dev/null; then
-  echo "    (no published image to pull; will use whatever is local)"
+# Fatal, now that the image is the only source of truth: this compose file has no
+# build section for the drive, so a pull that fails means there is nothing to run.
+# Treating it as a warning (the old behaviour) pinned the tag and then recreated
+# from whatever image happened to be local, or failed the recreate and left .env
+# pointing at a version that was never deployed.
+if ! compose pull drive; then
+  echo "==> pull failed; nothing was changed" >&2
+  restore_snapshot
+  exit 1
 fi
 
 echo "==> recreating the drive"
-compose up -d --no-deps drive
+if ! compose up -d --no-deps drive; then
+  echo "==> recreate failed; rolling back" >&2
+  restore_snapshot
+  compose up -d --no-deps drive || true
+  exit 1
+fi
 
 echo "==> waiting for the health check"
 healthy=0
@@ -157,18 +187,7 @@ fi
 # A failed update has to put the previous files back, or the stack is left
 # half-upgraded and someone has to fix it by hand.
 echo "==> health check failed, rolling back" >&2
-for f in $COMPOSE_FILES; do
-  snapshot="$BACKUP_DIR/pre-update-$timestamp.$(basename "$f")"
-  if [ -f "$snapshot" ]; then
-    cp "$snapshot" "$f"
-  fi
-done
-if [ -f "$BACKUP_DIR/pre-update-$timestamp.env" ]; then
-  cp "$BACKUP_DIR/pre-update-$timestamp.env" .env
-fi
-if [ -f "$BACKUP_DIR/pre-update-$timestamp.package.json" ]; then
-  cp "$BACKUP_DIR/pre-update-$timestamp.package.json" package.json
-fi
+restore_snapshot
 compose up -d --no-deps drive || true
 echo "==> rolled back to the previous release" >&2
 if [ -f "$BACKUP_DIR/data-$timestamp.tar" ]; then
