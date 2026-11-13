@@ -111,6 +111,22 @@ Motion as a layer, not a garnish. Plus a structural pass over the whole reposito
 - **The search field painted two focus rings** — the wrapper's `box-shadow` plus
   the inner input's outline, the inner one covering the `/` hint.
 
+## [0.19.2] - 2026-11-13
+
+An update that cannot half-land.
+
+### Fixed
+
+- **A failed pull left the deployment claiming a release it never ran.**
+  `scripts/deploy/update.sh` treats a failed `compose pull` as a warning and
+  recreated from whatever image was local. On a host with no build section and
+  no cached image, the recreate then failed *after* `.env` had been pinned, so
+  the tag named a version that was never deployed: the container ran the old
+  image while `update-check` reported the new one, and the next update saw
+  nothing to do. A pull failure is now fatal and restores the snapshot taken at
+  the start of the same run, so `.env`, the compose files and `package.json`
+  never outlive a release that did not land. The recreate and health-check
+  paths share that one restore instead of carrying their own copies.
 ## [0.19.1] - 2026-11-13
 
 An update that can read a private release, and one that does not copy the whole
