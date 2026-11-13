@@ -16,6 +16,11 @@ services:
       DRIVE_DATA_DIR: /data
       DRIVE_VERSION: ${DRIVE_VERSION:-}
       DRIVE_MAX_UPLOAD_BYTES: ${DRIVE_MAX_UPLOAD_BYTES:-2147483648}
+      # Per-account ceiling in BYTES. 0 means unlimited, which is only safe when
+      # the data volume is the only thing on the disk. The client divides by 1024
+      # and labels the result GB, so 161061273600 renders as "150 GB" and the same
+      # quantity df calls 150 GiB — see docs/DEPLOYMENT.md.
+      DRIVE_QUOTA_BYTES: ${DRIVE_QUOTA_BYTES:-0}
       JWT_SECRET: ${JWT_SECRET:-}
       # Self-update. All four empty means "no updates offered", which is the
       # right answer for a local build and harmless in the account menu.
