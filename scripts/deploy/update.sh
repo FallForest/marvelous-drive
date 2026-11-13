@@ -181,8 +181,39 @@ done
 
 if [ "$healthy" -eq 1 ]; then
   echo "==> update completed: now running $NEW_VERSION"
+
+  # Image retention. Nothing used to delete old tags, so the registry gained one
+  # entry per release and nothing ever removed one. They share almost everything
+  # — a drive image reports 238 MB but only ~2.4 MB is unique per version, since
+  # the base and the whole source tree are identical — so this is not about space
+  # today. It is about not asking a future operator to work out which of forty
+  # tags is the live one, and about keeping `docker images` readable.
+  #
+  # The newest TAG_KEEP tags stay. Removing a tag only unlinks it: layers survive
+  # while any kept image still references them, so this cannot break a rollback to
+  # a tag inside the window.
+  KEEP_TAGS="${TAG_KEEP:-5}"
+  if [ "$KEEP_TAGS" -gt 0 ]; then
+    repo="${NEW_IMAGE%:*}"
+    # The tag this update replaced always stays: it is the one a rollback
+    # reaches for, and it can sit outside the newest-KEEP window after a few
+    # skipped releases.
+    previous_image="$(sed -n 's/^DRIVE_IMAGE=//p' "$BACKUP_DIR/pre-update-$timestamp.env" 2>/dev/null | head -1)"
+    keep="$(printf '%s\n' "$previous_image"
+      docker image ls --format '{{.Repository}}:{{.Tag}}' "$repo" \
+        | grep -v '<none>' | sort -V | tail -n "$KEEP_TAGS")"
+    docker image ls --format '{{.Repository}}:{{.Tag}}' "$repo" \
+      | grep -v '<none>' \
+      | while IFS= read -r tag; do
+          if ! printf '%s\n' "$keep" | grep -Fxq "$tag"; then
+            echo "    dropping old image tag $tag"
+            docker rmi "$tag" >/dev/null 2>&1 || true
+          fi
+        done
+  fi
   exit 0
 fi
+
 
 # A failed update has to put the previous files back, or the stack is left
 # half-upgraded and someone has to fix it by hand.
