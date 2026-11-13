@@ -12,12 +12,14 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 24
+      # Globs, not directories: Node 24 no longer resolves a bare directory
+      # argument to the test files inside it ("Cannot find module .../test").
       - name: Server tests
-        run: node --test apps/server/test/
+        run: node --test 'apps/server/test/*.test.js'
       - name: CLI tests
-        run: node --test packages/cli/test/
+        run: node --test 'packages/cli/test/*.test.mjs'
       - name: Web logic tests
-        run: node --test apps/web/test/
+        run: node --test 'apps/web/test/*.test.js'
       - name: Motion lint (static)
         run: node scripts/motion-lint.mjs apps/web/styles
       - name: Syntax check
