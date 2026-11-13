@@ -119,12 +119,15 @@ Rollback is: stop, restore the archive from step 1, start the previous code.
   which is far beyond a personal or small-team drive.
 - Blobs are plain files; the only limit is the filesystem. A 2 TiB data volume
   with 2 GiB uploads serves fine.
-- `DRIVE_QUOTA_BYTES` is bytes, not GB, and it is per account, not per host. A
-  deployment written as `"150000000000"` therefore reports **150 GB** in the UI
-  (decimal) while the same number is **139.7 GiB** — the two units differ by 7%,
-  which is why a figure quoted as "140 GB" and a disk quoted as "198 GB" can be
-  the same box. Set it below the data volume's free space, not equal to it: the
-  store, the SQLite snapshot and any temporary upload spool share that volume.
+- `DRIVE_QUOTA_BYTES` is bytes, per account, not per host. The client divides
+  by 1024 and labels the result GB, so `"150000000000"` renders as **140 GB** —
+  the same quantity `df` calls 139.7 GiB, and the same quantity the OCI console
+  calls 200 GB for a 214.7 GB (200 GiB) volume. Three labels, three units, one
+  number: pick bytes and read the rendered figure back instead of assuming the
+  field is GB.
+- Set the quota below the data volume's free space, not equal to it: the store,
+  the SQLite snapshot an update takes and any temporary upload spool share that
+  volume.
 - Leave it at `0` (unlimited) only where the data volume is the only thing on
   the disk. Where the drive shares a volume with the OS and other containers, an
   unset quota lets a full upload take down every service on the host.
