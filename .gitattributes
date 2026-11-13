@@ -1,0 +1,26 @@
+# Line endings: LF in the repository for everything that a Linux container,
+# a shell, or a CI runner reads. Windows checkouts may use CRLF for prose and
+# for .bat, but a .sh with CRLF fails with 'bash: $'\r': command not found'.
+* text=auto
+
+*.sh text eol=lf
+*.mjs text eol=lf
+*.js text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.json text eol=lf
+*.css text eol=lf
+*.md text eol=lf
+Dockerfile text eol=lf
+
+# Images and archives are bytes, not text.
+*.png binary
+*.jpg binary
+*.ico binary
+*.zip binary
+*.tar binary
+
+# Generated on the host of a deployment, never part of a diff.
+data/ export-ignore
+backups/ export-ignore
+.tmp/ export-ignore

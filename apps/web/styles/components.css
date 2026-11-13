@@ -1,0 +1,282 @@
+/*
+ * Component layer: buttons, fields, menus, dialogs, drawers, toasts, chips, cards.
+ * Every component is state-complete (hover / active / focus / disabled /
+ * busy) so views never need to invent their own affordances.
+ *
+ * Motion rules this layer obeys:
+ *   - press changes scale, hover changes colour (never the other way round)
+ *   - movement uses --ease-spring-*; colour and opacity use --ease-standard
+ *   - an entrance fills `backwards`; a dismissal is faster than its entrance
+ *   - no will-change on anything that stays on screen
+ */
+
+/* ── buttons ──────────────────────────────────────────────────── */
+.btn{
+  display:inline-flex;align-items:center;justify-content:center;gap:6px;
+  height:28px;padding:0 10px;
+  font-size:var(--fs-sm);font-weight:500;white-space:nowrap;
+  border:1px solid var(--border-strong);border-radius:var(--radius-sm);
+  background:var(--surface-2);color:var(--text);
+  transition:var(--transition-surface);
+  transform-origin:center;
+}
+.btn:hover{background:var(--hover);border-color:var(--border-strong)}
+.btn:active:not([disabled]){background:var(--active);transform:scale(var(--press-scale));transition-duration:var(--duration-instant)}
+.btn[disabled]{background:var(--surface-2);border-color:var(--border);color:var(--text-faint);opacity:.75}
+.btn svg{width:14px;height:14px}
+.btn-primary{background:var(--accent-solid);border-color:var(--accent-solid);color:var(--text-on-accent)}
+.btn-primary:hover{background:var(--accent-solid-hover);border-color:var(--accent-solid-hover)}
+.btn-primary[disabled]{background:#4a2d26;border-color:#4a2d26;color:rgba(255,255,255,.55);opacity:1}
+.btn-danger{background:var(--danger-solid);border-color:var(--danger-solid);color:#fff}
+.btn-danger:hover{background:var(--danger-solid-hover);border-color:var(--danger-solid-hover)}
+.btn-ghost{background:transparent;border-color:transparent;color:var(--text-secondary)}
+.btn-ghost:hover{background:var(--hover);border-color:transparent;color:var(--text)}
+.btn-link{background:none;border:0;color:var(--accent);padding:0;height:auto;font-size:var(--fs-sm)}
+.btn-link:hover{text-decoration:underline;text-underline-offset:2px;background:none}
+.btn-link:active{transform:none}
+.btn-sm{height:24px;padding:0 8px;font-size:var(--fs-xs)}
+.btn-block{width:100%}
+.btn.is-busy{color:transparent!important;position:relative;pointer-events:none}
+.btn.is-busy::after{
+  content:"";position:absolute;width:13px;height:13px;border-radius:50%;
+  border:2px solid currentColor;border-top-color:transparent;
+  color:#fff;animation:motion-spin var(--duration-loop) var(--ease-linear) infinite;
+}
+.btn-primary.is-busy::after{color:#fff}
+
+/* icon-only buttons: 26px square, 16px glyph, label always in aria */
+.icon-btn{
+  width:26px;height:26px;display:inline-flex;align-items:center;justify-content:center;
+  border:1px solid transparent;border-radius:var(--radius-sm);
+  background:transparent;color:var(--text-muted);
+  transition:var(--transition-surface);
+  transform-origin:center;
+}
+.icon-btn:hover{background:var(--hover);color:var(--text)}
+.icon-btn:active:not([disabled]){background:var(--active);transform:scale(var(--press-scale));transition-duration:var(--duration-instant)}
+.icon-btn[aria-pressed="true"]{color:var(--accent);background:var(--accent-soft)}
+.icon-btn[disabled]{color:var(--text-faint);background:transparent;opacity:.6}
+.icon-btn svg{width:15px;height:15px}
+
+/* segmented control (grid/list, sort) */
+.segmented{display:inline-flex;padding:2px;gap:2px;background:var(--surface-2);border:1px solid var(--border);border-radius:var(--radius-sm)}
+.segmented button{
+  height:22px;min-width:26px;display:inline-flex;align-items:center;justify-content:center;gap:4px;
+  padding:0 7px;border-radius:var(--radius-xs);font-size:var(--fs-xs);color:var(--text-muted);
+  transition:var(--transition-colors),transform var(--duration-fast) var(--ease-spring-snappy);
+}
+.segmented button:hover{color:var(--text);background:var(--hover)}
+.segmented button:active{transform:scale(var(--press-scale-sm));transition-duration:var(--duration-instant)}
+.segmented button[aria-pressed="true"]{background:var(--surface-3);color:var(--text);box-shadow:inset 0 0 0 1px var(--border-strong)}
+.segmented svg{width:14px;height:14px}
+
+/* ── fields ───────────────────────────────────────────────────── */
+.field{display:flex;flex-direction:column;gap:6px}
+.field > label,.field-label{font-size:var(--fs-xs);font-weight:600;color:var(--text-secondary);letter-spacing:.02em}
+.field-hint{font-size:var(--fs-xs);color:var(--text-muted);line-height:1.5}
+.input,.select,.textarea{
+  width:100%;height:30px;padding:0 9px;
+  background:var(--surface-2);color:var(--text);
+  border:1px solid var(--border-strong);border-radius:var(--radius-sm);
+  font-size:var(--fs-sm);
+  transition:var(--transition-colors),box-shadow var(--duration-fast) var(--ease-standard);
+}
+.textarea{height:auto;min-height:64px;padding:8px 9px;resize:vertical;line-height:1.55}
+.input::placeholder,.textarea::placeholder{color:var(--text-faint)}
+.input:hover,.select:hover,.textarea:hover{border-color:var(--border-strong)}
+.input:focus,.select:focus,.textarea:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft);background:var(--surface)}
+.input[aria-invalid="true"]{border-color:var(--danger);box-shadow:0 0 0 3px var(--danger-soft)}
+.input[disabled],.select[disabled]{color:var(--text-faint);background:var(--surface);cursor:not-allowed}
+.select{
+  appearance:none;padding-right:26px;cursor:pointer;
+  background-image:linear-gradient(45deg,transparent 50%,var(--text-muted) 50%),linear-gradient(135deg,var(--text-muted) 50%,transparent 50%);
+  background-position:calc(100% - 13px) 13px,calc(100% - 9px) 13px;
+  background-size:4px 4px,4px 4px;background-repeat:no-repeat;
+}
+.checkline{display:flex;align-items:center;gap:8px;font-size:var(--fs-sm);color:var(--text-secondary);cursor:pointer}
+.checkline input{width:14px;height:14px;accent-color:var(--accent-solid);cursor:pointer;margin:0}
+.inline-fields{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.field-error{display:flex;align-items:flex-start;gap:7px;font-size:var(--fs-sm);line-height:1.5;color:var(--danger);background:var(--danger-soft);border:1px solid rgba(226,105,92,.28);border-radius:var(--radius-sm);padding:8px 10px}
+.field-error svg{width:14px;height:14px;margin-top:1px}
+
+/* search field with leading icon.
+   The wrapper owns the focus ring (it has to: the ring has to wrap the kbd
+   hint too), so the inner input's own outline is suppressed. Without this
+   suppression the box paints two nested rectangles and the inner one covers
+   the shortcut hint at the end of the field. */
+.search-field{position:relative;display:flex;align-items:center;border-radius:var(--radius-sm);transition:box-shadow var(--duration-fast) var(--ease-standard)}
+.search-field:focus-within{box-shadow:0 0 0 3px var(--accent-soft)}
+.search-field input:focus-visible,.search-field input:focus{outline:none}
+.search-field svg{position:absolute;left:8px;width:14px;height:14px;color:var(--text-muted);pointer-events:none;transition:color var(--duration-fast) var(--ease-standard)}
+.search-field:focus-within svg{color:var(--accent)}
+.search-field .input{padding-left:28px;padding-right:26px;height:28px}
+.search-field .input::-webkit-search-cancel-button{margin-right:14px}
+.search-field kbd{
+  position:absolute;right:7px;font:600 10px/1 var(--font-ui);color:var(--text-faint);
+  border:1px solid var(--border-strong);border-radius:3px;padding:2px 4px;background:var(--surface-3);
+  transition:opacity var(--duration-fast) var(--ease-standard);
+}
+.search-field .input:focus ~ kbd{opacity:0}
+
+/* ── overlays: scrim, dialog, drawer ──────────────────────────── */
+.scrim{
+  position:fixed;inset:0;z-index:var(--z-modal);
+  display:grid;place-items:center;padding:24px;
+  background:rgba(6,7,9,.62);
+  -webkit-backdrop-filter:blur(4px);backdrop-filter:blur(4px);
+  animation:motion-fade-in var(--duration-fast) var(--ease-standard) backwards;
+}
+/* No backdrop-filter: an opaque scrim. Blurring costs a full-screen layer and
+   reads the same at this opacity. */
+@supports not ((backdrop-filter:blur(1px)) or (-webkit-backdrop-filter:blur(1px))){
+  .scrim{background:rgba(6,7,9,.74)}
+}
+.dialog{
+  width:min(100%,440px);
+  max-height:calc(100dvh - 48px);
+  display:flex;flex-direction:column;
+  background:var(--surface);
+  border:1px solid var(--border-strong);
+  border-radius:var(--radius-lg);
+  box-shadow:var(--shadow-modal);
+  /* scales up from .97 with a spring: a sheet presenting, not a fade */
+  animation:motion-sheet-in var(--duration-base) var(--ease-spring-snappy) backwards;
+  transform-origin:center 60%;
+}
+.dialog.is-closing{animation:motion-sheet-out var(--duration-fast) var(--ease-accelerate) both}
+.scrim.is-closing{animation:motion-fade-out var(--duration-fast) var(--ease-accelerate) both;pointer-events:none}
+.dialog-wide{width:min(100%,560px)}
+/* head is a two-row grid: title + close on row 1, description spanning row 2 */
+.dialog-head{
+  display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:start;gap:2px 10px;
+  padding:14px 16px 0;
+}
+.dialog-head h2{font-size:var(--fs-base);font-weight:600;line-height:1.45;line-clamp:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding-top:2px}
+.dialog-head p{grid-column:1/-1;margin:0;font-size:var(--fs-sm);color:var(--text-muted);line-height:1.55;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.dialog-head .icon-btn{grid-column:2;grid-row:1;margin-top:-2px}
+.dialog-body{padding:14px 16px;overflow:auto;min-height:0;display:flex;flex-direction:column;gap:12px}
+.dialog-foot{display:flex;align-items:center;gap:8px;padding:12px 16px;border-top:1px solid var(--border-soft);background:var(--surface-2);border-radius:0 0 var(--radius-lg) var(--radius-lg)}
+.dialog-foot .push{margin-left:auto}
+.dialog-note{font-size:var(--fs-xs);color:var(--text-muted);line-height:1.5}
+
+/* drawer scrim: no padding, and the panel is pinned to the inline end.
+   (Set in CSS, not inline styles — grid uses justify-items, not justify-content.) */
+.scrim-drawer{display:grid;grid-template-columns:1fr auto;padding:0;place-items:stretch;justify-items:stretch}
+
+.drawer{
+  position:fixed;inset:0 0 0 auto;z-index:var(--z-panel);
+  width:var(--drawer-w);
+  display:flex;flex-direction:column;
+  background:var(--surface);
+  border-left:1px solid var(--border-strong);
+  box-shadow:var(--shadow-modal);
+  animation:motion-drawer-in var(--duration-base) var(--ease-decelerate) backwards;
+}
+.drawer.is-closing{animation:motion-drawer-out var(--duration-fast) var(--ease-accelerate) both;pointer-events:none}
+.drawer-head{display:flex;align-items:center;gap:8px;height:44px;flex:0 0 auto;padding:0 8px 0 14px;border-bottom:1px solid var(--border)}
+.drawer-head h2{
+  display:flex;align-items:baseline;gap:7px;min-width:0;
+  font-size:var(--fs-base);font-weight:600;overflow:hidden;
+}
+.drawer-head h2 .title-text{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.drawer-head .sub{
+  flex:0 1 auto;min-width:0;font-size:var(--fs-xs);font-weight:400;color:var(--text-muted);
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+}
+.drawer-body{flex:1;min-height:0;overflow:auto;padding:14px}
+.drawer-foot{display:flex;align-items:center;gap:8px;padding:10px 14px;border-top:1px solid var(--border);background:var(--surface-2)}
+
+/* ── menu ─────────────────────────────────────────────────────── */
+.menu{
+  position:fixed;z-index:var(--z-menu);
+  min-width:186px;max-height:min(70vh,420px);overflow:auto;
+  padding:4px;display:flex;flex-direction:column;gap:1px;
+  background:var(--surface-2);
+  border:1px solid var(--border-strong);
+  border-radius:var(--radius-md);
+  box-shadow:var(--shadow-pop);
+  /* rises from the anchor it is attached to, with the spring curve */
+  animation:motion-sink-in var(--duration-base) var(--ease-spring-snappy) backwards;
+  /* the origin follows the corner the menu grew out of, so the scale reads as
+     coming from the anchor rather than from the middle of the panel */
+  transform-origin:top right;
+}
+.menu.is-start{transform-origin:top left}
+/* A menu that had to open upward arrives from the bottom edge instead —
+   opening downward from above the pointer reads as detached. */
+.menu.is-up{animation-name:motion-rise-in;transform-origin:bottom right}
+.menu.is-up.is-start{transform-origin:bottom left}
+.menu-item{
+  display:flex;align-items:center;gap:9px;width:100%;height:30px;padding:0 8px;
+  border-radius:var(--radius-xs);font-size:var(--fs-sm);color:var(--text-secondary);white-space:nowrap;
+  transition:var(--transition-colors);
+}
+.menu-item svg{width:15px;height:15px;color:var(--text-muted);transition:color var(--duration-fast) var(--ease-standard)}
+.menu-item:hover,.menu-item:focus-visible{background:var(--hover);color:var(--text);outline:none}
+.menu-item:active:not([disabled]){background:var(--active);transform:scale(.985);transition-duration:var(--duration-instant)}
+.menu-item:hover svg{color:var(--text)}
+.menu-item kbd{margin-left:auto;font:600 10px/1 var(--font-ui);color:var(--text-faint)}
+.menu-item.is-danger{color:var(--danger)}
+.menu-item.is-danger svg{color:var(--danger)}
+.menu-item.is-danger:hover{background:var(--danger-soft);color:var(--danger)}
+.menu-sep{height:1px;margin:4px 2px;background:var(--border)}
+.menu-label{padding:6px 8px 3px;font-size:10px;letter-spacing:.07em;text-transform:uppercase;color:var(--text-faint);font-weight:600}
+
+/* ── toasts (aria-live polite stack, bottom right) ────────────── */
+.toast-stack{
+  position:fixed;right:16px;bottom:34px;z-index:var(--z-toast);
+  display:flex;flex-direction:column;gap:8px;align-items:flex-end;
+  pointer-events:none;max-width:min(380px,calc(100vw - 32px));
+}
+.toast{
+  pointer-events:auto;
+  display:flex;align-items:flex-start;gap:9px;
+  min-width:240px;max-width:100%;
+  padding:9px 10px 9px 11px;
+  background:var(--surface-3);
+  border:1px solid var(--border-strong);
+  border-left:2px solid var(--accent);
+  border-radius:var(--radius-sm);
+  box-shadow:var(--shadow-toast);
+  font-size:var(--fs-sm);color:var(--text);line-height:1.5;
+  animation:motion-toast-in var(--duration-base) var(--ease-spring-snappy) backwards;
+}
+.toast.is-error{border-left-color:var(--danger)}
+.toast.is-success{border-left-color:var(--success)}
+.toast.is-warning{border-left-color:var(--warning)}
+.toast svg{width:15px;height:15px;margin-top:1px;color:var(--accent)}
+.toast.is-error svg{color:var(--danger)}
+.toast.is-success svg{color:var(--success)}
+.toast.is-warning svg{color:var(--warning)}
+.toast-text{flex:1;min-width:0;word-break:break-word}
+.toast-text b{display:block;font-weight:600;font-size:var(--fs-sm)}
+.toast-text small{display:block;color:var(--text-muted);font-size:var(--fs-xs);margin-top:2px}
+.toast .icon-btn{width:20px;height:20px;margin:-2px -3px 0 0}
+/* Exit is 140ms against a 220ms entrance: a notice that takes as long to leave
+   as to arrive feels stuck, and the user is already reading the next one. */
+.toast.is-leaving{animation:motion-toast-out var(--duration-fast) var(--ease-accelerate) both}
+
+/* ── misc primitives ──────────────────────────────────────────── */
+.badge{
+  display:inline-flex;align-items:center;gap:4px;height:18px;padding:0 6px;
+  border-radius:var(--radius-pill);font-size:10.5px;font-weight:600;letter-spacing:.01em;
+  background:var(--surface-3);color:var(--text-secondary);border:1px solid var(--border);
+}
+.badge-accent{background:var(--accent-soft);color:var(--accent-strong);border-color:var(--accent-line)}
+.badge-danger{background:var(--danger-soft);color:var(--danger);border-color:rgba(226,105,92,.3)}
+.card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-md);transition:var(--transition-surface)}
+.kbd{font:600 10px/1 var(--font-ui);color:var(--text-muted);border:1px solid var(--border-strong);border-radius:3px;padding:2px 4px;background:var(--surface-3)}
+.spinner{width:14px;height:14px;border-radius:50%;border:2px solid var(--border-strong);border-top-color:var(--accent);animation:motion-spin var(--duration-loop) var(--ease-linear) infinite}
+.empty{
+  display:flex;flex-direction:column;align-items:center;justify-content:center;gap:8px;
+  padding:48px 24px;text-align:center;color:var(--text-muted);
+}
+.empty svg{width:30px;height:30px;color:var(--text-faint)}
+.empty b{font-size:var(--fs-sm);font-weight:600;color:var(--text-secondary)}
+.empty p{margin:0;font-size:var(--fs-sm);max-width:340px;line-height:1.6}
+.skeleton{position:relative;overflow:hidden;background:var(--surface-2);border-radius:var(--radius-xs)}
+.skeleton::after{
+  content:"";position:absolute;inset:0;
+  background:linear-gradient(90deg,transparent,rgba(255,255,255,.045),transparent);
+  transform:translate3d(-100%,0,0);animation:motion-shimmer var(--duration-shimmer) var(--ease-linear) infinite;
+}

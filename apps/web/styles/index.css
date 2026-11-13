@@ -1,0 +1,19 @@
+/*
+ * Style entry point — cascade order matters, later layers override earlier.
+ *
+ *   tokens  design tokens (colour, type, metrics, layering, motion)
+ *   motion  keyframes + utilities + the motion contract; values only from tokens
+ *   base    reset, page frame, shell geometry, auth screens
+ *   components  buttons, fields, dialogs, drawers, menus, toasts
+ *   app     drive surfaces: sidebar, list, preview, uploads, share page
+ *
+ * Each layer may only reference the ones above it. A component that needs a
+ * new duration, curve or colour adds a token in tokens.css first — that is what
+ * keeps "retune the whole app 20% snappier" a one-edit change.
+ */
+@import './tokens.css';
+@import './motion.css';
+@import './base.css';
+@import './components.css';
+@import './app.css';
+@import './updates.css';

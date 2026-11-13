@@ -1,0 +1,33 @@
+{
+  "name": "@marvelous-drive/cli",
+  "version": "0.3.1",
+  "private": true,
+  "description": "Command line client for Marvelous Drive",
+  "type": "module",
+  "license": "UNLICENSED",
+  "engines": {
+    "node": ">=22"
+  },
+  "bin": {
+    "mdrive": "./bin/mdrive.mjs"
+  },
+  "main": "./src/cli.js",
+  "exports": {
+    ".": "./src/cli.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "bin",
+    "src",
+    "README.md"
+  ],
+  "scripts": {
+    "test": "node --test test/"
+  },
+  "keywords": [
+    "marvelous-drive",
+    "cli",
+    "files"
+  ],
+  "dependencies": {}
+}

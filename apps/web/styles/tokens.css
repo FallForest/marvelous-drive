@@ -1,0 +1,161 @@
+/*
+ * Design tokens — the only place raw colour, type and metric values live.
+ *
+ * The palette is a neutral surface set with one terracotta accent and quiet
+ * borders, lifted for a near-black dark interface: the accent is lightened for
+ * legible text on dark, while solid accent fills use a darker step so white
+ * labels stay above 4.5:1.
+ */
+:root{
+  color-scheme:dark;
+
+  /* ── typography ─────────────────────────────────────────────── */
+  --font-ui:-apple-system,BlinkMacSystemFont,'Segoe UI','Noto Sans SC','PingFang SC','Hiragino Sans GB','Microsoft YaHei',sans-serif;
+  --font-mono:ui-monospace,SFMono-Regular,'SF Mono',Menlo,Consolas,'Liberation Mono',monospace;
+  --fs-base:13px;
+  --fs-sm:12px;
+  --fs-xs:11px;
+  --fs-lg:15px;
+  --fs-xl:20px;
+  --lh-base:1.5;
+
+  /* ── surfaces: three neutral steps, no gradients ────────────── */
+  --bg:#0c0d0f;
+  --surface:#131519;
+  --surface-2:#17191e;
+  --surface-3:#1b1e24;
+  --hover:#1e2229;
+  --active:#252a33;
+
+  /* ── lines ──────────────────────────────────────────────────── */
+  --border:#23262d;
+  --border-soft:#1c1f25;
+  --border-strong:#363c47;
+
+  /* ── text ───────────────────────────────────────────────────── */
+  --text:#e8e9ec;
+  --text-secondary:#a6acb6;
+  --text-muted:#9aa1ac;
+  --text-faint:#8a919c;
+  --text-on-accent:#ffffff;
+
+  /* ── accent (terracotta #c0533f, retuned for dark) ──────────── */
+  --accent:#e2684c;
+  --accent-strong:#f28165;
+  --accent-solid:#b8472e;
+  --accent-solid-hover:#b94b31;
+  --accent-soft:rgba(226,104,76,.15);
+  --accent-line:rgba(226,104,76,.34);
+
+  /* ── status ─────────────────────────────────────────────────── */
+  --danger:#e2695c;
+  --danger-solid:#a83a2f;
+  --danger-solid-hover:#b8463a;
+  --danger-soft:rgba(226,105,92,.14);
+  --success:#5fae83;
+  --success-soft:rgba(95,174,131,.14);
+  --warning:#c9a44a;
+  --warning-soft:rgba(201,164,74,.14);
+
+  /* ── radii ──────────────────────────────────────────────────── */
+  --radius-xs:4px;
+  --radius-sm:6px;
+  --radius-md:8px;
+  --radius-lg:12px;
+
+  /* ── elevation ──────────────────────────────────────────────── */
+  --shadow-pop:0 10px 28px rgba(0,0,0,.46),0 1px 2px rgba(0,0,0,.4);
+  --shadow-modal:0 28px 70px rgba(0,0,0,.62),0 2px 8px rgba(0,0,0,.5);
+  --shadow-toast:0 12px 30px rgba(0,0,0,.5);
+
+  /* ── metrics ────────────────────────────────────────────────── */
+  --sidebar-w:248px;
+  --topbar-h:50px;
+  --row-h:32px;
+  --statusbar-h:26px;
+  --drawer-w:min(560px,94vw);
+
+  /* ── layering ───────────────────────────────────────────────── */
+  --z-sidebar:10;
+  --z-sticky:20;
+  --z-panel:40;
+  --z-menu:60;
+  --z-modal:70;
+  --z-toast:80;
+
+  /* ── motion: duration, named by intent ──────────────────────────
+       instant  a state flip that must not travel (press, checkbox paint)
+       fast     hover, colour, press release
+       base     the default for a surface that arrives
+       slow     large surfaces (drawer, page change)
+       lazy     the longest travel — reserved
+       loop     one spinner revolution
+       shimmer  the skeleton sweep                                  */
+  --duration-instant:80ms;
+  --duration-fast:140ms;
+  --duration-base:220ms;
+  --duration-slow:320ms;
+  --duration-lazy:420ms;
+  --duration-loop:700ms;
+  --duration-shimmer:1300ms;
+
+
+  /* ── motion: easing ─────────────────────────────────────────────
+     The two spring curves are sampled from a damped harmonic oscillator
+     (response .28s / damping .86, and .52s / .66 for the playful one),
+     not hand-tuned bezier — that is why the overshoot reads like UIKit.
+
+     Each spring is declared twice on purpose: the cubic-bezier is the
+     fallback for engines without linear() support, and the linear()
+     right after overrides it where supported. Without the fallback an
+     unsupported linear() is dropped and the animation runs with no
+     easing at all, which looks worse than a slightly wrong curve.     */
+  --ease-standard:cubic-bezier(.32,.72,0,1);
+  --ease-decelerate:cubic-bezier(.16,1,.3,1);
+  --ease-accelerate:cubic-bezier(.4,0,1,1);
+  --ease-linear:linear;
+  --ease-spring-snappy:cubic-bezier(.22,1.16,.36,1);
+  --ease-spring-snappy:linear(0, 0.1846 5%, 0.4831 10%, 0.7219 15%, 0.8717 20%, 0.9517 25%, 0.9883 30%, 1.0018 35%, 1.005 40%, 1.0043 45%, 1.0028 50%, 1.0016 55%, 1.0007 60%, 1.0003 65%, 1.0001 70%, 1 75%, 1 80%, 1 85%, 1 90%, 1 95%, 1);
+  --ease-spring-bouncy:cubic-bezier(.3,1.42,.4,1);
+  --ease-spring-bouncy:linear(0, 0.2004 5%, 0.5492 10%, 0.833 15%, 0.9953 20%, 1.0569 25%, 1.0601 30%, 1.0407 35%, 1.0195 40%, 1.005 45%, 0.9979 50%, 0.996 55%, 0.9967 60%, 0.9981 65%, 0.9992 70%, 0.9999 75%, 1.0002 80%, 1.0002 85%, 1.0002 90%, 1.0001 95%, 1);
+
+  /* ── motion: composed transitions ───────────────────────────────
+     Colour changes ride a plain curve; movement rides a spring.
+     Overshoot on a colour looks like a rendering glitch.           */
+  --transition-colors:background-color var(--duration-fast) var(--ease-standard),border-color var(--duration-fast) var(--ease-standard),color var(--duration-fast) var(--ease-standard);
+  --transition-surface:background-color var(--duration-fast) var(--ease-standard),border-color var(--duration-fast) var(--ease-standard),box-shadow var(--duration-base) var(--ease-standard),transform var(--duration-fast) var(--ease-spring-snappy);
+
+  /* press: the single highest-value value in the system. A pointer press
+     shrinks the control by this much for --duration-instant. */
+  --press-scale:.97;
+  --press-scale-sm:.94;
+
+  /* stagger: shared with lib/motion.js (STAGGER = { step: 28, cap: 10 }).
+     The cap exists because 20 rows at 28ms is over half a second of
+     waiting before the list finishes appearing. */
+  --stagger-step:28ms;
+  --stagger-cap:10;
+
+  /* radii for the two shapes the shell was missing */
+  --radius-xl:16px;
+  --radius-pill:999px;
+
+  /* ── focus ──────────────────────────────────────────────────── */
+  --focus-ring:var(--accent);
+}
+
+/*
+ * Reduced motion is a contract, not a component's problem. Collapsing the
+ * durations at the source means every transition in the app goes to ~0 without
+ * a single component opting in, and the keyframe utilities in motion.css still
+ * cross-fade so the user sees that something changed.
+ */
+@media (prefers-reduced-motion:reduce){
+  :root{
+    --duration-instant:1ms;
+    --duration-fast:1ms;
+    --duration-base:1ms;
+    --duration-slow:1ms;
+    --duration-lazy:1ms;
+  }
+}

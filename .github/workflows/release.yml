@@ -1,0 +1,89 @@
+name: Release
+
+# Publishes one GitHub release per tag:
+#   - the drive image, multi-arch, to GHCR;
+#   - release/latest.json as an asset, which is the manifest the in-app update
+#     checker and the update agent read.
+#
+# The manifest is committed in release/latest.json and rewritten here, so the
+# repository always shows what the running deployment should be and the release
+# asset always matches the image that shipped.
+
+on:
+  push:
+    tags: ['v*.*.*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing tag to publish, e.g. v0.19.0
+        required: true
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve tag
+        id: tag
+        run: |
+          tag="${{ inputs.tag }}"
+          if [ -z "$tag" ]; then tag="${GITHUB_REF_NAME}"; fi
+          case "$tag" in
+            v*) ;;
+            *) echo "tag must start with v" >&2; exit 1 ;;
+          esac
+          echo "name=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
+          echo "owner=$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          # amd64 covers the usual VPS, arm64 covers Ampere/Graviton and a Pi.
+          # The Dockerfile has no build step, so emulation costs a layer copy.
+          platforms: linux/amd64,linux/arm64
+          push: true
+          provenance: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          tags: |
+            ghcr.io/${{ steps.tag.outputs.owner }}/marvelous-drive:${{ steps.tag.outputs.version }}
+            ghcr.io/${{ steps.tag.outputs.owner }}/marvelous-drive:latest
+
+      - name: Write the release manifest
+        run: |
+          version='${{ steps.tag.outputs.version }}'
+          owner='${{ steps.tag.outputs.owner }}'
+          repo='${{ github.repository }}'
+          mkdir -p release
+          jq -n --arg version "$version" --arg owner "$owner" --arg repo "$repo" '{
+            version: $version,
+            image: ("ghcr.io/" + $owner + "/marvelous-drive:" + $version),
+            releaseUrl: ("https://github.com/" + $repo + "/releases/tag/v" + $version),
+            notesUrl: ("https://github.com/" + $repo + "/releases")
+          }' > release/latest.json
+          cat release/latest.json
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.name }}
+          generate_release_notes: true
+          files: release/latest.json

@@ -1,0 +1,479 @@
+/*
+ * App layer — drive-specific surfaces: sidebar tree, breadcrumb toolbar,
+ * file list / grid, selection, preview drawer, upload queue, public share page.
+ * Metrics stay on the 32px row grid used by the shell.
+ */
+
+/* ═══ sidebar ══════════════════════════════════════════════════ */
+.brand{display:flex;align-items:center;gap:9px;height:var(--topbar-h);flex:0 0 var(--topbar-h);padding:0 12px;border-bottom:1px solid var(--border-soft)}
+.brand-mark{
+  width:24px;height:24px;border-radius:7px;display:grid;place-items:center;
+  background:var(--accent-solid);color:#fff;flex:0 0 24px;
+}
+.brand-mark svg{width:14px;height:14px}
+.brand-text{display:flex;flex-direction:column;min-width:0;line-height:1.2}
+.brand-text b{font-size:13px;font-weight:600;letter-spacing:-.01em}
+.brand-text small{font-size:10px;color:var(--text-faint);letter-spacing:.02em}
+
+.side-scroll{flex:1;min-height:0;display:flex;flex-direction:column;padding:10px 8px;overflow-y:auto;overflow-x:hidden}
+.side-search{padding:0 2px 6px}
+.side-section{margin-top:12px;display:flex;flex-direction:column;gap:1px}
+.side-label{
+  display:flex;align-items:center;justify-content:space-between;gap:6px;
+  padding:0 8px;height:22px;font-size:10px;font-weight:600;letter-spacing:.07em;
+  text-transform:uppercase;color:var(--text-faint);
+}
+.side-label button{color:var(--text-faint);width:18px;height:18px;display:grid;place-items:center;border-radius:3px}
+.side-label button:hover{color:var(--text);background:var(--hover)}
+.side-label svg{width:12px;height:12px}
+
+.side-row{
+  display:flex;align-items:center;gap:8px;width:100%;height:28px;padding:0 8px;
+  border-radius:var(--radius-sm);font-size:var(--fs-sm);color:var(--text-secondary);
+  transition:var(--transition-surface);
+}
+.side-row svg{width:15px;height:15px;color:var(--text-muted);transition:color var(--duration-fast) var(--ease-standard)}
+.side-row:hover{background:var(--hover);color:var(--text)}
+.side-row:active{background:var(--active);transform:scale(.99);transition-duration:var(--duration-instant)}
+.side-row:hover svg{color:var(--text-secondary)}
+.side-row[aria-current="page"]{background:var(--accent-soft);color:var(--accent-strong);font-weight:500}
+.side-row[aria-current="page"] svg{color:var(--accent)}
+.side-row .count{margin-left:auto;font-size:10.5px;color:var(--text-faint);font-variant-numeric:tabular-nums}
+.side-row .caret{
+  width:12px;height:12px;margin-left:-2px;
+  /* the chevron is the only thing telling you a folder opened, so it gets the
+     spring curve — a linear 140ms rotation reads as a glitch */
+  transition:transform var(--duration-base) var(--ease-spring-snappy);
+  color:var(--text-faint);flex:0 0 12px;
+}
+.side-row[aria-expanded="true"] .caret{transform:rotate(90deg)}
+.side-row.folder{color:var(--text-secondary)}
+.tree{display:flex;flex-direction:column;gap:1px;margin:1px 0 2px}
+.tree[hidden]{display:none}
+/* children of an expanded folder slide in rather than appearing all at once.
+   Only the directly-toggled group animates: a class on the group, not on every
+   .tree, or the whole sidebar replays on each render. */
+.tree.is-opening{animation:motion-disclose var(--duration-fast) var(--ease-standard) backwards}
+.tree .side-row{padding-left:8px}
+.tree-empty{padding:3px 8px 5px 30px;font-size:var(--fs-xs);color:var(--text-faint)}
+
+.side-foot{flex:0 0 auto;border-top:1px solid var(--border-soft);padding:6px 8px;display:flex;flex-direction:column;gap:4px}
+.user-row{display:flex;align-items:center;gap:8px;width:100%;padding:5px 6px;border-radius:var(--radius-sm);transition:var(--transition-surface)}
+.user-row:hover{background:var(--hover)}
+.user-row:active{transform:scale(.99);transition-duration:var(--duration-instant)}
+.user-row svg{width:13px;height:13px;color:var(--text-faint)}
+.avatar{
+  width:24px;height:24px;flex:0 0 24px;border-radius:50%;display:grid;place-items:center;
+  background:var(--surface-3);border:1px solid var(--border-strong);
+  font-size:10.5px;font-weight:600;color:var(--text-secondary);text-transform:uppercase;
+}
+.user-copy{flex:1;min-width:0;display:flex;flex-direction:column;line-height:1.25}
+.user-copy b{font-size:var(--fs-sm);font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.user-copy small{font-size:10px;color:var(--text-faint);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.storage{display:flex;flex-direction:column;gap:4px;padding:2px 6px 4px}
+.storage-line{display:flex;justify-content:space-between;font-size:10.5px;color:var(--text-faint);font-variant-numeric:tabular-nums}
+.storage-bar{height:3px;border-radius:2px;background:var(--surface-3);overflow:hidden}
+.storage-bar i{display:block;height:100%;width:100%;background:var(--accent);border-radius:2px;transition:transform var(--duration-slow) var(--ease-decelerate);transform-origin:left center}
+
+/* ═══ topbar: breadcrumb + actions ═════════════════════════════ */
+.crumbs{display:flex;align-items:center;gap:2px;min-width:0;flex:1;overflow:hidden}
+.crumb{
+  display:inline-flex;align-items:center;height:24px;padding:0 6px;border-radius:var(--radius-xs);
+  font-size:var(--fs-sm);color:var(--text-muted);white-space:nowrap;max-width:220px;
+  overflow:hidden;text-overflow:ellipsis;
+  transition:var(--transition-colors),transform var(--duration-fast) var(--ease-spring-snappy);
+}
+.crumb:hover{background:var(--hover);color:var(--text)}
+button.crumb:active{transform:scale(var(--press-scale));transition-duration:var(--duration-instant)}
+.crumb:last-child{color:var(--text);font-weight:500}
+.crumb-sep{color:var(--text-faint);display:flex;flex:0 0 auto}
+.crumb-sep svg{width:13px;height:13px}
+.top-actions{display:flex;align-items:center;gap:6px;flex:0 0 auto}
+.nav-toggle{display:none}
+
+/* ═══ toolbar ══════════════════════════════════════════════════ */
+.toolbar{
+  display:flex;align-items:center;gap:8px;flex-wrap:wrap;
+  padding:8px 16px;border-bottom:1px solid var(--border-soft);
+  background:var(--bg);position:sticky;top:0;z-index:var(--z-sticky);
+}
+.toolbar .seg-label{font-size:var(--fs-xs);color:var(--text-faint);margin-right:-2px}
+.toolbar .push{margin-left:auto}
+.sel-bar{
+  display:flex;align-items:center;gap:8px;flex-wrap:wrap;
+  padding:7px 16px;border-bottom:1px solid var(--accent-line);
+  background:var(--accent-soft);font-size:var(--fs-sm);color:var(--text);
+}
+.sel-bar b{font-weight:600}
+.sel-bar .icon-btn{margin-left:2px}
+
+/* ═══ file list ════════════════════════════════════════════════ */
+.list{padding:0 8px 24px}
+.list-head,.frow{
+  display:grid;
+  grid-template-columns:minmax(0,1fr) 92px 132px 26px 28px;
+  align-items:center;gap:10px;
+}
+.list-head{
+  height:26px;padding:0 8px;margin-top:6px;
+  font-size:10px;font-weight:600;letter-spacing:.07em;text-transform:uppercase;color:var(--text-faint);
+  position:sticky;top:0;z-index:2;background:var(--bg);
+}
+.list-head button{
+  display:flex;align-items:center;gap:4px;height:20px;border-radius:3px;
+  font-size:10px;font-weight:600;letter-spacing:.07em;text-transform:uppercase;color:inherit;
+}
+.list-head button:hover{color:var(--text-secondary)}
+.list-head button[aria-sort] svg{width:11px;height:11px;color:var(--accent)}
+.list-head .num{justify-self:end}
+.list-body{display:flex;flex-direction:column;gap:1px}
+/* Rows arrive with the page, not on every render: the stagger is scoped to the
+   root that is currently entering (.view.motion-enter), and app.js removes that
+   class when the entrance finishes. Without the scope a star toggle would replay
+   the whole list. --i is written by lib/motion.js announceEntrance. */
+.motion-enter .list-body > .frow,.motion-enter .grid > .gcard{
+  animation:motion-enter var(--duration-base) var(--ease-decelerate) backwards;
+  animation-delay:calc(var(--i,0) * var(--stagger-step));
+}
+
+.frow{
+  height:var(--row-h);padding:0 8px;border-radius:var(--radius-sm);
+  border:1px solid transparent;color:var(--text-secondary);
+  transition:var(--transition-surface);
+  position:relative;cursor:pointer;
+}
+.frow:hover{background:var(--hover)}
+/* A full-width row cannot shrink like a button — at 1400px wide, .97 is 40px of
+   travel and the list looks like it is jumping. So the row acknowledges a press
+   the way a table row does: the surface darkens, with a barely-there scale on
+   top of it. */
+.frow:active{background:var(--active);transform:scale(.998);transition-duration:var(--duration-instant)}
+.frow[data-selected="true"]{background:var(--accent-soft);border-color:var(--accent-line);color:var(--text)}
+.frow[data-selected="true"] .name{color:var(--text)}
+.frow.is-dragover{background:var(--accent-soft);border-color:var(--accent)}
+/* drop target: the same highlight on rows, sidebar folders and breadcrumbs, from
+   one class (lib/drag-move.js marks it, this file decides what it looks like) */
+.is-drop-target{background:var(--accent-soft);box-shadow:inset 0 0 0 1px var(--accent);color:var(--accent-strong)}
+.frow:focus-visible{outline:2px solid var(--focus-ring);outline-offset:-2px}
+.frow-main{display:flex;align-items:center;gap:9px;min-width:0}
+.frow .kind{width:16px;height:16px;flex:0 0 16px;color:var(--text-muted)}
+.frow .kind.is-folder{color:#b08a4f}
+/* A thumbnail replaces the 16px icon inside the same grid cell, so the row keeps
+   its 32px height and the name column never shifts between pages. */
+.frow .kind.has-thumb{width:32px;height:32px;flex:0 0 32px;display:grid;place-items:center}
+.frow .thumb-inline{
+  width:32px;height:32px;display:block;border-radius:4px;object-fit:cover;
+  background:var(--surface-3);border:1px solid var(--border);
+}
+.frow[data-selected="true"] .kind{color:var(--accent)}
+.frow .name{font-size:var(--fs-sm);color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.frow .name-input{
+  height:22px;width:100%;min-width:60px;padding:0 6px;font-size:var(--fs-sm);
+  background:var(--surface-2);border:1px solid var(--accent);border-radius:var(--radius-xs);
+  color:var(--text);outline:none;box-shadow:0 0 0 2px var(--accent-soft);
+}
+.frow .meta{font-size:var(--fs-xs);color:var(--text-muted);font-variant-numeric:tabular-nums;white-space:nowrap}
+.frow .meta.num{justify-self:end;min-width:52px;text-align:right}
+.frow .star{justify-self:center;width:22px;height:22px;color:var(--text-faint);opacity:0;transition:opacity var(--duration-fast) var(--ease-standard),color var(--duration-fast) var(--ease-standard)}
+.frow .star[aria-pressed="true"],.frow .star.is-on{color:var(--warning);opacity:1}
+.frow .star svg{width:13px;height:13px}
+.frow:hover .star,.frow[data-selected="true"] .star,.frow .star:focus-visible{opacity:1}
+.frow .more{width:22px;height:22px;justify-self:end;color:var(--text-faint);opacity:0;transition:opacity var(--duration-fast) var(--ease-standard),color var(--duration-fast) var(--ease-standard)}
+.frow:hover .more,.frow[data-selected="true"] .more,.frow .more[aria-expanded="true"]{opacity:1}
+.frow .more svg{width:14px;height:14px}
+.frow .badge{margin-left:2px;height:16px;font-size:10px}
+.frow-skel{height:var(--row-h);margin:1px 8px;border-radius:var(--radius-sm)}
+.frow-skel .skeleton{height:100%}
+
+/* grid view */
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(148px,1fr));gap:10px;padding:12px 16px 32px}
+.gcard{
+  display:flex;flex-direction:column;gap:8px;padding:9px;
+  background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-md);
+  transition:var(--transition-surface);
+}
+.gcard:hover{border-color:var(--border-strong);background:var(--surface-2);transform:translateY(-1px)}
+.gcard:active{transform:scale(.985);transition-duration:var(--duration-instant)}
+.gcard .thumb img,.gcard .thumb svg{transition:transform var(--duration-base) var(--ease-spring-snappy)}
+.gcard:hover .thumb img{transform:scale(1.03)}
+.gcard .gactions{transition:opacity var(--duration-fast) var(--ease-standard)}
+.gcard[data-selected="true"]{border-color:var(--accent);background:var(--accent-soft)}
+.gcard .thumb{
+  height:88px;border-radius:var(--radius-sm);background:var(--surface-3);
+  display:grid;place-items:center;overflow:hidden;color:var(--text-muted);
+}
+.gcard .thumb svg{width:26px;height:26px}
+.gcard .thumb img{width:100%;height:100%;object-fit:cover}
+.gcard .gname{display:flex;align-items:center;gap:6px;font-size:var(--fs-sm);color:var(--text);min-width:0}
+.gcard .gname span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.gcard .gmeta{font-size:10.5px;color:var(--text-faint)}
+.gcard .gactions{display:flex;align-items:center;gap:2px;opacity:0}
+.gcard:hover .gactions,.gcard:focus-within .gactions{opacity:1}
+.gcard .gactions .icon-btn{width:22px;height:22px}
+.gcard .gactions .icon-btn svg{width:13px;height:13px}
+
+/* ═══ drop zone ════════════════════════════════════════════════ */
+.drop-overlay{
+  position:fixed;inset:0;z-index:var(--z-panel);
+  display:grid;place-items:center;pointer-events:none;
+  background:rgba(12,13,15,.72);backdrop-filter:blur(1.5px);
+  /* a drag entering the window is a surface arriving: fade it, do not pop it */
+  animation:motion-fade-in var(--duration-fast) var(--ease-standard) backwards;
+}
+.drop-box{
+  display:flex;flex-direction:column;align-items:center;gap:8px;
+  padding:26px 34px;border:1.5px dashed var(--accent);border-radius:var(--radius-lg);
+  background:var(--surface);color:var(--text);font-size:var(--fs-base);font-weight:500;
+  box-shadow:var(--shadow-modal);
+  animation:motion-sheet-in var(--duration-base) var(--ease-spring-snappy) backwards;
+}
+.drop-box svg{width:26px;height:26px;color:var(--accent)}
+.drop-box small{font-size:var(--fs-xs);color:var(--text-muted);font-weight:400}
+
+/* ═══ preview drawer ═══════════════════════════════════════════ */
+.preview-body{
+  flex:1;min-height:0;display:flex;flex-direction:column;
+  background:var(--bg);overflow:auto;
+}
+/* The drawer swaps its body twice: skeleton → content, then content → media.
+   Each swap is a new child, so a plain fade on the children is enough — and it
+   is the difference between "the preview loaded" and "the preview appeared". */
+.preview-body > *{animation:motion-fade-in var(--duration-fast) var(--ease-standard) backwards}
+.preview-body.centered{align-items:center;justify-content:center;padding:16px}
+.preview-media{max-width:100%;max-height:100%;object-fit:contain;border-radius:var(--radius-sm);background:var(--surface-2)}
+.preview-frame{width:100%;flex:1;min-height:0;border:0;background:#fff;border-radius:var(--radius-sm)}
+.preview-text{
+  margin:0;padding:14px 16px;font-family:var(--font-mono);font-size:12px;line-height:1.65;
+  color:var(--text-secondary);white-space:pre-wrap;word-break:break-word;tab-size:2;
+}
+.preview-md{padding:16px 18px;font-size:var(--fs-base);line-height:1.7;color:var(--text-secondary);max-width:72ch}
+.preview-md h1,.preview-md h2,.preview-md h3,.preview-md h4{color:var(--text);margin:18px 0 8px;line-height:1.35}
+.preview-md h1{font-size:19px}
+.preview-md h2{font-size:16px}
+.preview-md h3{font-size:14px}
+.preview-md h4{font-size:13px}
+.preview-md h1:first-child,.preview-md h2:first-child,.preview-md p:first-child{margin-top:0}
+.preview-md p{margin:0 0 10px}
+.preview-md ul,.preview-md ol{margin:0 0 10px;padding-left:20px;list-style:revert}
+.preview-md li{margin:2px 0}
+.preview-md code{font-family:var(--font-mono);font-size:12px;background:var(--surface-3);padding:1px 4px;border-radius:3px;color:var(--accent-strong)}
+.preview-md pre{background:var(--surface-2);border:1px solid var(--border);border-radius:var(--radius-sm);padding:10px 12px;overflow:auto;margin:0 0 12px}
+.preview-md pre code{background:none;padding:0;color:var(--text-secondary)}
+.preview-md blockquote{margin:0 0 12px;padding:2px 0 2px 12px;border-left:2px solid var(--border-strong);color:var(--text-muted)}
+.preview-md a{color:var(--accent)}
+.preview-md hr{border:0;border-top:1px solid var(--border);margin:14px 0}
+.preview-md table{width:100%;margin:0 0 12px;font-size:var(--fs-sm)}
+.preview-md th,.preview-md td{border:1px solid var(--border);padding:5px 8px;text-align:left}
+.preview-md th{background:var(--surface-2);color:var(--text)}
+.preview-meta{display:grid;grid-template-columns:auto 1fr;gap:5px 14px;padding:14px;font-size:var(--fs-sm)}
+.preview-meta dt{color:var(--text-faint)}
+.preview-meta dd{margin:0;color:var(--text-secondary);overflow:hidden;text-overflow:ellipsis}
+
+/* ═══ upload queue ═════════════════════════════════════════════ */
+.queue{
+  position:fixed;right:16px;bottom:34px;z-index:calc(var(--z-panel) + 1);
+  width:min(330px,calc(100vw - 32px));
+  display:flex;flex-direction:column;
+  background:var(--surface-2);border:1px solid var(--border-strong);
+  border-radius:var(--radius-md);box-shadow:var(--shadow-modal);
+  overflow:hidden;
+  /* the panel appears once, when the first task is queued — not per render */
+  animation:motion-rise-in var(--duration-base) var(--ease-spring-snappy) backwards;
+}
+.queue[hidden]{display:none}
+.queue-head{display:flex;align-items:center;gap:8px;height:32px;padding:0 6px 0 10px;border-bottom:1px solid var(--border)}
+.queue-head b{font-size:var(--fs-sm);font-weight:600}
+.queue-head span{font-size:var(--fs-xs);color:var(--text-muted)}
+.queue-list{max-height:min(38vh,290px);overflow:auto;padding:4px;display:flex;flex-direction:column;gap:2px}
+.qitem{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:2px 8px;padding:6px 7px;border-radius:var(--radius-xs);transition:var(--transition-colors)}
+.qitem:hover{background:var(--hover)}
+.qitem .qname{font-size:var(--fs-xs);color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.qitem .qstate{font-size:10px;color:var(--text-faint);font-variant-numeric:tabular-nums;white-space:nowrap}
+.qitem .qstate.is-error{color:var(--danger)}
+.qitem .qstate.is-done{color:var(--success)}
+.qbar{grid-column:1/-1;height:2px;border-radius:1px;background:var(--surface-3);overflow:hidden;margin-top:3px}
+/* Progress is a transform, not a width: a bar that animates width relayouts
+   the row on every progress event (several per second during an upload).
+   transform-origin:left + scaleX keeps the 1px radius honest at 100%. */
+.qbar i{display:block;height:100%;width:100%;background:var(--accent);transform:scaleX(0);transform-origin:left center;transition:transform var(--duration-fast) var(--ease-standard)}
+.qitem.is-error .qbar i{background:var(--danger)}
+.qitem.is-done .qbar i{background:var(--success)}
+.qitem .icon-btn{width:18px;height:18px}
+.qitem .icon-btn svg{width:11px;height:11px}
+.qactions{display:flex;align-items:center;gap:1px}
+
+/* ═══ move picker ═════════════════════════════════════════════ */
+.move-list{display:flex;flex-direction:column;gap:1px;max-height:min(44vh,340px);overflow:auto;padding:4px;border:1px solid var(--border);border-radius:var(--radius-sm);background:var(--surface-2)}
+.move-list .menu-item{height:28px}
+.move-list .menu-item.is-active{background:var(--accent-soft);color:var(--accent-strong)}
+.move-list .menu-item{transition:var(--transition-colors)}
+.move-list .menu-item.is-active svg{color:var(--accent)}
+.move-empty{padding:18px;text-align:center;font-size:var(--fs-sm);color:var(--text-muted)}
+
+/* ═══ preview drawer ═══════════════════════════════════════════ */
+/* the drawer body carries the preview; give it the full column height */
+.preview-drawer .drawer-body{padding:0;overflow:hidden;display:flex;flex-direction:column}
+.preview-drawer .drawer-body > *{flex:1 1 auto;min-height:0}
+.preview-drawer .preview-text{overflow:auto}
+.preview-drawer .preview-md{overflow:auto;width:100%}
+.preview-drawer .empty{padding:40px 24px}
+
+/* ═══ share dialog + public page ══════════════════════════════ */
+.share-link-row{display:flex;gap:6px}
+.share-link-row .input{font-family:var(--font-mono);font-size:var(--fs-xs)}
+.share-list{display:flex;flex-direction:column;gap:6px;max-height:216px;overflow:auto}
+.share-item{
+  display:flex;align-items:center;gap:8px;padding:7px 9px;
+  background:var(--surface-2);border:1px solid var(--border);border-radius:var(--radius-sm);
+  transition:var(--transition-surface);
+}
+.share-item:hover{border-color:var(--border-strong);background:var(--surface-3)}
+.share-item .si-main{flex:1;min-width:0;display:flex;flex-direction:column;gap:2px}
+.share-item code{font-family:var(--font-mono);font-size:10.5px;color:var(--text-muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.share-item small{font-size:10.5px;color:var(--text-faint)}
+.section-title{display:flex;align-items:center;justify-content:space-between;gap:8px;font-size:var(--fs-xs);font-weight:600;color:var(--text-secondary);letter-spacing:.02em}
+
+.public-wrap{min-height:100dvh;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:28px 18px;background:var(--bg)}
+.public-card{width:min(100%,476px);background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-lg);box-shadow:var(--shadow-modal);padding:22px}
+.public-head{display:flex;align-items:center;gap:8px;font-size:var(--fs-sm);color:var(--text-muted);margin-bottom:16px}
+.public-file{display:flex;align-items:center;gap:12px;padding:12px;border:1px solid var(--border);border-radius:var(--radius-md);background:var(--surface-2);margin-bottom:14px}
+.public-file .picon{width:36px;height:36px;flex:0 0 36px;border-radius:var(--radius-sm);display:grid;place-items:center;background:var(--surface-3);color:var(--text-secondary)}
+.public-file .picon svg{width:18px;height:18px}
+.public-file b{display:block;font-size:var(--fs-base);font-weight:500;word-break:break-word}
+.public-file small{display:block;margin-top:2px;font-size:var(--fs-xs);color:var(--text-faint)}
+.public-actions{display:flex;align-items:center;gap:8px}
+.public-note{margin-top:14px;font-size:var(--fs-xs);color:var(--text-faint);line-height:1.6}
+
+/* ═══ search results view ═════════════════════════════════════ */
+.section-head{display:flex;align-items:center;gap:10px;padding:14px 16px 6px}
+.section-head h1{font-size:var(--fs-lg);font-weight:600;letter-spacing:-.01em}
+.section-head .sub{font-size:var(--fs-xs);color:var(--text-muted)}
+.hint-card{
+  display:flex;flex-wrap:wrap;gap:6px 16px;padding:10px 16px 0;
+  font-size:var(--fs-xs);color:var(--text-faint);
+}
+.hint-card span{display:inline-flex;align-items:center;gap:5px}
+.hint-card .kbd{font-size:9.5px}
+
+/* ═══ responsive ══════════════════════════════════════════════ */
+@media (max-width:880px){
+  .nav-toggle{display:inline-flex}
+  /* two columns on small screens: name + a compact meta line, no star column
+     (starring stays available from the row menu and the grid card) */
+  .list-head{grid-template-columns:minmax(0,1fr) 68px 24px;gap:8px}
+  .list-head .col-date,.list-head .col-star,.frow .meta.date,.frow .star{display:none}
+  /* the head carries two aria-hidden spacer columns; dropping them keeps the
+     declared 3-column template from spawning implicit, overflowing tracks */
+  .list-head > span{display:none}
+  .frow{grid-template-columns:minmax(0,1fr) 68px 24px;gap:8px;height:34px}
+  .frow .meta.num{min-width:0;font-size:10.5px;text-align:right}
+  .toolbar{padding:8px 12px;gap:6px}
+  .toolbar .seg-label{display:none}
+  .list{padding:0 4px 24px}
+  .grid{padding:10px 12px 28px;grid-template-columns:repeat(auto-fill,minmax(132px,1fr))}
+  .queue{right:10px;bottom:32px}
+  .toast-stack{right:10px;bottom:32px}
+  .drawer{width:100vw}
+}
+@media (max-width:560px){
+  .dialog-foot{flex-wrap:wrap}
+  .inline-fields{grid-template-columns:1fr}
+  .toolbar .btn{padding:0 8px}
+  .segmented button{padding:0 5px}
+  .section-head h1{font-size:14px}
+  .statusbar{gap:10px;font-size:10px}
+  .statusbar span:last-child{display:none}
+  .hint-card{display:none}
+  .queue{left:10px;right:10px;width:auto}
+}
+
+/* ── office preview (ppt / docx / xlsx) ───────────────────────── */
+.office{display:flex;flex-direction:column;gap:10px;padding:14px 16px 20px;overflow-y:auto}
+.office-head{display:flex;align-items:baseline;gap:8px;font-size:var(--fs-xs);color:var(--text-secondary);padding-bottom:8px;border-bottom:1px solid var(--border)}
+.office-head b{font-size:var(--fs-sm);color:var(--text)}
+.office-pages{display:flex;flex-direction:column;gap:12px}
+.office-page{border:1px solid var(--border);border-radius:var(--radius-sm);background:var(--surface-2);padding:12px 14px}
+.office-page-head{display:flex;align-items:baseline;gap:8px;margin-bottom:8px}
+.office-page-head b{font-size:var(--fs-sm);color:var(--text);line-height:1.4}
+.office-index{display:inline-flex;align-items:center;justify-content:center;min-width:18px;height:18px;padding:0 5px;border-radius:9px;background:var(--surface-3);color:var(--text-muted);font-size:10px;font-variant-numeric:tabular-nums}
+.office-h{font-size:var(--fs-sm);color:var(--text);margin:8px 0 4px;line-height:1.4}
+.office-p{font-size:var(--fs-sm);color:var(--text-secondary);line-height:1.7;margin:0 0 6px;white-space:pre-wrap;word-break:break-word}
+.office-list{margin:0 0 8px;padding-left:18px;font-size:var(--fs-sm);color:var(--text-secondary);line-height:1.7}
+.office-list li{white-space:pre-wrap;word-break:break-word}
+.office-table-wrap{overflow-x:auto;border:1px solid var(--border);border-radius:var(--radius-xs);margin:6px 0 10px}
+.office-table{border-collapse:collapse;font-size:var(--fs-xs);color:var(--text-secondary);min-width:100%}
+.office-table th,.office-table td{border:1px solid var(--border);padding:4px 8px;text-align:left;vertical-align:top;white-space:pre-wrap;word-break:break-word}
+.office-table th{background:var(--surface-3);color:var(--text);font-weight:600}
+.office-sheet{margin-bottom:14px}
+.office-note{font-size:var(--fs-xs);color:var(--text-faint);line-height:1.6;margin:4px 0 0}
+.office-image{font-size:var(--fs-xs);color:var(--text-faint);margin:4px 0}
+.muted{color:var(--text-muted)}
+
+/* ── storage breakdown (sidebar footer) ───────────────────────── */
+.storage-kinds{display:flex;flex-wrap:wrap;gap:8px;margin-top:6px;font-size:10px;color:var(--text-faint)}
+.storage-kinds span{display:inline-flex;align-items:center;gap:4px;white-space:nowrap}
+.storage-kinds .dot{width:5px;height:5px;border-radius:50%;background:var(--text-faint);flex:0 0 auto}
+.storage-kinds .dot-document{background:var(--accent)}
+.storage-kinds .dot-image{background:#7aa2f7}
+.storage-kinds .dot-video{background:#9d7cd8}
+.storage-kinds .dot-audio{background:#7dcfff}
+.storage-kinds .dot-archive{background:#e0af68}
+.storage-kinds .dot-code{background:#9ece6a}
+.storage-kinds .dot-other{background:var(--text-faint)}
+
+/* ── code preview tokens ──────────────────────────────────────── */
+.preview-code{tab-size:2}
+/* 4.86:1 on the drawer surface — the muted grey I started with failed AA at 3.75. */
+.tok-comment{color:#7d8590;font-style:italic}
+.tok-string{color:#a5d6a7}
+.tok-number{color:#f0b37e}
+.tok-keyword{color:#8ab4f8;font-weight:600}
+.tok-tag{color:#e0af68}
+
+/* ── activity log drawer ──────────────────────────────────────── */
+.activity-list{display:flex;flex-direction:column;gap:2px;padding:10px 14px 18px}
+.activity-day{font-size:10px;color:var(--text-faint);letter-spacing:.04em;margin:12px 0 4px;text-transform:none}
+.activity-day:first-child{margin-top:0}
+.activity-row{display:grid;grid-template-columns:auto minmax(0,1fr) auto;align-items:baseline;gap:8px;padding:6px 0;border-bottom:1px solid var(--border);transition:var(--transition-colors)}
+.activity-row:hover{background:var(--surface-2)}
+.activity-row:last-child{border-bottom:none}
+.activity-row b{font-size:var(--fs-xs);color:var(--text);font-weight:600;white-space:nowrap}
+.activity-row .muted{font-size:var(--fs-xs);color:var(--text-muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.activity-row time{font-size:10px;color:var(--text-faint);white-space:nowrap;font-variant-numeric:tabular-nums}
+
+/* ── version history drawer ───────────────────────────────────── */
+.version-list{display:flex;flex-direction:column;gap:2px;padding:10px 14px 18px}
+.version-row{display:flex;align-items:center;gap:10px;padding:7px 0;border-bottom:1px solid var(--border)}
+.version-row:last-child{border-bottom:none}
+.version-tag{display:inline-flex;align-items:center;justify-content:center;min-width:26px;height:20px;padding:0 6px;border-radius:10px;background:var(--surface-3);color:var(--text-muted);font-size:10px;font-weight:600;font-variant-numeric:tabular-nums}
+.version-meta{display:flex;flex-direction:column;gap:1px;min-width:0}
+.version-meta b{font-size:var(--fs-xs);color:var(--text);font-weight:500}
+.version-meta small{font-size:10px;color:var(--text-faint)}
+.version-row .btn-sm{height:24px;padding:0 8px;font-size:var(--fs-xs)}
+
+/* ── search: content-match snippets ───────────────────────────── */
+.match-notes{margin:18px 0 0;border-top:1px solid var(--border);padding-top:12px;display:flex;flex-direction:column;gap:8px}
+.match-note{display:grid;grid-template-columns:auto minmax(0,1fr);gap:10px;align-items:baseline;font-size:var(--fs-xs)}
+.match-note b{color:var(--text-secondary);font-weight:500;white-space:nowrap;max-width:180px;overflow:hidden;text-overflow:ellipsis}
+.match-note span{color:var(--text-faint);line-height:1.6;overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical}
+
+/* ── edit lock banner (preview drawer) ────────────────────────── */
+.lock-banner{
+  margin:0 0 8px;padding:7px 12px;border-radius:var(--radius-sm);
+  font-size:var(--fs-xs);line-height:1.5;color:var(--text-secondary);
+  background:var(--surface-3);border:1px solid var(--border-strong);
+}
+.lock-banner.is-warn{color:#f0b37e;background:rgba(240,179,126,.08);border-color:rgba(240,179,126,.3)}
+
+/* ── team panel ───────────────────────────────────────────────── */
+.member-list{display:flex;flex-direction:column;gap:2px;padding:10px 14px 18px}
+.member-head{display:flex;flex-direction:column;gap:2px;margin-bottom:10px}
+.member-head b{font-size:var(--fs-sm);color:var(--text)}
+.member-head .muted{font-size:var(--fs-xs)}
+.member-row{display:grid;grid-template-columns:auto minmax(0,1fr) auto auto;align-items:center;gap:10px;padding:7px 0;border-bottom:1px solid var(--border)}
+.member-row:last-child{border-bottom:none}
+.member-copy{display:flex;flex-direction:column;gap:1px;min-width:0}
+.member-copy b{font-size:var(--fs-xs);color:var(--text);font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.member-copy small{font-size:10px;color:var(--text-faint);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.member-role{font-size:10px;color:var(--text-muted);border:1px solid var(--border-strong);border-radius:9px;padding:1px 7px;white-space:nowrap}
+.member-role.is-admin{color:#f0b37e;border-color:rgba(240,179,126,.35)}

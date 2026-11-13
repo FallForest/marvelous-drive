@@ -1,0 +1,56 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Server tests
+        run: node --test apps/server/test/
+      - name: CLI tests
+        run: node --test packages/cli/test/
+      - name: Web logic tests
+        run: node --test apps/web/test/
+      - name: Motion lint (static)
+        run: node scripts/motion-lint.mjs apps/web/styles
+      - name: Syntax check
+        run: node scripts/check-syntax.mjs
+      # A broken compose file only shows up when someone tries to deploy, and
+      # the update path depends on the shipped one being valid.
+      - name: Compose file is valid
+        run: docker compose config --quiet
+      - name: Deploy scripts parse
+        run: |
+          bash -n scripts/deploy/update.sh
+          bash -n scripts/deploy/backup.sh
+
+  images:
+    # Builds both images on every push so a Dockerfile that only breaks on
+    # Linux is caught here, not at release time.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build the drive image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          push: false
+          cache-from: type=gha,scope=drive
+          cache-to: type=gha,mode=max,scope=drive
+      - name: Build the updater image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: apps/updater/Dockerfile
+          push: false
+          cache-from: type=gha,scope=updater
+          cache-to: type=gha,mode=max,scope=updater

@@ -1,0 +1,107 @@
+/*
+ * updates.css — the release panel in the account drawer.
+ *
+ * One surface: a two-row version table, a note, a status block and the action
+ * row. Only tokens from tokens.css are used, so the panel inherits the theme and
+ * the motion contract instead of growing a second vocabulary.
+ */
+
+.update-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.update-head {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.update-version {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface-2);
+}
+
+.update-key {
+  font-size: var(--fs-sm);
+  color: var(--text-muted);
+}
+
+.update-value {
+  font-size: var(--fs-lg);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+}
+
+.update-value.is-new {
+  color: var(--accent);
+}
+
+.update-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding-top: 2px;
+}
+
+.update-status {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface-2);
+  font-size: var(--fs-sm);
+}
+
+.update-status small {
+  color: var(--text-muted);
+}
+
+.update-status.is-ok {
+  border-color: var(--success);
+  background: var(--success-soft);
+}
+
+.update-status.is-danger {
+  border-color: var(--danger);
+  background: var(--danger-soft);
+}
+
+.update-status.is-busy {
+  border-color: var(--accent-line);
+  background: var(--accent-soft);
+}
+
+.update-status.is-busy b {
+  animation: update-pulse var(--duration-loop) var(--ease-standard) infinite alternate;
+}
+
+.update-log {
+  max-height: 180px;
+  margin: 0;
+  padding: 8px 10px;
+  overflow: auto;
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  line-height: var(--lh-base);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+@keyframes update-pulse {
+  from { opacity: 0.6; }
+  to { opacity: 1; }
+}

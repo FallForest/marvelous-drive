@@ -1,0 +1,211 @@
+/*
+ * Motion layer — primitives, not components.
+ *
+ * Owns three things and nothing else:
+ *   1. keyframes        named, reusable, compositor-friendly
+ *   2. utilities        .motion-rise, .motion-sheet, .stagger, .press ...
+ *   3. the global contract — reduced motion, press feedback, view transitions
+ *
+ * Component layers reference these names; the numbers live in tokens.css, so
+ * "make everything 20% snappier" is one edit.
+ *
+ * Every animation here is transform/opacity only. They run on the compositor,
+ * so opening a menu never triggers layout.
+ */
+
+/* ══ 1. keyframes ═══════════════════════════════════════════════ */
+
+/* Surfaces arriving from a direction: menus, popovers, toasts. */
+@keyframes motion-rise-in{
+  from{opacity:0;transform:translate3d(0,6px,0) scale(.985)}
+  to{opacity:1;transform:translate3d(0,0,0) scale(1)}
+}
+@keyframes motion-sink-in{
+  from{opacity:0;transform:translate3d(0,-6px,0) scale(.985)}
+  to{opacity:1;transform:translate3d(0,0,0) scale(1)}
+}
+/* Dialogs scale from the centre, like a UIKit sheet presenting. */
+@keyframes motion-sheet-in{
+  from{opacity:0;transform:translate3d(0,10px,0) scale(.97)}
+  to{opacity:1;transform:translate3d(0,0,0) scale(1)}
+}
+@keyframes motion-sheet-out{
+  from{opacity:1;transform:translate3d(0,0,0) scale(1)}
+  to{opacity:0;transform:translate3d(0,6px,0) scale(.975)}
+}
+/* Drawers travel in from the inline end. */
+@keyframes motion-drawer-in{
+  from{opacity:.6;transform:translate3d(16px,0,0)}
+  to{opacity:1;transform:translate3d(0,0,0)}
+}
+@keyframes motion-drawer-out{
+  from{opacity:1;transform:translate3d(0,0,0)}
+  to{opacity:.4;transform:translate3d(12px,0,0)}
+}
+@keyframes motion-fade-in{from{opacity:0}to{opacity:1}}
+@keyframes motion-fade-out{from{opacity:1}to{opacity:0}}
+
+/* List entries: the workhorse for "content appeared". */
+@keyframes motion-enter{
+  from{opacity:0;transform:translate3d(0,8px,0)}
+  to{opacity:1;transform:translate3d(0,0,0)}
+}
+/* A row expanding into view (disclosure, tree children). */
+@keyframes motion-disclose{
+  from{opacity:0;transform:translate3d(0,-4px,0)}
+  to{opacity:1;transform:translate3d(0,0,0)}
+}
+/* Toasts stack from the bottom edge they live on. */
+@keyframes motion-toast-in{
+  from{opacity:0;transform:translate3d(0,10px,0) scale(.98)}
+  to{opacity:1;transform:translate3d(0,0,0) scale(1)}
+}
+@keyframes motion-toast-out{
+  from{opacity:1;transform:translate3d(0,0,0) scale(1)}
+  to{opacity:0;transform:translate3d(0,6px,0) scale(.97)}
+}
+
+/* Feedback: acknowledge a press without moving the layout. */
+@keyframes motion-pop{
+  0%{transform:scale(1)}
+  45%{transform:scale(.94)}
+  100%{transform:scale(1)}
+}
+@keyframes motion-acknowledge{
+  0%{box-shadow:0 0 0 0 var(--accent-soft)}
+  100%{box-shadow:0 0 0 10px transparent}
+}
+/* Ambient: connection dot, save dot, anything signalling liveness. */
+@keyframes motion-breathe{
+  0%,100%{opacity:1;transform:scale(1)}
+  50%{opacity:.45;transform:scale(.82)}
+}
+/* Progress and loading. */
+@keyframes motion-spin{to{transform:rotate(360deg)}}
+@keyframes motion-shimmer{to{transform:translateX(100%)}}
+@keyframes motion-indeterminate{
+  0%{transform:translate3d(-100%,0,0)}
+  100%{transform:translate3d(320%,0,0)}
+}
+
+/* ══ 2. utilities ═══════════════════════════════════════════════
+ *
+ * `backwards`, never `both`: an entrance needs its start state held during
+ * the delay, but must hand the element back to its class rules once it
+ * finishes. `both` keeps the final frame applied forever, which outranks
+ * :hover and :active and silently kills the interaction.
+ */
+.motion-rise{animation:motion-rise-in var(--duration-base) var(--ease-spring-snappy) backwards}
+.motion-sink{animation:motion-sink-in var(--duration-base) var(--ease-spring-snappy) backwards}
+.motion-sheet{animation:motion-sheet-in var(--duration-base) var(--ease-spring-snappy) backwards}
+.motion-drawer{animation:motion-drawer-in var(--duration-base) var(--ease-decelerate) backwards}
+.motion-enter{animation:motion-enter var(--duration-base) var(--ease-decelerate) backwards}
+.motion-fade{animation:motion-fade-in var(--duration-fast) var(--ease-standard) backwards}
+.motion-disclose{animation:motion-disclose var(--duration-fast) var(--ease-standard) backwards}
+
+/* Exit: always shorter than the entrance, or the surface feels stuck.
+   140ms out against 220ms in. */
+.motion-dismiss{animation:motion-fade-out var(--duration-fast) var(--ease-accelerate) both}
+.motion-sheet-out{animation:motion-sheet-out var(--duration-fast) var(--ease-accelerate) both}
+.motion-drawer-out{animation:motion-drawer-out var(--duration-fast) var(--ease-accelerate) both}
+.motion-toast-out{animation:motion-toast-out var(--duration-fast) var(--ease-accelerate) both}
+
+/* Staggered entry. The index is --i, so a list needs no runtime loop and no
+   per-row inline animation string. lib/motion.js caps --i at 10. */
+.stagger{animation:motion-enter var(--duration-base) var(--ease-decelerate) backwards;animation-delay:calc(var(--i,0) * var(--stagger-step))}
+.stagger-fade{animation:motion-fade-in var(--duration-fast) var(--ease-standard) backwards;animation-delay:calc(var(--i,0) * var(--stagger-step))}
+
+/* One-shot acknowledgement for a control that was just pressed. */
+.is-acknowledged{animation:motion-acknowledge var(--duration-slow) var(--ease-decelerate)}
+
+/*
+ * Press feedback: the single line that does more for perceived quality than
+ * any entrance. Hover changes colour; press changes scale. A control that
+ * moves on hover makes a mouse pointer feel like a broken trackpad.
+ *
+ *   .press          generic pressable (buttons, rows, cards)
+ *   .press-sm       small targets where .97 is too much travel
+ *   .press-none     opt out (drag handles, inputs, text links)
+ */
+.press,.press-sm,.press-none{
+  transition:var(--transition-colors),transform var(--duration-fast) var(--ease-spring-snappy);
+}
+.press:active:not([disabled]):not([aria-disabled="true"]){transform:scale(var(--press-scale));transition-duration:var(--duration-instant)}
+.press-sm:active:not([disabled]):not([aria-disabled="true"]){transform:scale(var(--press-scale-sm));transition-duration:var(--duration-instant)}
+/* Fields must not shrink: the caret jumps and the ring detaches. */
+.press-none:active{transform:none}
+
+/* ══ 3. the global contract ═════════════════════════════════════
+ *
+ * Two rules here exist because of bugs that are easy to reintroduce, so
+ * they are stated instead of being rediscovered from the cascade.
+ *
+ * (a) Entry animations fill backwards, never forwards — see the utilities
+ *     above. A retained final frame outranks :hover and :active.
+ *
+ * (b) No standing will-change. A permanent hint promotes the element for as
+ *     long as it exists; for chrome that is always on screen that is one
+ *     compositor layer each, created at mount and never released, and a layer
+ *     can rasterise a subpixel differently from inline rendering — visible as
+ *     a flash when the element switches modes. Promote for the duration of the
+ *     animation instead: lib/motion.js markAnimating() adds .is-animating and
+ *     removes it on animationend / animationcancel.
+ */
+.is-animating{
+  will-change:transform,opacity;
+  backface-visibility:hidden;
+}
+
+/*
+ * Reduced motion is not "no feedback", it is "no travel". Anything that
+ * changes position collapses to a cross-fade, so the user still sees that
+ * something changed. Scoped to the utilities this layer owns — a document-wide
+ * `animation:none !important` would cancel in-flight entries and snap them
+ * back to opacity:0.
+ */
+@media (prefers-reduced-motion:reduce){
+  .motion-rise,.motion-sink,.motion-sheet,.motion-drawer,.motion-enter,.motion-disclose,.stagger,.stagger-fade{
+    animation:motion-fade-in var(--duration-fast) linear backwards!important;
+    animation-delay:0ms!important;
+  }
+  .motion-dismiss,.motion-sheet-out,.motion-drawer-out,.motion-toast-out{
+    animation:motion-fade-out var(--duration-fast) linear both!important;
+  }
+  .is-acknowledged{animation:none!important}
+  .press:active,.press-sm:active{transform:none}
+}
+
+/* Touch devices get press feedback instead of hover feedback; the hover
+   colour change is suppressed so a tapped row does not stay "hovered". */
+@media (hover:none){
+  .press:hover,.press-sm:hover{background:inherit}
+}
+
+/* ══ 4. view transitions ════════════════════════════════════════
+ *
+ * A screen change is a navigation, so it gets the tab-switch treatment: the
+ * content cross-fades, and the chrome around it does not move.
+ *
+ * The suppression rule is scoped to the swapped surface on purpose. Scoping it
+ * to `html:active-view-transition` would mute every .stagger in the app for the
+ * length of the transition; when the flag clears they restart from opacity 0,
+ * and the sidebar blinks after every click.
+ *
+ * lib/motion.js withViewTransition() owns the data-vt-swapping flag; the page
+ * root wears .motion-enter, so the swap can mute exactly that one entrance.
+ */
+[data-vt-scope='main']{view-transition-name:main-content}
+
+::view-transition-old(main-content){animation:motion-fade-out var(--duration-fast) var(--ease-standard) both}
+::view-transition-new(main-content){animation:motion-fade-in var(--duration-base) var(--ease-standard) both}
+/* The root snapshot would cross-fade the whole app, chrome included. */
+::view-transition-old(root),::view-transition-new(root){animation:none}
+
+/* Suppress the swapped surface's own entrance while the cross-fade runs —
+   otherwise the page enters twice and reads as a flash. */
+html:active-view-transition [data-vt-scope='main'].motion-enter,
+html[data-vt-swapping] [data-vt-scope='main'].motion-enter{animation:none!important}
+
+@media (prefers-reduced-motion:reduce){
+  ::view-transition-group(*),::view-transition-old(*),::view-transition-new(*){animation:none!important}
+}
