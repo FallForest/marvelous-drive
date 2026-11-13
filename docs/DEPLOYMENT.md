@@ -119,6 +119,15 @@ Rollback is: stop, restore the archive from step 1, start the previous code.
   which is far beyond a personal or small-team drive.
 - Blobs are plain files; the only limit is the filesystem. A 2 TiB data volume
   with 2 GiB uploads serves fine.
+- `DRIVE_QUOTA_BYTES` is bytes, not GB, and it is per account, not per host. A
+  deployment written as `"150000000000"` therefore reports **150 GB** in the UI
+  (decimal) while the same number is **139.7 GiB** — the two units differ by 7%,
+  which is why a figure quoted as "140 GB" and a disk quoted as "198 GB" can be
+  the same box. Set it below the data volume's free space, not equal to it: the
+  store, the SQLite snapshot and any temporary upload spool share that volume.
+- Leave it at `0` (unlimited) only where the data volume is the only thing on
+  the disk. Where the drive shares a volume with the OS and other containers, an
+  unset quota lets a full upload take down every service on the host.
 - Memory stays flat because every upload and download streams. A 2 GiB upload
   costs roughly the socket buffer, not 2 GiB of RSS.
 - `data/tmp` needs room for in-flight uploads (one chunk each for resumable
@@ -137,6 +146,14 @@ Two things make `docker compose pull` mean something: `DRIVE_IMAGE` in `.env`
 names an immutable version tag (`:0.19.0`, never `:latest`), and `DRIVE_VERSION`
 records which one the running container is. The updater container writes both
 when it applies a release.
+
+A published deployment should have **no `build:` block for the drive**. While one
+existed, a failed pull fell through to a local rebuild, so "updated" could mean
+"compiled on this box minutes ago" and the running image drifted from the
+registry. Without it the registry is the only source of truth: `update.sh` treats
+a failed `compose pull` as fatal and restores the snapshot taken at the start of
+the run, so `.env`, the compose files and `package.json` never name a release that
+did not land. The `updater` service keeps its own `build:` — it is not published.
 
 `DRIVE_UPDATE_MANIFEST_URL` is what turns the check on. Point it at the release
 asset:
