@@ -6,6 +6,85 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.23.0] - 2026-11-15
+
+One move operation, reachable by drag, menu and keyboard — and the same
+destinations in all three.
+
+### Added
+
+- **`apps/web/lib/drag-move.js` → `moveRoots()`** — a selected folder carries the
+  selected descendants inside it, instead of being sent as separate moves that
+  would flatten the tree. A child is dropped from the list when one of its
+  ancestors is also selected, which is what makes "move these two folders and
+  the three files I picked inside one of them" a single coherent operation.
+- **A destination picker that can be used without a mouse.** `lib/move.js` is now
+  a `role="listbox"` of always-visible destinations with the full path as the
+  accessible name, `Up`/`Down`/`Home`/`End` movement, a roving tabindex, and
+  `Tab` reaching the Move and Cancel buttons. Invalid destinations and the
+  current parent are disabled and say why (`当前位置` / `不可选`), and the footer
+  names the destination before you commit to it. This is the pointer-free
+  alternative that WCAG 2.2 SC 2.5.7 asks for.
+- **`docs/INTERACTIONS.md`** — the click, move and keyboard model written down
+  once, with the reference behaviour it follows (Google Drive, WCAG 2.2,
+  WAI-ARIA listbox, HTML DnD) and the checks that hold it in place.
+- **`scripts/interaction-check.mjs`** — grid image fallbacks, nested buttons
+  keeping their own keys, and Delete acting on a multi-selection.
+- **`scripts/move-check.mjs`** — picker cancellation, the root as a destination,
+  keyboard navigation, nesting, and name conflicts.
+- **`scripts/dnd-check.mjs`** now drives **native Chromium mouse input** rather
+  than synthetic `DataTransfer` events, then confirms the resulting parent ids
+  through the API — synthetic events cannot reproduce a browser-generated image
+  payload, which is exactly the case that was broken.
+
+### Changed
+
+- **Every move entry point runs the same code.** The row menu, the selection bar
+  and the drag gesture all call `moveItems(ids, target)`; the serial `PUT` loop
+  that lived inside `dnd.js` is gone. `null` means the drive root, `undefined`
+  means the dialog was dismissed — and a dismissal now moves nothing, where a
+  picker that resolved `null` on cancel would have sent everything to the root.
+- **The drag badge names what is moving and where.** It reads `移动 <name>` for a
+  single item and `移动 3 项`, then `移动 … → 目标文件夹` over a live target, and
+  `无法移动到此处` over a refused one. The source rows fade by their own class
+  rather than by "is selected", so dragging an unselected row fades that row.
+- **Drag feedback is cleared by every exit path.** A cancelled drag marks itself
+  so a delayed drop cannot revive it, and cancelling preserves the selection —
+  previously the only way to drop a pending drag was to complete it somewhere.
+- **The My Drive navigation item and every breadcrumb accept a drop**, so the
+  root is a destination by the same gesture as any folder. Starred and Trash are
+  not destinations.
+- **An internal move outranks a `Files` payload.** `isMoveDrag()` used to reject
+  any event whose `dataTransfer` mentioned `Files`, but a browser's native image
+  drag carries both — so an image row could be mistaken for an upload. Custom
+  MIME and recorded drag state now win, and thumbnails are `draggable="false"`
+  so dragging a picture moves the file rather than starting an OS upload.
+- **Renaming a row no longer starts a drag.** The inline editor disables the
+  row's `draggable` for its lifetime and restores it afterwards, so selecting
+  text in a file name cannot pick the row up.
+
+### Fixed
+
+- **`Enter` on a dialog button opened the file behind it.** The shell's global
+  key handler ran for every key that was not in a text field, so activating
+  **移动** or **取消** also acted on the selected row underneath. Native controls
+  and open overlays now own their keys.
+- **`Delete` on a multi-selection deleted one file.** A row's `Delete` now acts
+  on the selection when the row is part of it, and on the row alone otherwise;
+  the confirmation counts what will be affected.
+- **A row's own buttons could trigger the row's shortcuts.** Star, menu and the
+  rename editor stop key events at the row, so `Space` on the star button does
+  not also select the row and `Enter` on the menu does not also open the file.
+- **Landing on a search URL left the picker and sidebar empty.** `/search` never
+  fetched the tree, so a direct link supplied no move destinations and no
+  sidebar targets; it now loads the node list alongside the results.
+- **Folder download was missing from the row context.** `listContext()` never
+  projected `onDownloadArchive`, so the "download as zip" verb reached the row
+  as `undefined`.
+- **Failed moves now say which files failed**, keep them selected for a retry,
+  and report name conflicts separately from other failures instead of folding
+  every error into one count.
+
 ## [0.22.0] - 2026-11-14
 
 A repository tidy-up, and three gestures that had quietly stopped working.

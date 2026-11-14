@@ -241,6 +241,12 @@ lib/browser.mjs      Chrome launcher, CDP page, check recorder — the shared ha
 lib/args.mjs         the one "--name value" reader for the operation scripts
 smoke.mjs            API-level checks against a running instance
 browser-check.mjs    the shell: login, list, preview, trash, share, mobile
+click-check.mjs      the click model: click opens, checkbox selects
+gallery-check.mjs    the picture browser: arrows, counter, cache, no upscale
+heic-check.mjs       a HEIC upload becomes a picture a browser can show
+dnd-check.mjs        native mouse drags to list, grid, sidebar and breadcrumbs
+interaction-check.mjs grid fallbacks, nested buttons, multi-select Delete
+move-check.mjs       move picker: cancel, root, keyboard, nesting, conflicts
 feature-check.mjs    thumbnails, batch bar, draggable rows, duplicates drawer
 upload-check.mjs     picker, 9 MiB resumable session, batch bar, cancel
 resume-check.mjs     a reloaded page claims its live session and can discard it
@@ -275,4 +281,5 @@ test/                node --test suites for the shared script helpers
 | `CLUSTER.md` | Several machines' disks as one drive: nodes, placement, replication |
 | `SECURITY.md` | Threat model, auth, blob integrity, operational hygiene |
 | `DEPLOYMENT.md` | Running it in production |
+| `INTERACTIONS.md` | Click, move and keyboard model, and the pointer-free alternative to dragging |
 | `ROADMAP-STORAGE.md` | Storage roadmap and what is deliberately out of scope |

@@ -81,6 +81,23 @@ export function selectionForDrag(selection, nodeId) {
   return ids;
 }
 
+/** A selected folder carries its selected descendants; do not flatten them. */
+export function moveRoots(selectedIds, index) {
+  const ids = decodeNodeIds(encodeNodeIds(selectedIds));
+  const selected = new Set(ids);
+  const byId = index?.byId || new Map();
+  return ids.filter((id) => {
+    let parent = byId.get(id)?.parentId;
+    const visited = new Set([id]);
+    while (parent && !visited.has(parent)) {
+      if (selected.has(parent) && byId.get(parent)?.kind === 'folder') return false;
+      visited.add(parent);
+      parent = byId.get(parent)?.parentId;
+    }
+    return true;
+  });
+}
+
 /**
  * planMoves(selectedIds, targetFolderId, index) -> { allowed, blocked }
  *

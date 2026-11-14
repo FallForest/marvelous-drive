@@ -17,7 +17,7 @@ import { rowAction, ROW_ACTION, isSelectionClick, isRepeatClick, noteOpen } from
 import {
   openPreviewFor, downloadOne, downloadFolderArchive, copyShareLink,
   toggleStarWithToast, startRename, startMove, startDelete, startRestore, startPurge,
-  startNewFolder, openUserMenu,
+  startNewFolder, openUserMenu, deleteSelection,
 } from './actions.js';
 import { openShareDialog } from './share.js';
 import { visibleNodes } from './views.js';
@@ -147,12 +147,23 @@ export function buildContext(ancestors, selectionSlot) {
     },
 
     onRowKey: (event, node) => {
+      // Buttons and editors inside a row keep their native keyboard actions.
+      // Stop the event here so the shell's selected-item shortcuts cannot also
+      // open or delete a file while its star/menu button has focus.
+      if (event.target !== event.currentTarget) { event.stopPropagation(); return; }
       const key = event.key;
       if (key === 'Enter') { event.preventDefault(); event.stopPropagation(); ctx.onOpen(node); }
       // Space is the keyboard's checkbox, not its click: it must never navigate.
       else if (key === ' ') { event.preventDefault(); event.stopPropagation(); ctx.onSelectToggle(node); }
       else if (key === 'F2') { event.preventDefault(); event.stopPropagation(); ctx.onRename(node); }
-      else if (key === 'Delete') { event.preventDefault(); event.stopPropagation(); ctx.onDelete(node); }
+      else if (key === 'Delete') {
+        event.preventDefault();
+        event.stopPropagation();
+        if (store.state.selection.has(node.id) && store.state.selection.size > 1) {
+          deleteSelection(visibleNodes().filter((item) => store.state.selection.has(item.id)));
+        }
+        else ctx.onDelete(node);
+      }
       else if (key === 'ArrowDown' || key === 'ArrowUp') {
         event.preventDefault();
         const rows = Array.from(session.shellEls.viewEl.querySelectorAll('[data-id][tabindex]'));

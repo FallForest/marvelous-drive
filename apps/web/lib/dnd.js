@@ -9,15 +9,15 @@
 
 import { h, raw } from './dom.js';
 import { icon } from './format.js';
-import { api } from './api.js';
-import { toast } from './ui.js';
 import {
-  NODE_MIME, clearDropTargets, decodeNodeIds, encodeNodeIds, hasNodeDrag, markDropTarget, planMoves, selectionForDrag,
+  NODE_MIME, clearDropTargets, decodeNodeIds, encodeNodeIds, hasNodeDrag, markDropTarget, moveRoots, planMoves, selectionForDrag,
 } from './drag-move.js';
 import { planFromDataTransfer } from './folder-upload.js';
 import { store, session } from './session.js';
 import { runtime } from './runtime.js';
-import { lookupNode } from './actions.js';
+import { lookupNode, moveItems } from './actions.js';
+
+let dragCancelled = false;
 
 export function onRowDragStart(node, event) {
   // The old guard was `session.shellEls === null`, which is true for a moment
@@ -30,49 +30,57 @@ export function onRowDragStart(node, event) {
   // alone — a cancelled drag must not change what is highlighted.
   const ids = selectionForDrag(store.state.selection, node.id).filter((id) => lookupNode(id));
   if (!ids.length) { event.preventDefault(); return; }
+  dragCancelled = false;
   session.draggingIds = ids;
   try {
     event.dataTransfer.setData(NODE_MIME, encodeNodeIds(ids));
-    // Some browsers reset the payload unless a text/plain copy exists too; drop
-    // targets still key off NODE_MIME only, so a Files drop stays a Files drop.
+    // Keep a text fallback for engines that require it, while custom MIME/state
+    // distinguishes our move from a file dropped from outside the page.
     event.dataTransfer.setData('text/plain', node.name || '');
   } catch (error) {
     // Firefox refuses a drag with no data at all, so a silent failure here is
     // a feature that simply does not work in that browser. Say so once rather
     // than pretending the drag is fine.
-    console.warn('[mdrive] the drag payload could not be set; this browser will not start the drag', error)
+    console.warn('[mdrive] the drag payload could not be set', error);
+    event.preventDefault();
+    onRowDragEnd();
+    return;
   }
   event.dataTransfer.effectAllowed = 'move';
   document.body.classList.add('is-moving');
-  showDragBadge(ids.length);
+  for (const row of document.querySelectorAll('.frow[data-id], .gcard[data-id]')) {
+    row.classList.toggle('is-drag-source', ids.includes(row.dataset.id));
+  }
+  showDragBadge(ids.length === 1 ? node.name : ids.length + ' 项');
+  moveDragBadge(event);
 }
 
 export function onRowDragEnd() {
   session.draggingIds = [];
   document.body.classList.remove('is-moving');
   clearDropTargets(document);
+  for (const row of document.querySelectorAll('.is-drag-source')) row.classList.remove('is-drag-source');
   hideDragBadge();
 }
 
 /**
- * How many items the drag carries.
- *
- * A multi-selection drags all of its rows but the browser's drag image shows
- * one, so without a count a user cannot tell whether they are moving one file
- * or twelve. Finder and Google Drive both put the number on the cursor.
+ * Name/count and destination feedback follows the pointer for every move.
  */
 let badgeEl = null
-function showDragBadge(count) {
-  if (count < 2) { hideDragBadge(); return }
+function showDragBadge(label) {
   if (!badgeEl) {
     badgeEl = h('div', { class: 'drag-badge', attrs: { 'aria-hidden': 'true' } })
     document.body.appendChild(badgeEl)
   }
-  badgeEl.textContent = count + ' 项'
+  badgeEl.dataset.sourceLabel = label;
+  badgeEl.textContent = '移动 ' + label;
   badgeEl.classList.add('is-on')
 }
 function hideDragBadge() {
   if (badgeEl) badgeEl.classList.remove('is-on')
+}
+function resetDragBadge() {
+  if (badgeEl) badgeEl.textContent = '移动 ' + badgeEl.dataset.sourceLabel;
 }
 
 /** Puts the badge under the cursor; called from every dragover we handle. */
@@ -85,14 +93,15 @@ function moveDragBadge(event) {
 /**
  * Escape cancels a drag.
  *
- * Every desktop file manager cancels on Escape and the HTML spec leaves it to
- * the page, so without this the only way to abandon a drag was to drop it
- * somewhere harmless. The browser still owns the gesture; dropping our state is
- * what stops the pending drop from acting on a gesture the user abandoned.
+ * The browser owns native drag cancellation. Also invalidate our pending state
+ * so a delayed drop cannot revive a cancelled gesture or clear the selection.
  */
 function onDragKeydown(event) {
   if (event.key !== 'Escape' || !session.draggingIds.length) return
-  onRowDragEnd()
+  event.preventDefault();
+  event.stopPropagation();
+  onRowDragEnd();
+  dragCancelled = true;
 }
 if (typeof document !== 'undefined') document.addEventListener('keydown', onDragKeydown, true)
 
@@ -106,13 +115,11 @@ if (typeof document !== 'undefined') document.addEventListener('keydown', onDrag
  * target reject a real internal drag, which reads to the user as "nothing
  * happens when I drop a folder on a folder".
  *
- * An OS file drop is excluded explicitly: it carries Files, and dropping a file
- * from the desktop must keep going to the window-level uploader.
+ * An image's native drag can carry Files as well as our MIME type. Internal
+ * signals take precedence; otherwise thumbnails are mistaken for uploads.
  */
 function isMoveDrag(event) {
   if (!event || !event.dataTransfer) return false;
-  const types = Array.from(event.dataTransfer.types || []);
-  if (types.includes('Files')) return false;
   if (session.draggingIds && session.draggingIds.length) return true;
   return hasNodeDrag(event.dataTransfer);
 }
@@ -127,25 +134,32 @@ function isMoveDrag(event) {
  */
 export function onFolderDragOver(folderId, event) {
   if (!isMoveDrag(event)) return;
+  event.stopPropagation();
   moveDragBadge(event);
-  const plan = planMoves(session.draggingIds, folderId, session.index);
-  if (!plan.allowed.length) {
+  clearDropTargets(document);
+  if (dragCancelled) { event.dataTransfer.dropEffect = 'none'; return; }
+  const plan = planMoves(moveRoots(session.draggingIds, session.index), folderId, session.index);
+  const movers = plan.allowed.filter((id) => (session.index.byId.get(id)?.parentId || null) !== (folderId || null));
+  if (plan.blocked.length || !movers.length) {
     // Blocked (self / subtree): refuse the drop instead of accepting it and
     // failing server-side. The row stays unpainted so the user gets no signal
     // that the drop would work.
     event.dataTransfer.dropEffect = 'none';
     markDropTarget(event.currentTarget, false);
+    if (badgeEl) badgeEl.textContent = '无法移动到此处';
     return;
   }
   event.preventDefault();
   event.stopPropagation();
   event.dataTransfer.dropEffect = 'move';
   markDropTarget(event.currentTarget, true);
+  if (badgeEl) badgeEl.textContent = '移动 ' + badgeEl.dataset.sourceLabel + ' → ' + (folderId ? session.index.byId.get(folderId).name : '我的云盘');
 }
 
 export function onFolderDragLeave(folderId, event) {
   if (!event || !settled(event.currentTarget, event.relatedTarget)) return;
   markDropTarget(event.currentTarget, false);
+  if (!document.querySelector('.is-drop-target')) resetDragBadge();
 }
 
 /* dragleave also fires when the pointer moves onto a child; only a leave that
@@ -162,50 +176,11 @@ export async function onFolderDrop(folderId, event) {
   if (!isMoveDrag(event) && !payload) return;
   event.preventDefault();
   event.stopPropagation();
-  markDropTarget(event.currentTarget, false);
-  const ids = decodeNodeIds(payload).length ? decodeNodeIds(payload) : session.draggingIds.slice();
-  session.draggingIds = [];
-  document.body.classList.remove('is-moving');
-  await moveByDrag(ids, folderId === undefined ? null : folderId);
-}
-
-/** Serial PUTs, one toast: "已移动 N 项 / M 项失败". */
-async function moveByDrag(ids, targetFolderId) {
-  const target = targetFolderId || null;
-  const plan = planMoves(ids, target, session.index);
-  if (!plan.allowed.length) {
-    const first = plan.blocked[0];
-    if (first) toast(blockedMessage(first.reason), { type: 'warning' });
-    return;
-  }
-  const folder = target ? session.index.byId.get(target) : null;
-  const label = folder ? folder.name : '我的云盘';
-
-  let moved = 0;
-  let failed = plan.blocked.length;
-  for (const id of plan.allowed) {
-    try {
-      await api.put('/nodes/' + id, { parentId: target });
-      moved += 1;
-    } catch (error) {
-      failed += 1;
-    }
-  }
-  if (moved && failed) toast('已移动 ' + moved + ' 项到 ' + label + '，' + failed + ' 项失败', { type: 'warning' });
-  else if (moved) toast('已移动 ' + moved + ' 项到 ' + label, { type: 'success', timeout: 2200 });
-  else toast('没有可移动的项目（' + moved + ' 项成功，' + failed + ' 项失败）', { type: 'warning' });
-  if (folder) store.state.expanded.add(folder.id);
-  await runtime.refreshData();
-}
-
-function blockedMessage(reason) {
-  switch (reason) {
-    case 'self': return '不能把文件夹移动到它自己里面。';
-    case 'descendant': return '不能把文件夹移动到它自己的子文件夹里。';
-    case 'target-missing': return '目标文件夹不存在或已删除。';
-    case 'target-not-folder': return '只能拖动到文件夹上。';
-    default: return '无法移动这些项目。';
-  }
+  const decoded = decodeNodeIds(payload);
+  const ids = decoded.length ? decoded : session.draggingIds.slice();
+  onRowDragEnd();
+  if (dragCancelled) return;
+  await moveItems(ids, folderId === undefined ? null : folderId);
 }
 
 /**
@@ -235,6 +210,7 @@ export function attachDropZone(shell) {
   };
 
   shell.addEventListener('dragenter', (event) => {
+    if (isMoveDrag(event)) return;
     if (!event.dataTransfer || !Array.from(event.dataTransfer.types || []).includes('Files')) return;
     event.preventDefault();
     depth += 1;
@@ -245,10 +221,14 @@ export function attachDropZone(shell) {
   // swallow it — that is what used to make the whole page accept any drop.
   shell.addEventListener('dragover', (event) => {
     if (!event.dataTransfer) return;
+    if (isMoveDrag(event)) {
+      clearDropTargets(document);
+      resetDragBadge();
+      moveDragBadge(event);
+      return;
+    }
     const types = Array.from(event.dataTransfer.types || []);
     if (!types.includes('Files')) {
-      if (types.includes(NODE_MIME)) event.dataTransfer.dropEffect = 'move';
-      moveDragBadge(event);
       return;
     }
     event.preventDefault();

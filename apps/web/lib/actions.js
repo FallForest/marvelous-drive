@@ -22,6 +22,7 @@ import { openUpdatePanel } from './updates.js';
 import { store, session } from './session.js';
 import { runtime } from './runtime.js';
 import { visibleNodes } from './views.js';
+import { moveRoots, planMoves } from './drag-move.js';
 
 /** Resolve a node id against the live tree and the current search page. */
 export function lookupNode(id) {
@@ -149,49 +150,82 @@ export async function moveSelection(nodes) {
   const target = await chooseFolder({ index: session.index, nodes: list, title: list.length > 1 ? '移动 ' + list.length + ' 项到…' : '移动到…' });
   // undefined = the dialog was dismissed; null = "my drive" root.
   if (target === undefined) return;
+  await moveItems(list.map((node) => node.id), target);
+}
+
+/** The menu, selection bar and drag gesture share one move operation. */
+export async function moveItems(ids, target) {
+  if (target === undefined) return;
   const destination = target || null;
-  const stayers = list.filter((node) => (node.parentId || null) === destination);
-  const movers = list.filter((node) => (node.parentId || null) !== destination);
+  const roots = moveRoots(ids, session.index);
+  const plan = planMoves(roots, destination, session.index);
+  const allowed = plan.allowed.map(lookupNode).filter(Boolean);
+  const stayers = allowed.filter((node) => (node.parentId || null) === destination);
+  const movers = allowed.filter((node) => (node.parentId || null) !== destination);
+  const reasons = {
+    self: '不能把文件夹移动到它自己里面。',
+    descendant: '不能把文件夹移动到它自己的子文件夹里。',
+    'target-missing': '目标文件夹不存在或已删除。',
+    'target-not-folder': '只能移动到文件夹。',
+    unknown: '项目不存在或已删除，请刷新后重试。',
+  };
+  if (plan.blocked.length) {
+    toast(reasons[plan.blocked[0].reason], { type: 'warning' });
+    return;
+  }
   if (!movers.length) {
     toast('这些项目已经在该文件夹中。', { type: 'info' });
     return;
   }
-  let moved = 0;
+  const moved = new Set();
   let failed = 0;
   let conflicts = 0;
+  const errors = [];
   for (const node of movers) {
     try {
       await moveNode(node, destination);
-      moved += 1;
+      moved.add(node.id);
     } catch (error) {
       failed += 1;
       if (error && (error.code === 'CONFLICT' || error.status === 409)) conflicts += 1;
+      errors.push(node.name + '：' + (error.message || '移动失败'));
     }
   }
-  store.state.selection = new Set();
+  // Keep failed items selected so they can be retried. Moving a selected folder
+  // also moves its children, without sending separate requests for them.
+  for (const id of Array.from(store.state.selection)) {
+    let current = id;
+    const visited = new Set();
+    while (current && !visited.has(current)) {
+      if (moved.has(current)) { store.state.selection.delete(id); break; }
+      visited.add(current);
+      current = session.index.byId.get(current)?.parentId;
+    }
+  }
   runtime.paintSelection();
   const folder = destination ? session.index.byId.get(destination) : null;
   const where = folder ? folder.name : '我的云盘';
-  const parts = ['已移动 ' + moved + ' 项到 ' + where];
+  const parts = [moved.size ? '已移动 ' + moved.size + ' 项到 ' + where : '没有项目被移动'];
   if (failed) parts.push('失败 ' + failed + ' 项');
   if (conflicts) parts.push('其中 ' + conflicts + ' 项因重名未移动（请先单独重命名）');
   if (stayers.length) parts.push('另有 ' + stayers.length + ' 项已在该文件夹中');
-  toast(parts.join('，') + '。', { type: failed ? 'warning' : 'success' });
-  await runtime.refreshData();
+  const details = errors.length ? errors.slice(0, 3).join('；') : undefined;
+  toast(parts.join('，') + '。', { type: failed ? 'warning' : 'success', detail: details });
+  if (moved.size) {
+    if (folder) store.state.expanded.add(folder.id);
+    const route = store.state.route;
+    const remainingSelection = new Set(store.state.selection);
+    await runtime.refreshData();
+    if (store.state.route === route) {
+      const visible = new Set(visibleNodes().map((node) => node.id));
+      store.state.selection = new Set([...remainingSelection].filter((id) => visible.has(id)));
+      runtime.paintSelection();
+    }
+  }
 }
 
 export async function startMove(node) {
-  const target = await chooseFolder({ index: session.index, node, title: '移动到…' });
-  if (target === null) return;
-  if (target === (node.parentId || null)) { toast('文件已经在该文件夹中。', { type: 'info' }); return; }
-  try {
-    await moveNode(node, target);
-    const folder = target ? session.index.byId.get(target) : null;
-    toast('已移动到 ' + (folder ? folder.name : '我的云盘'), { type: 'success', timeout: 2200 });
-    await runtime.refreshData();
-  } catch (error) {
-    toast((error && error.message) || '移动失败。', { type: 'error' });
-  }
+  return moveSelection([node]);
 }
 
 export async function startDelete(node) {

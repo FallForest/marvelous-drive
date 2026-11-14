@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
 import { buildIndex } from '../lib/state.js'
 import {
-  BLOCK_REASON, NODE_MIME, decodeNodeIds, encodeNodeIds, hasNodeDrag, planMoves, selectionForDrag,
+  BLOCK_REASON, NODE_MIME, decodeNodeIds, encodeNodeIds, hasNodeDrag, moveRoots, planMoves, selectionForDrag,
 } from '../lib/drag-move.js'
 
 /**
@@ -20,6 +20,16 @@ const nodes = [
   { id: 'b', kind: 'folder', name: 'B', parentId: null },
 ]
 const index = buildIndex(nodes)
+
+describe('moveRoots', () => {
+  it('moves selected descendants with their folder instead of flattening them', () => {
+    assert.deepEqual(moveRoots(['a11', 'f1', 'a', 'a1', 'f2'], index), ['a', 'f2'])
+  })
+
+  it('preserves independent files and folders and removes duplicate ids', () => {
+    assert.deepEqual(moveRoots(['a1', 'f1', 'b', 'f1'], index), ['a1', 'f1', 'b'])
+  })
+})
 
 describe('planMoves', () => {
   it('allows a file to move into another folder', () => {

@@ -279,7 +279,7 @@ function attachRowThumb(kindEl, node, source) {
       kindEl.classList.add('has-thumb');
       kindEl.replaceChildren(h('img', {
         class: 'thumb-inline',
-        attrs: { alt: '', loading: 'lazy', decoding: 'async', width: '32', height: '32', src: url },
+        attrs: { alt: '', loading: 'lazy', decoding: 'async', draggable: 'false', width: '32', height: '32', src: url },
       }));
     })
     .catch(() => { /* no thumbnail: the icon stays */ });
@@ -298,12 +298,13 @@ function renderGrid(ctx, nodes) {
       thumb.appendChild(placeholder);
       // A format no route can decode has no thumbnail to ask for; the icon IS
       // the answer, and asking would only produce a failed request per row.
-      if (!gridSource) return;
-      thumbFor(node, THUMBNAIL_WIDTH, gridSource).then((url) => {
-        if (!thumb.isConnected) return;
-        const img = h('img', { attrs: { alt: '', loading: 'lazy', decoding: 'async', src: url } });
-        thumb.replaceChildren(img);
-      }).catch(() => { /* keep the icon placeholder */ });
+      if (gridSource) {
+        thumbFor(node, THUMBNAIL_WIDTH, gridSource).then((url) => {
+          if (!thumb.isConnected) return;
+          const img = h('img', { attrs: { alt: '', loading: 'lazy', decoding: 'async', draggable: 'false', src: url } });
+          thumb.replaceChildren(img);
+        }).catch(() => { /* keep the icon placeholder */ });
+      }
     } else {
       thumb.innerHTML = icon(kindIcon(kind, node.name), 26);
     }
@@ -404,6 +405,8 @@ export function beginInlineRename(rowEl, initialName, commit) {
     attrs: { 'aria-label': '文件名', maxlength: '255' },
     value: initialName,
   });
+  const draggable = rowEl.getAttribute('draggable');
+  rowEl.setAttribute('draggable', 'false');
   nameEl.replaceWith(input);
   input.focus();
   const ext = initialName.lastIndexOf('.');
@@ -413,6 +416,8 @@ export function beginInlineRename(rowEl, initialName, commit) {
   const finish = (value) => {
     if (done) return;
     done = true;
+    if (draggable === null) rowEl.removeAttribute('draggable');
+    else rowEl.setAttribute('draggable', draggable);
     if (value && value !== initialName) commit(value);
     else {
       const restored = h('span', { class: 'name', attrs: { title: initialName }, text: initialName });
@@ -427,6 +432,7 @@ export function beginInlineRename(rowEl, initialName, commit) {
   input.addEventListener('blur', () => finish(input.value.trim()));
   input.addEventListener('click', (event) => event.stopPropagation());
   input.addEventListener('dblclick', (event) => event.stopPropagation());
+  input.addEventListener('dragstart', (event) => event.stopPropagation());
 }
 
 /* ── row-level API actions (used by app.js) ───────────────────── */

@@ -1,7 +1,7 @@
 {
   "name": "marvelous-drive",
   "private": true,
-  "version": "0.22.0",
+  "version": "0.23.0",
   "type": "module",
   "description": "Self-hosted cloud drive with a web client, a CLI and a content-addressed blob store.",
   "engines": {
@@ -27,6 +27,8 @@
     "gallery-check": "node scripts/gallery-check.mjs",
     "heic-check": "node scripts/heic-check.mjs",
     "dnd-check": "node scripts/dnd-check.mjs",
+    "interaction-check": "node scripts/interaction-check.mjs",
+    "move-check": "node scripts/move-check.mjs",
     "browser-checks": "node scripts/run-checks.mjs",
     "motion-lint": "node scripts/motion-lint.mjs apps/web/styles",
     "motion-check": "node scripts/motion-lint.mjs apps/web/styles && node scripts/feel-check.mjs",

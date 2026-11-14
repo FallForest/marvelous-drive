@@ -41,7 +41,15 @@ export function renderSidebar(ctx) {
     NAV.map((item) => h('button', {
       class: 'side-row',
       attrs: { type: 'button', 'aria-current': route.name === item.key ? 'page' : null },
-      on: { click: () => ctx.navigate(item.path()) },
+      on: {
+        click: () => ctx.navigate(item.path()),
+        ...(item.key === 'drive' ? {
+          dragenter: (event) => ctx.onFolderDragOver?.(null, event),
+          dragover: (event) => ctx.onFolderDragOver?.(null, event),
+          dragleave: (event) => ctx.onFolderDragLeave?.(null, event),
+          drop: (event) => ctx.onFolderDrop?.(null, event),
+        } : {}),
+      },
     }, raw(icon(item.icon, 15)), h('span', { text: item.label }),
       item.key === 'trash' && state.stats && state.stats.trashed
         ? h('span', { class: 'count', text: String(state.stats.trashed) })
@@ -149,6 +157,7 @@ function treeRow(folder, depth, ctx, route) {
       },
       // Drop target for a dragged row: the shell installs the handlers because
       // it owns the drop bookkeeping (Files vs. our payload, hover state).
+      dragenter: (event) => { if (ctx.onFolderDragOver) ctx.onFolderDragOver(folder.id, event); },
       dragover: (event) => { if (ctx.onFolderDragOver) ctx.onFolderDragOver(folder.id, event); },
       dragleave: (event) => { if (ctx.onFolderDragLeave) ctx.onFolderDragLeave(folder.id, event); },
       drop: (event) => { if (ctx.onFolderDrop) ctx.onFolderDrop(folder.id, event); },
@@ -205,6 +214,7 @@ export function renderBreadcrumb(ctx) {
     // Every breadcrumb level is a drop target, including the level being shown
     // (dropping there is a no-op the server accepts without a version bump).
     const dropHandlers = crumb.folderId === undefined ? null : {
+      dragenter: (event) => { if (ctx.onFolderDragOver) ctx.onFolderDragOver(crumb.folderId, event); },
       dragover: (event) => { if (ctx.onFolderDragOver) ctx.onFolderDragOver(crumb.folderId, event); },
       dragleave: (event) => { if (ctx.onFolderDragLeave) ctx.onFolderDragLeave(crumb.folderId, event); },
       drop: (event) => { if (ctx.onFolderDrop) ctx.onFolderDrop(crumb.folderId, event); },

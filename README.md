@@ -48,8 +48,12 @@ queue, or a build step: `node:sqlite` is transactional, `node:http` streams, and
   nothing. `mdrive upload` does the same.
 - **Quota and retention** — an optional per-account ceiling, and a trash that
   expires after 30 days (configurable) instead of growing forever.
-- **Batch operations** — the selection bar moves many nodes at once, rows can be
-  dragged onto a sidebar folder, and the row menu zips a folder on demand.
+- **Batch operations** — the selection bar moves many nodes at once. Files and
+  folders can be dragged onto folders in the list, grid or sidebar, or onto an
+  ancestor breadcrumb and the My Drive navigation item. Selected folders carry
+  their descendants without flattening the tree; name conflicts keep the
+  existing file intact. The move picker offers the same operation by click or
+  keyboard. See [docs/INTERACTIONS.md](docs/INTERACTIONS.md).
 - **Duplicates and thumbnails** — a report groups files that share one blob so
   the copies can be dropped, and image rows show a real thumbnail.
 - **Activity log** — every mutation is recorded and readable from the account
@@ -155,6 +159,9 @@ node scripts/smoke.mjs            # 20 API checks against a running instance
 
 node scripts/browser-check.mjs    # 15 checks: login, list, preview, trash, share, mobile
 node scripts/feature-check.mjs    #  9 checks: thumbnails, batch bar, drag, duplicates
+node scripts/dnd-check.mjs        # native mouse drags, thumbnails, groups and destinations
+node scripts/interaction-check.mjs # grid fallbacks, nested buttons, multi-select Delete
+node scripts/move-check.mjs       # picker cancellation, root, keyboard, nesting and conflicts
 node scripts/versions-check.mjs   #  7 checks: version drawer, download, v1 has none
 node scripts/team-check.mjs       #  5 checks: the team panel and roles
 node scripts/lock-check.mjs       #  6 checks: claim, supersede, release the edit lock

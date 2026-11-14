@@ -48,6 +48,7 @@ function listContext(ctx, nodes) {
     onPurge: ctx.onPurge,
     onPreview: ctx.onPreview,
     onDownload: ctx.onDownload,
+    onDownloadArchive: ctx.onDownloadArchive,
     onCopyLink: ctx.onCopyLink,
     onRowDragStart: ctx.onRowDragStart,
     onRowDragEnd: ctx.onRowDragEnd,

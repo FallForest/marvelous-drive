@@ -109,13 +109,20 @@ async function loadRoute(route) {
       const q = route.query || '';
       // Stats come along even here: landing directly on /search used to leave the
       // sidebar claiming "已用 0 B" because nothing ever fetched them.
-      const [payload, stats] = await Promise.all([
+      const [payload, stats, live] = await Promise.all([
         q ? api.get('/search?q=' + encodeURIComponent(q) + '&limit=50') : Promise.resolve({ results: [] }),
         api.get('/storage/stats').catch(() => ({ stats: store.state.stats })),
+        api.get('/nodes'),
       ]);
+      // A direct search URL still needs the tree: it supplies sidebar targets,
+      // source parents and the move picker's destinations.
+      store.state.nodes = live && Array.isArray(live.nodes) ? live.nodes : [];
+      session.index = buildIndex(store.state.nodes);
       store.state.searchResults = payload && Array.isArray(payload.results) ? payload.results : [];
       store.state.searchQuery = q;
       if (stats && stats.stats) store.state.stats = stats.stats;
+      store.state.selection = new Set();
+      store.state.anchorId = null;
       store.state.loading = false;
       paintRoute(route);
       return;
@@ -432,6 +439,9 @@ document.addEventListener('keydown', (event) => {
   }
   if (!store.state.user) return;
   if (typing) return;
+  // Native controls and overlays own their keys. In particular, Enter on a
+  // dialog's Move/Cancel button must not open the selected file behind it.
+  if (target && target.closest('button, a[href], [role="dialog"], [role="menu"], .drawer')) return;
 
   if (event.key === '/') {
     const input = document.querySelector('.side-search input');
