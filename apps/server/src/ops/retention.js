@@ -2,7 +2,6 @@ import { readdir, rm, unlink } from 'node:fs/promises'
 import { join } from 'node:path'
 import { db, nowIso } from '../db.js'
 import { config } from '../config.js'
-import { blobPath } from '../storage/blobs.js'
 import { backend } from '../storage/backend.js'
 import { dropVersions } from '../versions.js'
 import { pruneAudit } from './audit.js'
@@ -22,14 +21,6 @@ import { pruneAudit } from './audit.js'
 
 const DAY_MS = 24 * 60 * 60 * 1000
 
-/** Every trashed node older than the cutoff, newest first. */
-export function expiredTrash(userId, now = Date.now()) {
-  const cutoff = new Date(now - config.trashRetentionDays * DAY_MS).toISOString()
-  return db.prepare(`SELECT * FROM nodes
-    WHERE user_id=? AND deleted_at IS NOT NULL AND deleted_at < ?
-    ORDER BY deleted_at ASC`).all(userId, cutoff)
-}
-
 /** Descendant ids of `id`, including itself. */
 function subtreeIds(userId, id) {
   return db.prepare(`WITH RECURSIVE sub(id) AS (
@@ -45,7 +36,7 @@ function subtreeIds(userId, id) {
  * Returns how many nodes and bytes were removed. Safe to call with an empty
  * list; safe to call repeatedly.
  */
-export async function purgeNodes(userId, ids) {
+async function purgeNodes(userId, ids) {
   if (!ids.length) return { nodes: 0, bytes: 0, blobs: 0 }
   const all = new Set()
   for (const id of ids) for (const child of subtreeIds(userId, id)) all.add(child)
@@ -108,7 +99,7 @@ export async function sweepExpiredTrash(now = Date.now()) {
 }
 
 /** Where a resumable upload session keeps its chunk files. */
-export const sessionDirFor = (id) => join(config.tmpDir, 'sessions', id)
+const sessionDirFor = (id) => join(config.tmpDir, 'sessions', id)
 
 /**
  * Drops upload sessions that expired while nobody was looking.
@@ -125,7 +116,7 @@ export const sessionDirFor = (id) => join(config.tmpDir, 'sessions', id)
  *   - session directories with no row at all (a crash between INSERT and mkdir,
  *     or a delete that removed the row and died before the unlink).
  */
-export async function sweepExpiredSessions(now = Date.now()) {
+async function sweepExpiredSessions(now = Date.now()) {
   const cutoff = new Date(now).toISOString()
   const expired = db.prepare('SELECT id FROM upload_sessions WHERE expires_at<=?').all(cutoff)
   for (const row of expired) {

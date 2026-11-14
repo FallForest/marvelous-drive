@@ -61,13 +61,3 @@ export async function hashFile(path) {
   })
   return hash.digest('hex')
 }
-
-/** A path whose bytes are `hash` (hard link when possible), for ZIP assembly. */
-export async function materialize(hash, targetPath) {
-  return backend.link(hash, targetPath)
-}
-
-export function blobSize(hash) {
-  const row = db.prepare('SELECT size FROM blobs WHERE hash=?').get(hash)
-  return row ? row.size : 0
-}

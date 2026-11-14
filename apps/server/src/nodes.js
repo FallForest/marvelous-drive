@@ -64,7 +64,7 @@ export function requireNode(userId, id) {
   return row
 }
 
-export function requireFolder(userId, id) {
+function requireFolder(userId, id) {
   if (!id) return null
   const row = requireNode(userId, id)
   if (row.deleted_at) throw fail(404, 'NOT_FOUND', 'Folder was not found.')

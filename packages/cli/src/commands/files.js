@@ -1,5 +1,3 @@
-import { createHash } from 'node:crypto';
-import { createReadStream } from 'node:fs';
 import { stat } from 'node:fs/promises';
 import { basename, extname, resolve } from 'node:path';
 import sanitizeName from '../naming.js';
@@ -9,7 +7,7 @@ import { RESUMABLE_THRESHOLD, instantUpload, shouldUseResumable, uploadResumable
 import { isUuid, requirePath, requirePositional, resolvePath, splitPath } from './support.js';
 
 /** Minimal extension → mime map; unknown types fall back per the contract. */
-export const MIME = {
+const MIME = {
   '.txt': 'text/plain',
   '.md': 'text/markdown',
   '.markdown': 'text/markdown',
@@ -45,20 +43,14 @@ export function mimeFor(file) {
   return MIME[extname(file).toLowerCase()] ?? 'application/octet-stream';
 }
 
-export function isTextMime(mime) {
+function isTextMime(mime) {
   if (typeof mime !== 'string' || mime === '') return false;
   if (mime.startsWith('text/')) return true;
   return /(json|xml|javascript|ecmascript|svg|x-yaml|csv|markdown|x-sh)/.test(mime);
 }
 
-export async function sha256File(file) {
-  const hash = createHash('sha256');
-  for await (const chunk of createReadStream(file)) hash.update(chunk);
-  return hash.digest('hex');
-}
-
 /** Parses "8MiB", "64k", "1048576" into a byte count. */
-export function parseByteSize(text, options = {}) {
+function parseByteSize(text, options = {}) {
   const match = /^\s*(\d+(?:\.\d+)?)\s*(b|k|kb|kib|m|mb|mib|g|gb|gib)?\s*$/i.exec(String(text ?? ''));
   if (!match) {
     throw usageError('Cannot parse "' + text + '" as a byte size. Use a number with an optional unit, for example 1048576, 64KiB, or 8MiB.');

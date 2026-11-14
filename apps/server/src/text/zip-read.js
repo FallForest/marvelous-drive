@@ -19,7 +19,7 @@ import { inflateRawSync } from 'node:zlib'
  *   bomb fails fast instead of exhausting memory.
  */
 
-export const ZIP_LIMITS = Object.freeze({
+const ZIP_LIMITS = Object.freeze({
   maxEntries: 4096,
   maxEntryBytes: 32 * 1024 * 1024,
   maxTotalBytes: 128 * 1024 * 1024,
@@ -46,7 +46,7 @@ const notZip = (message = 'The buffer is not a ZIP archive.') => new ZipError('N
 const corrupt = (message) => new ZipError('CORRUPT', message)
 
 /** Normalises an entry name so lookups survive "\" and "./" spellings. */
-export function normalizeEntryName(name) {
+function normalizeEntryName(name) {
   return String(name || '')
     .replace(/\\/g, '/')
     .replace(/^(\.\/)+/, '')
@@ -215,7 +215,7 @@ function readEntryBytes(source, entry, limits, budget) {
  * Iteration materialises every entry (bounded by the limits); get/has only
  * touch the entry you ask for, which is what the OOXML extractor needs.
  */
-export class ZipArchive extends Map {
+class ZipArchive extends Map {
   #source
   #entries
   #limits

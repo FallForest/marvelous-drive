@@ -169,6 +169,31 @@ button.crumb:active{transform:scale(var(--press-scale));transition-duration:var(
 /* drop target: the same highlight on rows, sidebar folders and breadcrumbs, from
    one class (lib/drag-move.js marks it, this file decides what it looks like) */
 .is-drop-target{background:var(--accent-soft);box-shadow:inset 0 0 0 1px var(--accent);color:var(--accent-strong)}
+/* The count of what is being dragged, shown only for a multi-selection. It
+   follows the cursor because the pointer is the only thing the user is
+   watching during a drag; a badge parked in a corner would be invisible. */
+.drag-badge{
+  position:fixed;left:0;top:0;z-index:var(--z-toast);
+  padding:3px 8px;border-radius:999px;
+  background:var(--accent-solid);color:var(--text-on-accent);
+  font-size:var(--fs-xs);font-weight:600;white-space:nowrap;
+  box-shadow:var(--shadow-pop);pointer-events:none;
+  opacity:0;transform:translate(-50%,-140%) scale(.94);
+  transition:opacity var(--duration-fast) var(--ease-standard),transform var(--duration-fast) var(--ease-spring-snappy);
+}
+.drag-badge.is-on{opacity:1;transform:translate(-50%,-160%) scale(1)}
+/* During a drag the source rows step back so the drop targets read as the live
+   surface. Without this the dragged row looks identical to its neighbours and
+   the only feedback is the browser's own ghost. */
+body.is-moving .frow[data-selected="true"],
+body.is-moving .gcard[data-selected="true"]{opacity:.45}
+body.is-moving .frow,body.is-moving .gcard{cursor:grabbing}
+/* The badge is positioned on every dragover, so it is promoted while the drag
+   is live and demoted the moment it ends: `.is-moving` exists only during the
+   gesture, which is exactly the "class that only exists while it animates"
+   pattern the motion rules ask for. */
+/* Follow the pointer without a rAF loop: the badge is positioned by the drag
+   events themselves (see dnd.js), and a transform is cheap to update. */
 .frow:focus-visible{outline:2px solid var(--focus-ring);outline-offset:-2px}
 .frow-main{display:flex;align-items:center;gap:9px;min-width:0}
 .frow .kind{width:16px;height:16px;flex:0 0 16px;color:var(--text-muted)}

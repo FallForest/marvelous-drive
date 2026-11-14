@@ -20,10 +20,16 @@ jobs:
         run: node --test 'packages/cli/test/*.test.mjs'
       - name: Web logic tests
         run: node --test 'apps/web/test/*.test.js'
+      - name: Script helper tests
+        run: node --test 'scripts/test/*.test.mjs'
       - name: Motion lint (static)
         run: node scripts/motion-lint.mjs apps/web/styles
       - name: Syntax check
         run: node scripts/check-syntax.mjs
+      # A module nothing imports is dead weight a reviewer cannot see: the import
+      # graph is checked here instead of in review.
+      - name: Dead code (static)
+        run: node scripts/dead-code.mjs --strict
       # A broken compose file only shows up when someone tries to deploy, and
       # the update path depends on the shipped one being valid.
       - name: Compose file is valid

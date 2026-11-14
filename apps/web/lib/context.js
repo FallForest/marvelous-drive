@@ -15,7 +15,7 @@ import { routePath } from './state.js';
 import { runtime } from './runtime.js';
 import { rowAction, ROW_ACTION, isSelectionClick, isRepeatClick, noteOpen } from './row-action.js';
 import {
-  lookupNode, openPreviewFor, downloadOne, downloadFolderArchive, copyShareLink,
+  openPreviewFor, downloadOne, downloadFolderArchive, copyShareLink,
   toggleStarWithToast, startRename, startMove, startDelete, startRestore, startPurge,
   startNewFolder, openUserMenu,
 } from './actions.js';
@@ -27,7 +27,7 @@ import { onRowDragStart, onRowDragEnd, onFolderDragOver, onFolderDragLeave, onFo
    focus + caret across a debounced navigation. */
 const searchFocus = { active: false, start: 0, end: 0 };
 
-export function rememberSearchFocus() {
+function rememberSearchFocus() {
   const input = document.querySelector('.side-search input');
   if (!input) return;
   searchFocus.active = document.activeElement === input;
@@ -189,7 +189,7 @@ export function buildContext(ancestors, selectionSlot) {
 }
 
 /** The primary action for a row: a folder navigates, a file previews. */
-export function openFromRow(node) {
+function openFromRow(node) {
   if (!node) return;
   if (node.kind === 'folder') runtime.navigate('/folder/' + encodeURIComponent(node.id));
   else openPreviewFor(node);
@@ -199,7 +199,7 @@ export function openFromRow(node) {
  * Selection gestures: Shift extends from the anchor, Ctrl/Cmd toggles one row,
  * a bare click replaces the selection.
  */
-export function selectFor(node, event) {
+function selectFor(node, event) {
   const state = store.state;
   if (event && event.shiftKey && state.anchorId) {
     const order = visibleNodes().map((item) => item.id);
@@ -228,5 +228,3 @@ export function selectFor(node, event) {
   state.anchorId = node.id;
   runtime.paintSelection();
 }
-
-export { lookupNode };

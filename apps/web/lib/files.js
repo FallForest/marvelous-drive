@@ -8,7 +8,7 @@ import { h, raw } from './dom.js';
 import { icon, kindIcon, fileKind, bytes, relativeTime, formatDate, sortNodes } from './format.js';
 import { openMenu } from './ui.js';
 import { api, fetchBlob } from './api.js';
-import { canThumbnail, clearThumbs, rememberThumb } from './thumb-cache.js';
+import { rememberThumb, THUMBNAIL_MIMES } from './thumb-cache.js';
 
 const COLUMNS = [
   { key: 'name', label: '名称', cls: 'col-name' },
@@ -113,6 +113,26 @@ export function renderFileList(ctx) {
   return wrap;
 }
 
+/**
+ * The dragover / dragleave / drop trio for a row that can RECEIVE a dragged
+ * node.
+ *
+ * Only folders qualify: dropping a file onto a file has no meaning, and a
+ * handler that accepts it would paint a highlight promising something the drop
+ * cannot deliver. A folder being dragged is not excluded here — dnd.js asks
+ * planMoves(), which owns the "not into yourself, not into your own subtree"
+ * rule, so this list and the sidebar cannot disagree.
+ */
+function dropTargetHandlers(ctx, node) {
+  if (!node || node.kind !== 'folder') return {};
+  return {
+    dragover: (event) => { if (ctx.onFolderDragOver) ctx.onFolderDragOver(node.id, event); },
+    dragenter: (event) => { if (ctx.onFolderDragOver) ctx.onFolderDragOver(node.id, event); },
+    dragleave: (event) => { if (ctx.onFolderDragLeave) ctx.onFolderDragLeave(node.id, event); },
+    drop: (event) => { if (ctx.onFolderDrop) ctx.onFolderDrop(node.id, event); },
+  };
+}
+
 function renderRow(ctx, node, selected) {
   const state = ctx.state;
   const isFolder = node.kind === 'folder';
@@ -120,7 +140,14 @@ function renderRow(ctx, node, selected) {
   const nameEl = h('span', { class: 'name', attrs: { title: node.name }, text: node.name });
   const kindEl = h('span', { class: 'kind' + (isFolder ? ' is-folder' : ''), html: icon(kindIcon(kind, node.name), 16) });
   // Only the three formats the server thumbnails get an image; the rest keep the icon.
-  if (!isFolder && canThumbnail(node.mime)) attachRowThumb(kindEl, node);
+  // Three routes can supply a list thumbnail, and HEIC used to reach none of
+  // them: /thumbnail refuses it (415), so a folder of phone photos rendered as
+  // a grid of generic picture icons. The transcoding route answers a PNG the
+  // same way, so it is used as the thumbnail source too — the decoded preview
+  // is cached on the server by blobHash, so the list and the drawer share one
+  // decode.
+  const thumbSource = thumbnailSourceFor(node);
+  if (!isFolder && thumbSource) attachRowThumb(kindEl, node, thumbSource);
   const main = h('div', { class: 'frow-main' },
     kindEl,
     nameEl,
@@ -162,10 +189,14 @@ function renderRow(ctx, node, selected) {
       click: (event) => ctx.onRowClick(node, event),
       keydown: (event) => ctx.onRowKey(event, node),
       contextmenu: (event) => { event.preventDefault(); ctx.onSelectOnly(node, event); openRowMenu(ctx, node, moreBtn); },
-      // Dragging a row moves it (or the whole selection); dropping it on a
-      // folder row / breadcrumb is handled by the drop targets in app.js.
+      // Dragging a row moves it (or the whole selection). Dropping it back on a
+      // FOLDER row in this list is the gesture people actually use, so the row
+      // is a drop target too — it was not, and the comment that said "handled
+      // by app.js" was describing code that had moved away, which is exactly
+      // how a folder became un-droppable while the sidebar kept working.
       dragstart: (event) => { if (ctx.onRowDragStart) ctx.onRowDragStart(node, event); },
       dragend: (event) => { if (ctx.onRowDragEnd) ctx.onRowDragEnd(node, event); },
+      ...dropTargetHandlers(ctx, node),
     },
   },
     selectionBox(ctx, node, selected, 'row-pick'),
@@ -195,7 +226,7 @@ const THUMB_CACHE_LIMIT = 200;
  * HTTP cache twice. The value is kept because a future server-side resizer will
  * want it; it is just not allowed to vary per call site.
  */
-export const THUMBNAIL_WIDTH = 1024;
+const THUMBNAIL_WIDTH = 1024;
 const LIST_THUMB_WIDTH = THUMBNAIL_WIDTH;
 
 /** Server-side thumbnail URL. Width is a hint; today the bytes are the original. */
@@ -203,10 +234,13 @@ export function thumbnailUrl(id, width) {
   return '/api/v1/files/' + encodeURIComponent(id) + '/thumbnail?w=' + (width || THUMBNAIL_WIDTH);
 }
 
-function thumbFor(node, width) {
+function thumbFor(node, width, source) {
   const cached = thumbCache.get(node.id);
   if (cached) return Promise.resolve(cached);
-  return fetchBlob(thumbnailUrl(node.id, width)).then((blob) => {
+  const url = source === 'preview-image'
+    ? '/api/v1/files/' + encodeURIComponent(node.id) + '/preview-image?w=' + Math.max(width, 240)
+    : thumbnailUrl(node.id, width);
+  return fetchBlob(url).then((blob) => {
     const url = URL.createObjectURL(blob);
     const stored = rememberThumb(thumbCache, node.id, url, THUMB_CACHE_LIMIT);
     // A concurrent render may have won the race: keep its URL, drop this one.
@@ -221,13 +255,25 @@ export function peekThumbUrl(id) {
   return thumbCache.get(id) || null;
 }
 
-export function clearThumbCache() {
-  for (const url of clearThumbs(thumbCache)) URL.revokeObjectURL(url);
+/**
+ * Where a row's thumbnail comes from, or null when there is none.
+ *
+ * Two routes, one rule: `/thumbnail` for the three formats a browser always
+ * decodes, `/preview-image` for the ones the server transcodes (HEIC/HEIF).
+ * Both answer immutable-cacheable bytes keyed by the blob, so the same picture
+ * costs one request whether it is seen in the list or in the drawer.
+ */
+export function thumbnailSourceFor(node) {
+  if (!node || node.kind === 'folder') return null;
+  const mime = String(node.mime || '').split(';')[0].trim().toLowerCase();
+  if (THUMBNAIL_MIMES.has(mime)) return 'thumbnail';
+  if (mime === 'image/heic' || mime === 'image/heif') return 'preview-image';
+  return null;
 }
 
 /** Swaps the row icon for a 32px thumbnail, silently keeping the icon on failure. */
-function attachRowThumb(kindEl, node) {
-  thumbFor(node, LIST_THUMB_WIDTH)
+function attachRowThumb(kindEl, node, source) {
+  thumbFor(node, LIST_THUMB_WIDTH, source)
     .then((url) => {
       if (!kindEl.isConnected) return;
       kindEl.classList.add('has-thumb');
@@ -246,10 +292,14 @@ function renderGrid(ctx, nodes) {
     const kind = isFolder ? 'folder' : fileKind(node.mime, node.name);
     const selected = ctx.state.selection.has(node.id);
     const thumb = h('div', { class: 'thumb' });
+    const gridSource = thumbnailSourceFor(node);
     if (kind === 'image') {
       const placeholder = raw(icon('file-image', 26));
       thumb.appendChild(placeholder);
-      thumbFor(node, THUMBNAIL_WIDTH).then((url) => {
+      // A format no route can decode has no thumbnail to ask for; the icon IS
+      // the answer, and asking would only produce a failed request per row.
+      if (!gridSource) return;
+      thumbFor(node, THUMBNAIL_WIDTH, gridSource).then((url) => {
         if (!thumb.isConnected) return;
         const img = h('img', { attrs: { alt: '', loading: 'lazy', decoding: 'async', src: url } });
         thumb.replaceChildren(img);
@@ -281,6 +331,7 @@ function renderGrid(ctx, nodes) {
         contextmenu: (event) => { event.preventDefault(); ctx.onSelectOnly(node, event); openRowMenu(ctx, node, moreBtn); },
         dragstart: (event) => { if (ctx.onRowDragStart) ctx.onRowDragStart(node, event); },
         dragend: (event) => { if (ctx.onRowDragEnd) ctx.onRowDragEnd(node, event); },
+        ...dropTargetHandlers(ctx, node),
       },
     },
       selectionBox(ctx, node, selected, 'card-pick'),
@@ -313,7 +364,7 @@ function emptyFolder(ctx) {
 }
 
 /** Row context menu — shared by the ⋯ button and right click. */
-export function openRowMenu(ctx, node, anchor) {
+function openRowMenu(ctx, node, anchor) {
   const isTrash = ctx.state.route.name === 'trash';
   const isFolder = node.kind === 'folder';
   const items = [];
@@ -411,14 +462,4 @@ export async function restoreNode(node) {
 
 export async function purgeNode(node) {
   return api.del('/nodes/' + node.id + '/permanent');
-}
-
-export async function copyNode(node, parentId) {
-  const payload = await api.post('/nodes/' + node.id + '/copy', { parentId: parentId || undefined });
-  return payload.node;
-}
-
-/** Absolute URL for a share token (same origin). */
-export function shareUrl(token) {
-  return window.location.origin + '/s/' + encodeURIComponent(token);
 }

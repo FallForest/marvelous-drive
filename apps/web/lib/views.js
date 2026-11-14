@@ -28,7 +28,7 @@ export function visibleNodes() {
 }
 
 /** Everything renderFileList() needs: the visible list plus the handlers. */
-export function listContext(ctx, nodes) {
+function listContext(ctx, nodes) {
   return {
     state: Object.assign({}, store.state, { nodes }),
     index: session.index,
@@ -51,11 +51,19 @@ export function listContext(ctx, nodes) {
     onCopyLink: ctx.onCopyLink,
     onRowDragStart: ctx.onRowDragStart,
     onRowDragEnd: ctx.onRowDragEnd,
+    // The three drop handlers are what make a folder ROW a place you can drop
+    // onto. They were missing from this list, which is why dragging a folder
+    // onto another folder in the main list did nothing while the sidebar (which
+    // reads ctx directly) worked — the row guard saw undefined and installed
+    // no listener at all.
+    onFolderDragOver: ctx.onFolderDragOver,
+    onFolderDragLeave: ctx.onFolderDragLeave,
+    onFolderDrop: ctx.onFolderDrop,
   };
 }
 
 /** The loading state: a heading bar and eight rows, so the layout does not jump. */
-export function skeletonView() {
+function skeletonView() {
   const wrap = h('div', { class: 'list' });
   wrap.appendChild(h('div', { class: 'section-head' },
     h('span', { class: 'skeleton', style: { width: '120px', height: '16px' } })));
@@ -67,7 +75,7 @@ export function skeletonView() {
 }
 
 /** The hints under the list. Keyboard shortcuts are documented where they are used. */
-export function hints() {
+function hints() {
   const item = (kbd, label) => h('span', {}, h('span', { class: 'kbd', text: kbd }), label);
   return h('div', { class: 'hint-card' },
     // The click model is stated here because it is the one rule a new user has
@@ -86,7 +94,7 @@ export function hints() {
 }
 
 /** "“x” · 3 个结果 · 2 个在内容中命中" */
-export function describeResults(query, results) {
+function describeResults(query, results) {
   const inContent = results.filter((row) => row.matched === 'content').length;
   const base = '“' + query + '” · ' + results.length + ' 个结果';
   return inContent ? base + ' · ' + inContent + ' 个在内容中命中' : base;
@@ -98,7 +106,7 @@ export function describeResults(query, results) {
  * The snippet is plain text from SQLite; it is rendered as text (never HTML), so
  * a file containing markup cannot inject anything through a search result.
  */
-export function matchNotes(results) {
+function matchNotes(results) {
   const hits = results.filter((row) => row.matched === 'content' && row.snippet);
   if (!hits.length) return null;
   return h('div', { class: 'match-notes', attrs: { 'aria-label': '内容匹配' } },
@@ -110,7 +118,7 @@ export function matchNotes(results) {
 }
 
 /** The search page. */
-export function searchView(ctx) {
+function searchView(ctx) {
   const state = store.state;
   const query = state.searchQuery || '';
   const results = state.searchResults || [];
@@ -143,7 +151,7 @@ export function searchView(ctx) {
 }
 
 /** The drive / trash / starred list. */
-export function listView(ctx) {
+function listView(ctx) {
   const route = store.state.route;
   const nodes = visibleNodes();
   const heading = route.name === 'trash'

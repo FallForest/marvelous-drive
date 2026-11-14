@@ -1,4 +1,4 @@
-import { mkdirSync, writeFileSync } from 'node:fs'
+import { mkdirSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { runBrowserCheck, signUpInPage, sleep, serverUrl } from '../scripts/lib/browser.mjs'
 

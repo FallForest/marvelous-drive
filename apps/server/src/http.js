@@ -43,11 +43,6 @@ export function sendRaw(res, status, payload, headers = {}) {
   res.end(body)
 }
 
-export function sendEmpty(res, status = 204) {
-  res.writeHead(status, { 'content-length': 0 })
-  res.end()
-}
-
 /** Reads and parses a JSON body, rejecting anything above `limit` bytes. */
 export async function readJson(req, limit = 1024 * 1024) {
   const declared = Number(req.headers['content-length'] || 0)
@@ -125,11 +120,11 @@ const CONTENT_TYPES = {
   '.pdf': 'application/pdf',
 }
 
-export const contentTypeFor = (path, fallback = 'application/octet-stream') =>
+const contentTypeFor = (path, fallback = 'application/octet-stream') =>
   CONTENT_TYPES[extname(path).toLowerCase()] || fallback
 
 /** Parses a single `Range: bytes=a-b` header; returns null when unusable. */
-export function parseRange(header, size) {
+function parseRange(header, size) {
   if (!header) return null
   const match = /^bytes=(\d*)-(\d*)$/.exec(String(header).trim())
   if (!match) return null
@@ -148,38 +143,6 @@ export function parseRange(header, size) {
   }
   if (!Number.isFinite(start) || !Number.isFinite(end) || start > end || start >= size) return null
   return { start, end: Math.min(end, size - 1) }
-}
-
-/** Sends a file with Range support and a caller-chosen disposition. */
-export async function sendFile(req, res, filePath, { mime, download = false, filename } = {}) {
-  const info = await stat(filePath).catch(() => null)
-  if (!info || !info.isFile()) throw fail(404, 'NOT_FOUND', 'File was not found.')
-  const size = info.size
-  const type = mime || contentTypeFor(filePath)
-  const headers = {
-    'content-type': type,
-    'accept-ranges': 'bytes',
-    'cache-control': 'private, max-age=0, must-revalidate',
-    'last-modified': info.mtime.toUTCString(),
-  }
-  if (download) {
-    const name = basename(filename || filePath).replace(/["\\\r\n]/g, '_')
-    headers['content-disposition'] = `attachment; filename="${name}"; filename*=UTF-8''${encodeURIComponent(name)}`
-  }
-  // A caller that answers one immutable representation (a thumbnail) must not
-  // honour Range: a 206 would fragment a response the client caches per URL.
-  const range = parseRange(req.headers.range, size)
-  if (range) {
-    headers['content-range'] = `bytes ${range.start}-${range.end}/${size}`
-    headers['content-length'] = range.end - range.start + 1
-    res.writeHead(206, headers)
-    createReadStream(filePath, { start: range.start, end: range.end }).pipe(res)
-    return
-  }
-  headers['content-length'] = size
-  res.writeHead(200, headers)
-  if (req.method === 'HEAD') { res.end(); return }
-  createReadStream(filePath).pipe(res)
 }
 
 /**

@@ -165,7 +165,7 @@ export function renderTable(columns, rows) {
   return lines;
 }
 
-export const DEFAULT_JSON = 2;
+const DEFAULT_JSON = 2;
 
 export class Output {
   constructor(options = {}) {

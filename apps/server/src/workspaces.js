@@ -16,7 +16,7 @@ import { randomId } from './security.js'
  * existing account is an admin of its own workspace.
  */
 
-export const ROLES = new Set(['admin', 'member', 'viewer'])
+const ROLES = new Set(['admin', 'member', 'viewer'])
 
 /** The workspace a user belongs to (today: exactly one). */
 export function workspaceFor(userId) {
@@ -54,10 +54,4 @@ export function addMember(workspaceId, userId, role = 'member') {
     .run(workspaceId, userId, role, nowIso())
   return db.prepare('SELECT workspace_id, user_id, role FROM memberships WHERE workspace_id=? AND user_id=?')
     .get(workspaceId, userId)
-}
-
-/** Whether `userId` may read a node owned by someone else in the same workspace. */
-export function sharesWorkspace(userId, workspaceId) {
-  if (!workspaceId) return false
-  return Boolean(db.prepare('SELECT 1 AS ok FROM memberships WHERE workspace_id=? AND user_id=?').get(workspaceId, userId))
 }

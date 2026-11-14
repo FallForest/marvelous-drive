@@ -5,7 +5,7 @@ import { ApiClient } from '../http.js';
 import { formatTimestamp } from '../output.js';
 
 /** Reads a password without echoing it when stdin is a TTY. */
-export function readPassword(promptText) {
+function readPassword(promptText) {
   return new Promise((resolve, reject) => {
     const stdin = process.stdin;
     const stdout = process.stderr;

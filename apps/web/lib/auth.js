@@ -5,7 +5,7 @@
  */
 
 import { h } from './dom.js';
-import { icon, initials } from './format.js';
+import { icon } from './format.js';
 import { api, setToken } from './api.js';
 
 const MIN_PASSWORD = 8;
@@ -180,8 +180,4 @@ export function renderAuth(root, options) {
   root.replaceChildren(shell);
   emailInput.focus();
   return { destroy() { root.replaceChildren(); } };
-}
-
-export function avatarFor(user) {
-  return h('span', { class: 'avatar', attrs: { 'aria-hidden': 'true' }, text: initials(user && (user.name || user.email)) });
 }

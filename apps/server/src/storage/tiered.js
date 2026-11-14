@@ -4,8 +4,6 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Readable } from 'node:stream'
 import { randomUUID } from 'node:crypto'
-import { LocalBackend } from './backend.js'
-import { S3Backend } from './s3.js'
 
 /**
  * Two-tier storage: hot bytes on local disk, cold bytes in an object store.
@@ -168,12 +166,4 @@ export class TieredBackend {
       await unlink(staging).catch(() => {})
     }
   }
-}
-
-/** Builds the tiered backend from configuration. */
-export function createTieredBackend(settings) {
-  return new TieredBackend({
-    hot: new LocalBackend(settings.hotDir),
-    cold: new S3Backend({ settings: settings.cold }),
-  })
 }

@@ -9,9 +9,8 @@
 
 import { h } from './dom.js';
 import { request } from './api.js';
-import { toast } from './ui.js';
+import { toast, openMenu } from './ui.js';
 import { createFolder } from './files.js';
-import { openMenu } from './ui.js';
 import { pickDirectoryPlan, uploadPlan } from './folder-upload.js';
 import { store, session } from './session.js';
 import {

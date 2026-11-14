@@ -6,7 +6,7 @@
  *   node scripts/search-check.mjs [--server URL]
  */
 
-import { serverUrl, runBrowserCheck, signUpInPage, sleep } from './lib/browser.mjs'
+import { serverUrl, runBrowserCheck, signUpInPage } from './lib/browser.mjs'
 
 const server = serverUrl()
 

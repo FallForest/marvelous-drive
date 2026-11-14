@@ -22,13 +22,6 @@ export function optionalPositional(ctx, index) {
   return value === undefined || value === '' ? undefined : value;
 }
 
-export function uuidArgument(value, label) {
-  if (!isUuid(value)) {
-    throw usageError(label + ' must be a uuid, received "' + value + '". Use "mdrive ls" to list ids.');
-  }
-  return value;
-}
-
 /* ── paths ─────────────────────────────────────────────────────────────── */
 
 /** Splits "/a/b/c" into ["a", "b", "c"], dropping empty segments. */
@@ -39,11 +32,11 @@ export function splitPath(value) {
     .filter(part => part !== '');
 }
 
-export function normalizePath(value) {
+function normalizePath(value) {
   return '/' + splitPath(value).join('/');
 }
 
-export function joinPath(parent, name) {
+function joinPath(parent, name) {
   const base = normalizePath(parent ?? '/');
   return base === '/' ? '/' + name : base + '/' + name;
 }
@@ -62,13 +55,6 @@ export async function listChildren(client, parentId, workspace) {
     query: { parentId: parentId ?? 'root', workspace: workspace ?? undefined }
   });
   return Array.isArray(response?.nodes) ? response.nodes : [];
-}
-
-/** The workspaces the caller belongs to, as `[{ id, name, role, ownerId }]`. */
-export async function listWorkspaces(client) {
-  const payload = await client.get('/workspace/members');
-  const workspace = payload?.workspace;
-  return workspace ? [workspace] : [];
 }
 
 /**

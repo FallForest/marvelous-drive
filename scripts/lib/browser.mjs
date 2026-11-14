@@ -23,7 +23,7 @@ import { resolve } from 'node:path'
 import { setTimeout as sleep } from 'node:timers/promises'
 
 /** Where screenshots land. Shared by every check. */
-export const SHOTS_DIR = resolve('.tmp/shots')
+const SHOTS_DIR = resolve('.tmp/shots')
 
 /**
  * Chromium candidates, in order of preference.
@@ -40,7 +40,7 @@ const CHROME_CANDIDATES = [
   '/usr/bin/chromium-browser',
 ]
 
-export function findChrome() {
+function findChrome() {
   return CHROME_CANDIDATES.find((candidate) => existsSync(candidate)) || null
 }
 

@@ -10,11 +10,9 @@
  * can gate a deployment.
  */
 
-const args = process.argv.slice(2)
-const flag = (name, fallback) => {
-  const index = args.indexOf(`--${name}`)
-  return index >= 0 && args[index + 1] ? args[index + 1] : fallback
-}
+import { argv, flagReader } from './lib/args.mjs'
+
+const flag = flagReader(argv())
 
 const server = flag('server', process.env.MDRIVE_SERVER || 'http://127.0.0.1:4400').replace(/\/+$/, '')
 const api = `${server}/api/v1`

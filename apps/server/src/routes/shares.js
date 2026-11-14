@@ -1,9 +1,9 @@
 import { db, nowIso } from '../db.js'
 import { userFromRequest } from '../auth.js'
-import { fail, sendBlob, sendFile, sendJson } from '../http.js'
+import { fail, sendBlob, sendJson } from '../http.js'
 import { passwordHash, passwordMatches, randomId, randomToken } from '../security.js'
 import { backend } from '../storage/backend.js'
-import { nodeJson, requireFile, requireNode } from '../nodes.js'
+import { requireNode } from '../nodes.js'
 
 /**
  * Public share links.
@@ -161,5 +161,3 @@ function isInside(nodeId, ancestorId) {
   }
   return false
 }
-
-export { shareJson, originOf, resolveShare }

@@ -54,7 +54,7 @@ const unavailable = (message) => new OfficeError('PREVIEW_UNAVAILABLE', message)
 const NAMED_ENTITIES = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'" }
 const ENTITY_PATTERN = /&(#x[0-9a-fA-F]+|#\d+|[a-zA-Z][a-zA-Z0-9]*);/g
 
-export function decodeEntities(value) {
+function decodeEntities(value) {
   if (value.indexOf('&') < 0) return value
   return value.replace(ENTITY_PATTERN, (match, body) => {
     if (body.charCodeAt(0) === 35) {
@@ -195,27 +195,27 @@ export function parseXml(source) {
  * Tree helpers (all localName based)
  * ------------------------------------------------------------------ */
 
-export function localName(qualified) {
+function localName(qualified) {
   const colon = qualified.lastIndexOf(':')
   return colon < 0 ? qualified : qualified.slice(colon + 1)
 }
 
 const isElement = (node) => Boolean(node) && node.name !== '#text'
 
-export function elements(node) {
+function elements(node) {
   return node && node.children ? node.children.filter(isElement) : []
 }
 
-export function childrenNamed(node, local) {
+function childrenNamed(node, local) {
   return elements(node).filter((child) => localName(child.name) === local)
 }
 
-export function firstChild(node, local) {
+function firstChild(node, local) {
   for (const child of elements(node)) if (localName(child.name) === local) return child
   return null
 }
 
-export function findAll(node, local, out = []) {
+function findAll(node, local, out = []) {
   for (const child of elements(node)) {
     if (localName(child.name) === local) out.push(child)
     findAll(child, local, out)
@@ -223,7 +223,7 @@ export function findAll(node, local, out = []) {
   return out
 }
 
-export function findFirst(node, local) {
+function findFirst(node, local) {
   for (const child of elements(node)) {
     if (localName(child.name) === local) return child
     const nested = findFirst(child, local)
@@ -233,7 +233,7 @@ export function findFirst(node, local) {
 }
 
 /** Attribute by localName; an exact key match wins. */
-export function attr(node, name) {
+function attr(node, name) {
   if (!node || !node.attrs) return undefined
   if (Object.prototype.hasOwnProperty.call(node.attrs, name)) return node.attrs[name]
   for (const key of Object.keys(node.attrs)) {
@@ -243,7 +243,7 @@ export function attr(node, name) {
 }
 
 /** Relationship id attribute ("r:id"): any namespaced "id", never a bare id. */
-export function relAttr(node, local = 'id') {
+function relAttr(node, local = 'id') {
   if (!node || !node.attrs) return undefined
   for (const key of Object.keys(node.attrs)) {
     const colon = key.lastIndexOf(':')
@@ -253,7 +253,7 @@ export function relAttr(node, local = 'id') {
 }
 
 /** Concatenated text of a subtree, in document order. */
-export function textOf(node) {
+function textOf(node) {
   if (!node) return ''
   if (node.name === '#text') return node.text
   let out = ''
@@ -274,7 +274,7 @@ const SKIP_IN_TEXT = new Set([
  * ("w:") and any other prefix produce the same string. Property nodes are
  * skipped so style names never leak into the preview.
  */
-export function runText(node) {
+function runText(node) {
   let out = ''
   for (const child of elements(node)) {
     const local = localName(child.name)
@@ -287,7 +287,7 @@ export function runText(node) {
   return out
 }
 
-export function normalizeText(value) {
+function normalizeText(value) {
   return String(value == null ? '' : value)
     .replace(/\r\n?/g, '\n')
     .replace(/[\u00a0\u200b]/g, ' ')
@@ -313,7 +313,7 @@ function readXmlPart(zip, name) {
 }
 
 /** Resolves a relationship target against the part that owns the rels. */
-export function resolvePartTarget(basePart, target) {
+function resolvePartTarget(basePart, target) {
   if (!target) return ''
   const clean = String(target).replace(/\\/g, '/')
   if (/^[a-z][a-z0-9+.-]*:\/\//i.test(clean)) return clean
@@ -322,7 +322,7 @@ export function resolvePartTarget(basePart, target) {
 }
 
 /** Parses a .rels part into Map<Id, {type, target, external}>. */
-export function parseRelationships(root) {
+function parseRelationships(root) {
   const map = new Map()
   if (!root) return map
   for (const relationship of findAll(root, 'Relationship')) {
@@ -376,7 +376,7 @@ const MIME_KIND = {
  * look broken; the client now shows an honest "download to open" instead, and
  * this set keeps the route from being asked.
  */
-export const NOT_EXTRACTABLE = new Set([
+const NOT_EXTRACTABLE = new Set([
   'pages', 'numbers', 'key',
   'doc', 'ppt', 'xls', 'vsd', 'vsdx', 'pub', 'ai', 'eps', 'xd',
 ])
@@ -428,7 +428,7 @@ const slideNumber = (name) => {
  * match their position. When the parts cannot be resolved that way (or the
  * rels are missing) the ppt/slides/slideN.xml parts are sorted numerically.
  */
-export function orderedSlideParts(zip, presentation, rels) {
+function orderedSlideParts(zip, presentation, rels) {
   const parts = []
   const seen = new Set()
   const push = (target) => {
@@ -840,8 +840,6 @@ function sheetRows(root, strings) {
   }
   return { rows, truncated }
 }
-
-const XLSX_LIMITS = { maxRows: 200, maxColumns: 50 }
 
 function extractXlsx(zip) {
   const workbook = readXmlPart(zip, 'xl/workbook.xml')

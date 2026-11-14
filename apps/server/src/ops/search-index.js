@@ -30,7 +30,7 @@ import {
  */
 
 /** Files bigger than this are not worth tokenising for a search box. */
-export const MAX_INDEX_BYTES = 2 * 1024 * 1024
+const MAX_INDEX_BYTES = 2 * 1024 * 1024
 
 const TEXT_MIME = /^(text\/|application\/(json|xml|x-yaml|javascript|typescript|sql))/
 const TEXT_EXTENSION = new Set([
@@ -46,7 +46,7 @@ const extensionOf = (name) => {
 }
 
 /** Whether a node's content is worth putting in the index. */
-export function isIndexable(name, mime, size) {
+function isIndexable(name, mime, size) {
   if (Number(size) > MAX_INDEX_BYTES) return false
   if (TEXT_MIME.test(String(mime || '').toLowerCase())) return true
   return TEXT_EXTENSION.has(extensionOf(name))

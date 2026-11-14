@@ -20,7 +20,10 @@ import { runtime } from './runtime.js';
 import { lookupNode } from './actions.js';
 
 export function onRowDragStart(node, event) {
-  if (!event.dataTransfer || session.shellEls === null) return;
+  // The old guard was `session.shellEls === null`, which is true for a moment
+  // during boot and any time the shell is rebuilding — a drag started in that
+  // window was silently dropped. What a drag actually needs is the tree index.
+  if (!event.dataTransfer || !session.index || !session.index.byId.size) return;
   if (store.state.route.name === 'trash') { event.preventDefault(); return; }
   // Dragging a row that is part of the selection carries the whole selection;
   // dragging any other row carries just that row. The selection itself is left
@@ -33,22 +36,85 @@ export function onRowDragStart(node, event) {
     // Some browsers reset the payload unless a text/plain copy exists too; drop
     // targets still key off NODE_MIME only, so a Files drop stays a Files drop.
     event.dataTransfer.setData('text/plain', node.name || '');
-  } catch { /* older engines without setData still get effectAllowed */ }
+  } catch (error) {
+    // Firefox refuses a drag with no data at all, so a silent failure here is
+    // a feature that simply does not work in that browser. Say so once rather
+    // than pretending the drag is fine.
+    console.warn('[mdrive] the drag payload could not be set; this browser will not start the drag', error)
+  }
   event.dataTransfer.effectAllowed = 'move';
   document.body.classList.add('is-moving');
+  showDragBadge(ids.length);
 }
 
 export function onRowDragEnd() {
   session.draggingIds = [];
   document.body.classList.remove('is-moving');
   clearDropTargets(document);
+  hideDragBadge();
 }
 
-/** True when this event is one of our row drags (never an OS file drop). */
-export function isMoveDrag(event) {
-  if (!event || !hasNodeDrag(event.dataTransfer)) return false;
-  if (Array.from(event.dataTransfer.types || []).includes('Files')) return false;
-  return true;
+/**
+ * How many items the drag carries.
+ *
+ * A multi-selection drags all of its rows but the browser's drag image shows
+ * one, so without a count a user cannot tell whether they are moving one file
+ * or twelve. Finder and Google Drive both put the number on the cursor.
+ */
+let badgeEl = null
+function showDragBadge(count) {
+  if (count < 2) { hideDragBadge(); return }
+  if (!badgeEl) {
+    badgeEl = h('div', { class: 'drag-badge', attrs: { 'aria-hidden': 'true' } })
+    document.body.appendChild(badgeEl)
+  }
+  badgeEl.textContent = count + ' 项'
+  badgeEl.classList.add('is-on')
+}
+function hideDragBadge() {
+  if (badgeEl) badgeEl.classList.remove('is-on')
+}
+
+/** Puts the badge under the cursor; called from every dragover we handle. */
+function moveDragBadge(event) {
+  if (!badgeEl || !badgeEl.classList.contains('is-on') || !event) return
+  if (!Number.isFinite(event.clientX) || !Number.isFinite(event.clientY)) return
+  badgeEl.style.transform = 'translate(' + (event.clientX) + 'px,' + (event.clientY - 18) + 'px) translate(-50%,-100%)'
+}
+
+/**
+ * Escape cancels a drag.
+ *
+ * Every desktop file manager cancels on Escape and the HTML spec leaves it to
+ * the page, so without this the only way to abandon a drag was to drop it
+ * somewhere harmless. The browser still owns the gesture; dropping our state is
+ * what stops the pending drop from acting on a gesture the user abandoned.
+ */
+function onDragKeydown(event) {
+  if (event.key !== 'Escape' || !session.draggingIds.length) return
+  onRowDragEnd()
+}
+if (typeof document !== 'undefined') document.addEventListener('keydown', onDragKeydown, true)
+
+/**
+ * True when this event is one of our row drags (never an OS file drop).
+ *
+ * The payload is the primary signal, but it is not the only one: a drag that
+ * started in this page has already recorded its ids in `session.draggingIds`,
+ * and some engines do not expose custom MIME types through `dataTransfer.types`
+ * while the drag is in flight. Relying on the payload alone made the drop
+ * target reject a real internal drag, which reads to the user as "nothing
+ * happens when I drop a folder on a folder".
+ *
+ * An OS file drop is excluded explicitly: it carries Files, and dropping a file
+ * from the desktop must keep going to the window-level uploader.
+ */
+function isMoveDrag(event) {
+  if (!event || !event.dataTransfer) return false;
+  const types = Array.from(event.dataTransfer.types || []);
+  if (types.includes('Files')) return false;
+  if (session.draggingIds && session.draggingIds.length) return true;
+  return hasNodeDrag(event.dataTransfer);
 }
 
 /**
@@ -61,6 +127,7 @@ export function isMoveDrag(event) {
  */
 export function onFolderDragOver(folderId, event) {
   if (!isMoveDrag(event)) return;
+  moveDragBadge(event);
   const plan = planMoves(session.draggingIds, folderId, session.index);
   if (!plan.allowed.length) {
     // Blocked (self / subtree): refuse the drop instead of accepting it and
@@ -103,7 +170,7 @@ export async function onFolderDrop(folderId, event) {
 }
 
 /** Serial PUTs, one toast: "已移动 N 项 / M 项失败". */
-export async function moveByDrag(ids, targetFolderId) {
+async function moveByDrag(ids, targetFolderId) {
   const target = targetFolderId || null;
   const plan = planMoves(ids, target, session.index);
   if (!plan.allowed.length) {
@@ -181,6 +248,7 @@ export function attachDropZone(shell) {
     const types = Array.from(event.dataTransfer.types || []);
     if (!types.includes('Files')) {
       if (types.includes(NODE_MIME)) event.dataTransfer.dropEffect = 'move';
+      moveDragBadge(event);
       return;
     }
     event.preventDefault();

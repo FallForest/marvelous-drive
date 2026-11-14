@@ -8,8 +8,8 @@
  *  - XHR based raw uploads where fetch cannot report progress.
  */
 
-export const TOKEN_KEY = 'mdrive-token';
-export const API_BASE = '/api/v1';
+const TOKEN_KEY = 'mdrive-token';
+const API_BASE = '/api/v1';
 
 /* localStorage throws in private/opaque origins; keep a memory fallback so the
    app still works for the duration of the page. */
@@ -28,7 +28,6 @@ let token = storageGet(TOKEN_KEY) || '';
 const unauthorizedHandlers = new Set();
 
 export function getToken() { return token; }
-export function hasToken() { return !!token; }
 export function setToken(value) {
   token = value ? String(value) : '';
   if (token) storageSet(TOKEN_KEY, token);
@@ -47,7 +46,7 @@ function fireUnauthorized() {
   }
 }
 
-export class ApiError extends Error {
+class ApiError extends Error {
   constructor(message, options) {
     super(message || 'Request failed');
     this.name = 'ApiError';
@@ -74,7 +73,7 @@ const FALLBACK_MESSAGE = {
   503: '服务暂时不可用。',
 };
 
-export function apiUrl(path) {
+function apiUrl(path) {
   if (/^https?:\/\//i.test(path)) return path;
   if (path.startsWith(API_BASE)) return path;
   return API_BASE + (path.startsWith('/') ? path : '/' + path);
@@ -153,8 +152,6 @@ export function contentUrl(id, options) {
   const opts = options || {};
   return API_BASE + '/files/' + encodeURIComponent(id) + '/content' + (opts.download ? '?download=1' : '');
 }
-export function previewUrl(id) { return contentUrl(id); }
-export function sharedContentUrl(token) { return API_BASE + '/shared/' + encodeURIComponent(token) + '/content'; }
 export function sharedInfoUrl(token) { return API_BASE + '/shared/' + encodeURIComponent(token); }
 
 /**

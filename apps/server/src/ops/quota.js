@@ -15,10 +15,10 @@ import { fail } from '../http.js'
  * store happens to deduplicate.
  */
 
-export const quotaEnabled = () => config.quotaBytes > 0
+const quotaEnabled = () => config.quotaBytes > 0
 
 /** Bytes currently used by live files. */
-export function usedBytes(userId) {
+function usedBytes(userId) {
   const row = db.prepare("SELECT SUM(size) AS used FROM nodes WHERE user_id=? AND kind='file' AND deleted_at IS NULL").get(userId)
   return (row && row.used) || 0
 }

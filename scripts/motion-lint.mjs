@@ -13,7 +13,7 @@
  * finding, so it drops into CI unchanged.
  */
 
-import { readdirSync, readFileSync, statSync } from 'node:fs'
+import { readdirSync, readFileSync } from 'node:fs'
 import { join, relative, resolve } from 'node:path'
 
 const root = resolve(process.argv[2] ?? '.');
@@ -106,14 +106,6 @@ const findings = [];
  * decision was made rather than missed.
  */
 const IGNORE = /motion-check-ignore/;
-const isExempt = (text, rule, index) => {
-  const lines = text.split('\n');
-  const from = Math.max(0, index - 4);
-  for (let i = from; i <= index && i < lines.length; i++) {
-    if (IGNORE.test(lines[i])) return true;
-  }
-  return false;
-};
 const report = (rule, file, line, detail) => findings.push({ rule: rule, file: file, line: line, detail: detail });
 const cssFiles = files.filter((f) => /\.(css|scss)$/.test(f.path));
 const codeFiles = files.filter((f) => /\.(tsx?|jsx?|vue|svelte)$/.test(f.path));

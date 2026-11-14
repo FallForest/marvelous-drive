@@ -1,6 +1,5 @@
 import { createServer } from 'node:http'
 import { readFileSync } from 'node:fs'
-import { join } from 'node:path'
 import { config } from './config.js'
 import { db } from './db.js'
 import { HttpError, fail, readJson, sendJson, serveStatic } from './http.js'

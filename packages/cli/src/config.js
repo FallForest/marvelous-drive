@@ -21,9 +21,9 @@ import { CliError, EXIT, messageOf } from './errors.js';
  *     }
  *   }
  */
-export const CONFIG_VERSION = 1;
+const CONFIG_VERSION = 1;
 
-export const DEFAULT_SERVER = 'http://127.0.0.1:4400';
+const DEFAULT_SERVER = 'http://127.0.0.1:4400';
 
 function envValue(name) {
   const raw = process.env[name];
@@ -84,7 +84,7 @@ function cleanProfile(value) {
 }
 
 /** Accepts the documented shape and the legacy flat {server, token} file. */
-export function normalizeConfig(raw) {
+function normalizeConfig(raw) {
   if (!isRecord(raw)) {
     throw new CliError('Config file is not a JSON object: ' + configFile(), EXIT.USAGE, { code: 'USAGE' });
   }
@@ -163,10 +163,6 @@ export async function saveConfig(config) {
 }
 
 /* ── profile helpers ───────────────────────────────────────────────────── */
-
-export function profileFor(config, key) {
-  return config.profiles[key] ?? {};
-}
 
 export function upsertProfile(config, key, profile) {
   return {

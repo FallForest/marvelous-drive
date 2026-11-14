@@ -314,7 +314,7 @@ export class ApiClient {
 }
 
 /** Reads a file in slice ranges without loading the whole payload at once. */
-export async function readChunk(filePath, start, end) {
+async function readChunk(filePath, start, end) {
   const handle = await open(filePath, 'r');
   try {
     const length = end - start;
@@ -333,7 +333,7 @@ export async function readChunk(filePath, start, end) {
 
 
 /** sha256 of a file, streamed so a multi-GB upload does not need a buffer. */
-export async function sha256File(filePath) {
+async function sha256File(filePath) {
   const hash = createHash('sha256');
   await new Promise((resolve, reject) => {
     createReadStream(filePath).on('data', (chunk) => hash.update(chunk)).on('error', reject).on('end', resolve);

@@ -10,7 +10,7 @@ import { fileURLToPath } from 'node:url'
  */
 
 const here = fileURLToPath(new URL('.', import.meta.url))
-export const repoRoot = resolve(here, '../../..')
+const repoRoot = resolve(here, '../../..')
 
 const dataDir = process.env.DRIVE_DATA_DIR ? resolve(process.env.DRIVE_DATA_DIR) : join(repoRoot, 'data')
 // quarantine holds blobs that failed verification: kept as evidence, never served.

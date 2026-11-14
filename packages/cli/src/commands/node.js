@@ -260,7 +260,7 @@ async function resolveNode(ctx, target) {
 }
 
 /** "500GiB" / "2T" / "1048576" → bytes. */
-export function parseBytes(text) {
+function parseBytes(text) {
   const match = /^\s*(\d+(?:\.\d+)?)\s*(b|k|kb|kib|m|mb|mib|g|gb|gib|t|tb|tib)?\s*$/i.exec(String(text ?? ''));
   if (!match) throw usageError('Cannot parse "' + text + '" as a byte size. Use a number with an optional unit, for example 500GiB.');
   const amount = Number(match[1]);

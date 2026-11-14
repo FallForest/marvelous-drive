@@ -12,7 +12,7 @@
 
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname } from 'node:path'
-import { serverUrl, runBrowserCheck, signUpInPage, sleep } from './lib/browser.mjs'
+import { serverUrl, runBrowserCheck, signUpInPage } from './lib/browser.mjs'
 
 const server = serverUrl()
 

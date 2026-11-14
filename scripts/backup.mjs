@@ -10,20 +10,17 @@
  * that writes during the copy may be inconsistent.
  */
 
-import { createWriteStream, existsSync, mkdirSync } from 'node:fs'
-import { cp, mkdir, rm, stat } from 'node:fs/promises'
+import { existsSync, mkdirSync } from 'node:fs'
+import { cp, mkdir, stat } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { spawn } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
+import { argv, flagReader } from './lib/args.mjs'
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
-const args = process.argv.slice(2)
-
-const flag = (name, fallback) => {
-  const index = args.indexOf(`--${name}`)
-  return index >= 0 && args[index + 1] ? args[index + 1] : fallback
-}
+const args = argv()
+const flag = flagReader(args)
 
 const dataDir = resolve(flag('data', process.env.DRIVE_DATA_DIR || join(repoRoot, 'data')))
 const outDir = resolve(flag('out', join(repoRoot, 'backups')))

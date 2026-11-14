@@ -23,7 +23,6 @@ import { loadPicture } from './image-loader.js';
 
 const TEXT_PREVIEW_LIMIT = 2 * 1024 * 1024; // 2 MiB of text is plenty for a peek
 const IMAGE_PREVIEW_LIMIT = 40 * 1024 * 1024;
-const PDF_PREVIEW_LIMIT = 60 * 1024 * 1024;
 
 /**
  * One cache for the whole page, not one per drawer.
@@ -62,7 +61,7 @@ function storeBitmap(node, bitmap, encodedSize) {
  * without any explicit invalidation. The id is only a fallback for a node whose
  * hash the API did not report.
  */
-export function pictureKey(node) {
+function pictureKey(node) {
   if (!node) return null;
   return node.blobHash || node.id || null;
 }
@@ -337,7 +336,7 @@ export function openPreview(node, options) {
 }
 
 /** The picture list for this drawer; a non-picture gets a list of one. */
-export function galleryOf(node, gallery) {
+function galleryOf(node, gallery) {
   const provided = Array.isArray(gallery) ? galleryFor(gallery) : [];
   if (!isGalleryImage(node)) return [node];
   const list = provided.length ? provided : [node];

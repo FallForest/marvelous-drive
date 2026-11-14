@@ -3,7 +3,6 @@ import { createHash, timingSafeEqual } from 'node:crypto'
 import { mkdir, readdir, stat, unlink, writeFile, rename } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { createServer } from 'node:http'
-import { Readable } from 'node:stream'
 
 /**
  * A storage node: one machine that hands its disk to a Drive coordinator.
@@ -262,9 +261,4 @@ export function createNodeServer({ rootDir, token, name = 'storage-node', capaci
 
   server.requestTimeout = 0
   return server
-}
-
-/** A Readable over a node's HTTP response, for the coordinator side. */
-export function toReadable(webStream) {
-  return Readable.fromWeb(webStream)
 }

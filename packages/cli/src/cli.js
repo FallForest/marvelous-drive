@@ -10,7 +10,7 @@ import { Output } from './output.js';
 let cachedVersion;
 
 /** Package version, used by --version and the help banner. */
-export async function cliVersion() {
+async function cliVersion() {
   if (cachedVersion !== undefined) return cachedVersion;
   try {
     const raw = await readFile(new URL('../package.json', import.meta.url), 'utf8');

@@ -27,7 +27,7 @@ export function publicUser(row) {
   }
 }
 
-export function createUser({ email, password, name }) {
+function createUser({ email, password, name }) {
   const normalized = String(email || '').trim().toLowerCase()
   if (!EMAIL_RE.test(normalized)) throw fail(400, 'INVALID_INPUT', 'A valid e-mail address is required.')
   const secret = String(password || '')

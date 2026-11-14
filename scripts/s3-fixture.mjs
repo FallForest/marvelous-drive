@@ -16,12 +16,9 @@
 
 import { createHash, createHmac } from 'node:crypto'
 import { createServer } from 'node:http'
+import { argv, flagReader } from './lib/args.mjs'
 
-const args = process.argv.slice(2)
-const flag = (name, fallback) => {
-  const index = args.indexOf('--' + name)
-  return index >= 0 && args[index + 1] ? args[index + 1] : fallback
-}
+const flag = flagReader(argv())
 
 const PORT = Number(flag('port', process.env.S3_PORT || 9100))
 const BUCKET = flag('bucket', 'drive')

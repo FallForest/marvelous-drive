@@ -259,7 +259,7 @@ function liveSearchColumns() {
  * order (snippets silently return column 0) — neither announces itself, so the
  * comparison is on the full shape rather than on one column's presence.
  */
-export function migrateSearchIndex() {
+function migrateSearchIndex() {
   const columns = liveSearchColumns()
   if (columns.join(',') === SEARCH_COLUMNS.join(',')) return false
   db.exec('DROP TABLE IF EXISTS node_text')
@@ -268,7 +268,7 @@ export function migrateSearchIndex() {
 }
 
 /** Creates the index table when absent; throws when an existing one has another shape. */
-export function ensureSearchIndex() {
+function ensureSearchIndex() {
   const actual = liveSearchColumns()
   if (actual.length === 0) {
     db.exec(SEARCH_INDEX_DDL)
@@ -295,7 +295,7 @@ export function ensureSearchIndex() {
  * The backfill is idempotent: a second boot finds the columns and the memberships
  * already in place and changes nothing.
  */
-export function migrateWorkspaces() {
+function migrateWorkspaces() {
   const columns = new Set(db.prepare('PRAGMA table_info(nodes)').all().map((row) => row.name))
   if (!columns.has('workspace_id')) {
     db.exec('ALTER TABLE nodes ADD COLUMN workspace_id TEXT')

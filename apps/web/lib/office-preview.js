@@ -91,7 +91,7 @@ function renderPages(office) {
 }
 
 /** First non-empty paragraph of a page, used as a slide heading fallback. */
-export function firstText(page) {
+function firstText(page) {
   for (const block of (page && page.blocks) || []) {
     if (block.type === 'heading' || block.type === 'paragraph') {
       const text = String(block.text || '').trim();

@@ -18,10 +18,10 @@
 import { putRaw, request } from './api.js';
 
 export const SIMPLE_LIMIT = 8 * 1024 * 1024; // 8 MiB
-export const CHUNK_SIZE = 8 * 1024 * 1024;   // 8 MiB, matches the contract default
+const CHUNK_SIZE = 8 * 1024 * 1024;   // 8 MiB, matches the contract default
 export const INSTANT_LIMIT = 1024 * 1024;    // only files above 1 MiB probe for a dedup hit
 export const UPLOAD_CONCURRENCY = 3;         // transfers in flight at once
-export const CHUNK_PARALLEL = 2;             // chunks of one file in flight at once
+const CHUNK_PARALLEL = 2;             // chunks of one file in flight at once
 export const MAX_ATTEMPTS = 4;               // first try plus three automatic retries
 /** Backoff before retry 1/2/3. A dropped wifi link is usually back within seconds. */
 export const RETRY_BACKOFF = [1000, 3000, 9000];
@@ -46,7 +46,7 @@ function sleep(ms) {
 }
 
 /** Tiny emitter: on(event, fn) -> off(). Events: progress, state, done. */
-export function createEmitter() {
+function createEmitter() {
   const listeners = new Map();
   return {
     on(type, handler) {
@@ -64,7 +64,7 @@ export function createEmitter() {
   };
 }
 
-export function supportsSubtle() {
+function supportsSubtle() {
   return !!(typeof crypto !== 'undefined' && crypto.subtle && typeof crypto.subtle.digest === 'function');
 }
 
@@ -78,7 +78,7 @@ export async function sha256(blob) {
   return Array.from(new Uint8Array(digest)).map((b) => b.toString(16).padStart(2, '0')).join('');
 }
 
-export function mimeOf(file) {
+function mimeOf(file) {
   if (file.type) return file.type;
   const name = String(file.name || '').toLowerCase();
   if (name.endsWith('.md') || name.endsWith('.markdown')) return 'text/markdown';
@@ -149,7 +149,7 @@ function abortError() {
  * or null for every other outcome — the caller then uploads normally. Nothing in
  * here may fail an upload: the probe is a shortcut, not a requirement.
  */
-export async function tryInstantUpload(task, file, options) {
+async function tryInstantUpload(task, file, options) {
   const opts = options || {};
   const client = opts.client || { request, putRaw };
   const hash = opts.hash || '';

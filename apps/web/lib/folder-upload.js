@@ -13,7 +13,6 @@
  */
 
 import { h } from './dom.js';
-import { createUploadTask } from './upload.js';
 
 /**
  * Folder path of a picked file, relative to the upload target.
@@ -167,7 +166,7 @@ export async function uploadPlan(plan, { parentId = null, createFolder, uploadFi
  * vanish. The handle API enumerates every entry, empty ones included, which is
  * why it is preferred whenever the browser offers it.
  */
-export async function planFromDirectoryHandle(handle) {
+async function planFromDirectoryHandle(handle) {
   const dirs = new Set([''])
   const files = []
   const walk = async (directory, path) => {
@@ -216,31 +215,4 @@ export async function pickDirectoryPlan() {
     document.body.appendChild(input);
     input.click();
   });
-}
-
-/**
- * Legacy helper kept for callers that already have a callback: opens the picker
- * and hands the plan over.
- */
-/**
- * Wires a hidden `webkitdirectory` input so the toolbar can offer
- * "上传文件夹" without any extra markup in index.html.
- */
-export function pickDirectory(onPicked) {
-  const input = h('input', {
-    attrs: {
-      type: 'file', webkitdirectory: '', directory: '', multiple: 'multiple',
-      style: 'position:fixed;left:-9999px;opacity:0', 'aria-hidden': 'true', tabindex: '-1',
-    },
-    on: {
-      change: () => {
-        const files = Array.from(input.files || []);
-        input.value = '';
-        if (files.length) onPicked(planFromFileList(files));
-      },
-    },
-  });
-  document.body.appendChild(input);
-  input.click();
-  return input;
 }

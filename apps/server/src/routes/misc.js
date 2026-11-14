@@ -263,7 +263,7 @@ const extOf = (name) => {
 }
 
 /** Bytes and file counts per coarse kind, plus an `other` bucket. */
-export function bytesByKind(userId) {
+function bytesByKind(userId) {
   const rows = db.prepare("SELECT name, size FROM nodes WHERE user_id=? AND kind='file' AND deleted_at IS NULL").all(userId)
   const buckets = {}
   let total = 0
@@ -342,7 +342,7 @@ export function duplicateGroups(userId, { limit = DUPLICATE_GROUP_LIMIT } = {}) 
 }
 
 /** How much is in the trash and when the oldest item falls out. */
-export function trashSummary(userId, now = Date.now()) {
+function trashSummary(userId, now = Date.now()) {
   const row = db.prepare(`SELECT COUNT(*) AS nodes, SUM(size) AS bytes, MIN(deleted_at) AS oldest
       FROM nodes WHERE user_id=? AND deleted_at IS NOT NULL`).get(userId)
   const retention = config.trashRetentionDays

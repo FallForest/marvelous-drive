@@ -10,7 +10,7 @@
 
 import { h, raw } from './dom.js';
 import { icon, relativeTime } from './format.js';
-import { api, request, fetchBlob, contentUrl, downloadNode, saveBlob } from './api.js';
+import { api, request, fetchBlob, contentUrl, downloadNode, saveBlob, clearToken } from './api.js';
 import { toast, promptDialog, confirmDialog, copyText, drawer, openMenu } from './ui.js';
 import { beginInlineRename, toggleStar, renameNode, moveNode, createFolder, deleteNode, restoreNode, purgeNode } from './files.js';
 import { openPreview, showDetails } from './preview.js';
@@ -18,8 +18,7 @@ import { openShareDialog } from './share.js';
 import { chooseFolder } from './move.js';
 import { openWorkspacePanel } from './workspace.js';
 import { openDuplicatesDrawer } from './duplicates.js';
-import { checkForUpdate, openUpdatePanel } from './updates.js';
-import { clearToken } from './api.js';
+import { openUpdatePanel } from './updates.js';
 import { store, session } from './session.js';
 import { runtime } from './runtime.js';
 import { visibleNodes } from './views.js';
@@ -33,7 +32,7 @@ export function lookupNode(id) {
 }
 
 /** Escapes an id for use inside a querySelector attribute match. */
-export function cssEscape(value) {
+function cssEscape(value) {
   if (window.CSS && typeof window.CSS.escape === 'function') return window.CSS.escape(value);
   return String(value).replace(/["\\]/g, '\\$&');
 }
@@ -123,7 +122,7 @@ export function startRename(node) {
   });
 }
 
-export async function commitRename(node, value) {
+async function commitRename(node, value) {
   try {
     await renameNode(node, value);
     toast('已重命名为 ' + value, { type: 'success', timeout: 2000 });
@@ -333,7 +332,7 @@ export async function copyShareLink(node) {
  * Read-only on purpose: the log is evidence, so the client never offers a way to
  * edit it. Entries are grouped by day so a long history stays scannable.
  */
-export async function openActivityLog() {
+async function openActivityLog() {
   const body = h('div', { class: 'activity-list', attrs: { 'aria-live': 'polite' } });
   const handle = drawer({
     title: '操作记录',
@@ -395,7 +394,7 @@ export async function openActivityLog() {
 }
 
 /** Opens the team panel; a membership change can alter the tree, so refresh. */
-export function openTeam() {
+function openTeam() {
   openWorkspacePanel({
     currentUserId: store.state.user ? store.state.user.id : null,
     onChanged: () => runtime.refreshData(),
@@ -403,12 +402,12 @@ export function openTeam() {
 }
 
 /** Opens the duplicate report; the list behind it refreshes after any trash. */
-export function openDuplicates() {
+function openDuplicates() {
   return openDuplicatesDrawer({ onChanged: () => runtime.refreshData() });
 }
 
 /** Opens the release panel; it fetches the manifest itself when it has none. */
-export function openUpdates() {
+function openUpdates() {
   return openUpdatePanel();
 }
 

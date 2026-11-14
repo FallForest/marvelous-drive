@@ -15,7 +15,7 @@ import { MAX_PDF_INDEX_BYTES, isPdfDocument, readPdfText } from './pdf-text.js'
  */
 
 /** 16 MiB: a bigger deck costs more to parse than a search hit is worth. */
-export const MAX_OFFICE_INDEX_BYTES = 16 * 1024 * 1024
+const MAX_OFFICE_INDEX_BYTES = 16 * 1024 * 1024
 
 /** Whether this file is an OOXML document whose text can be indexed. */
 export function isOfficeDocument(name, mime) {

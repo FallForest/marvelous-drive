@@ -13,7 +13,7 @@ import { dialog, toast, copyText, withBusy, confirmDialog } from './ui.js';
 import { renderSelect } from './select.js';
 import { api, request, fetchBlob, saveBlob, sharedInfoUrl } from './api.js';
 
-export function absoluteShareUrl(share) {
+function absoluteShareUrl(share) {
   const raw = share && share.url ? String(share.url) : '';
   if (!raw) return share && share.token ? window.location.origin + '/s/' + share.token : '';
   if (/^https?:\/\//i.test(raw)) return raw;

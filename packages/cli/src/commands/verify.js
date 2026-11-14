@@ -1,5 +1,3 @@
-import { usageError } from '../errors.js';
-
 /**
  * Store verification.
  *

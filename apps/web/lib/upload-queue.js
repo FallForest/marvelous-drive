@@ -16,14 +16,14 @@
 import { request, putRaw } from './api.js';
 import { createUploadTask, createUploadScheduler, UPLOAD_CONCURRENCY } from './upload.js';
 
-export const UPLOAD_HISTORY_KEY = 'mdrive-uploads';
-export const UPLOAD_HISTORY_LIMIT = 30;
+const UPLOAD_HISTORY_KEY = 'mdrive-uploads';
+const UPLOAD_HISTORY_LIMIT = 30;
 
 const TERMINAL = new Set(['done', 'error', 'canceled']);
 const KNOWN_STATES = new Set(['queued', 'hashing', 'uploading', 'finalizing', 'paused', 'done', 'error', 'canceled']);
 
 /** Is this stored entry a finished task (restorable as history)? */
-export function isFinishedState(state) {
+function isFinishedState(state) {
   return TERMINAL.has(String(state || ''));
 }
 
@@ -100,7 +100,7 @@ function writeStored(entries) {
 }
 
 /** Resolves with the task node, rejects when the task failed or was canceled. */
-export function outcomeOf(task) {
+function outcomeOf(task) {
   if (task.state === 'done') return Promise.resolve(task.node);
   if (task.state === 'error' || task.state === 'canceled') {
     return Promise.reject(task.error || new Error(task.state === 'canceled' ? '已取消' : '上传失败'));
@@ -112,11 +112,6 @@ export function outcomeOf(task) {
       else if (event.state === 'canceled') reject(task.error || new Error('已取消'));
     });
   });
-}
-
-function notify(handler, payload) {
-  if (typeof handler !== 'function') return;
-  try { handler(payload); } catch (error) { console.warn('[mdrive] uploader listener failed', error); }
 }
 
 /**

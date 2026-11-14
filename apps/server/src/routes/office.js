@@ -1,6 +1,5 @@
-import { readFile, stat } from 'node:fs/promises'
+import { stat } from 'node:fs/promises'
 import { userFromRequest } from '../auth.js'
-import { blobPath } from '../storage/blobs.js'
 import { backend, readBlobBuffer } from '../storage/backend.js'
 import { fail, sendJson } from '../http.js'
 import { requireFile } from '../nodes.js'
@@ -23,7 +22,7 @@ import { OfficeError, detectOffice, extractOffice } from '../text/office.js'
  */
 
 /** Above this the extraction would cost more memory than a preview is worth. */
-export const MAX_OFFICE_BYTES = 64 * 1024 * 1024
+const MAX_OFFICE_BYTES = 64 * 1024 * 1024
 
 const ZIP_MAGIC = Buffer.from([0x50, 0x4b, 0x03, 0x04])
 const ZIP_MAGIC_EMPTY = Buffer.from([0x50, 0x4b, 0x05, 0x06])

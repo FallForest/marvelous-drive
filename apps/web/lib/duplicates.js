@@ -13,7 +13,7 @@ import { api } from './api.js';
 import { drawer, toast, confirmDialog } from './ui.js';
 
 /** Path label for one file: "报告 / 2026 / c.txt", or just the name at root. */
-export function pathLabel(node) {
+function pathLabel(node) {
   const segments = Array.isArray(node && node.path) ? node.path : [];
   const parts = segments
     .map((part) => (part && part.name ? String(part.name) : ''))
@@ -23,7 +23,7 @@ export function pathLabel(node) {
 }
 
 /** Short human summary of a report, used in the drawer header and toasts. */
-export function duplicatesSummary(report) {
+function duplicatesSummary(report) {
   const groups = report && Array.isArray(report.groups) ? report.groups : [];
   const total = Number(report && report.totalWastedBytes) || 0;
   if (!groups.length) return '没有重复文件';
@@ -31,7 +31,7 @@ export function duplicatesSummary(report) {
 }
 
 /** The ids to trash for "keep only the first" — never the first node itself. */
-export function removableIds(group) {
+function removableIds(group) {
   const nodes = group && Array.isArray(group.nodes) ? group.nodes : [];
   return nodes.slice(1).map((node) => node.id).filter(Boolean);
 }

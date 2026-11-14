@@ -1,21 +1,16 @@
-import { createWriteStream } from 'node:fs'
-import { stat, unlink } from 'node:fs/promises'
-import { join } from 'node:path'
 import { db, nowIso } from '../db.js'
 import { userFromRequest } from '../auth.js'
 import { config } from '../config.js'
-import { fail, sendBlob, sendFile, sendJson, spoolBody } from '../http.js'
-import { adoptBlob, blobPath, releaseBlob, retainBlob } from '../storage/blobs.js'
+import { fail, sendBlob, sendJson, spoolBody } from '../http.js'
+import { adoptBlob, releaseBlob, retainBlob } from '../storage/blobs.js'
 import { backend, readBlobBuffer } from '../storage/backend.js'
 import {
   findFileByName, nodeJson, normalizeConflictStrategy, normalizeName, requireFile, upsertFile,
-  uniqueName, createNode,
 } from '../nodes.js'
 import { recordVersion, listVersions } from '../versions.js'
-import { randomId } from '../security.js'
 import { recordAudit } from '../ops/audit.js'
 import { assertWithinQuota } from '../ops/quota.js'
-import { indexNode, removeFromIndex } from '../ops/search-index.js'
+import { indexNode } from '../ops/search-index.js'
 import { touchBlob } from '../ops/access-log.js'
 import { resolveMime } from '../mime.js'
 
@@ -81,25 +76,6 @@ function thumbnailWidth(raw) {
   const value = Number(raw)
   if (!Number.isFinite(value) || value <= 0) return THUMBNAIL_WIDTH_DEFAULT
   return Math.min(THUMBNAIL_WIDTH_MAX, Math.max(THUMBNAIL_WIDTH_MIN, Math.round(value)))
-}
-
-/**
- * `sendFile` always writes a revalidating `cache-control` and takes the Range
- * branch whenever the client asks for one. A thumbnail must be one whole
- * response a browser may keep for a week, so this wraps `res.writeHead` for the
- * duration of the call instead of duplicating the streaming logic.
- */
-async function sendWholeFile(req, res, filePath, { mime, headers }) {
-  const writeHead = res.writeHead
-  res.writeHead = function patched(status, incoming) {
-    return writeHead.call(this, status, { ...incoming, ...headers })
-  }
-  try {
-    // An empty header bag carries no `range`, so sendFile takes its 200 branch.
-    await sendFile({ method: req.method, headers: {} }, res, filePath, { mime })
-  } finally {
-    res.writeHead = writeHead
-  }
 }
 
 /** Reads a sha256 from a path/body value, rejecting anything that is not hex. */

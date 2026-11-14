@@ -6,7 +6,7 @@
  *   node scripts/versions-check.mjs [--server URL]
  */
 
-import { flag, serverUrl, runBrowserCheck, signUpInPage, sleep } from './lib/browser.mjs'
+import { serverUrl, runBrowserCheck, signUpInPage, sleep } from './lib/browser.mjs'
 
 const server = serverUrl()
 const password = 'version check'

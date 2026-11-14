@@ -163,30 +163,3 @@ export function isSmallEnough(sourceWidth, sourceHeight, fit) {
   if (!sw || !sh || !fit) return true;
   return fit.width >= sw && fit.height >= sh;
 }
-
-/**
- * Decodes `blob` into a bitmap no larger than `fit`.
- *
- * Returns the ImageBitmap (caller owns it and must `close()` it) or null when
- * the platform cannot do it, in which case the caller falls back to an <img>
- * over the object URL. Every failure path is a fallback, never an exception:
- * a picture that cannot be re-encoded is still a picture.
- */
-export async function decodePreview(blob, fit) {
-  if (typeof createImageBitmap !== 'function' || !blob) return null;
-  try {
-    return await createImageBitmap(blob, {
-      resizeWidth: fit.width,
-      resizeHeight: fit.height,
-      // 'high' costs a little more CPU and is visibly better on photographs;
-      // Chrome's default is 'low' for resize during decode.
-      resizeQuality: 'high',
-    });
-  } catch {
-    try {
-      return await createImageBitmap(blob);
-    } catch {
-      return null;
-    }
-  }
-}

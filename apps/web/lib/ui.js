@@ -10,7 +10,7 @@ import { DURATION, markAnimating, prefersReducedMotion } from './motion.js';
 
 /* ── overlay stack: Escape closes the topmost layer only ──────── */
 const layers = [];
-export function pushLayer(close) {
+function pushLayer(close) {
   const entry = { close };
   layers.push(entry);
   return () => {
@@ -25,7 +25,7 @@ export function closeTopLayer() {
   try { top.close(); } catch (error) { console.warn('[mdrive] overlay close failed', error); }
   return true;
 }
-export function hasLayers() { return layers.length > 0; }
+
 
 /* ── toasts ───────────────────────────────────────────────────── */
 let toastHost = null;

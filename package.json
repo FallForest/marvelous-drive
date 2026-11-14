@@ -1,7 +1,7 @@
 {
   "name": "marvelous-drive",
   "private": true,
-  "version": "0.21.0",
+  "version": "0.22.0",
   "type": "module",
   "description": "Self-hosted cloud drive with a web client, a CLI and a content-addressed blob store.",
   "engines": {
@@ -11,11 +11,13 @@
   "scripts": {
     "start": "node apps/server/src/index.js",
     "dev": "node --watch apps/server/src/index.js",
-    "test": "node --test \"apps/server/test/*.test.js\" \"packages/cli/test/*.test.mjs\" \"apps/web/test/*.test.js\"",
+    "test": "node --test \"apps/server/test/*.test.js\" \"packages/cli/test/*.test.mjs\" \"apps/web/test/*.test.js\" \"scripts/test/*.test.mjs\"",
     "test:server": "node --test \"apps/server/test/*.test.js\"",
     "test:cli": "node --test \"packages/cli/test/*.test.mjs\"",
     "test:web": "node --test \"apps/web/test/*.test.js\"",
+    "test:scripts": "node --test \"scripts/test/*.test.mjs\"",
     "check": "node scripts/check-syntax.mjs",
+    "dead-code": "node scripts/dead-code.mjs",
     "lint": "node scripts/check-syntax.mjs && node scripts/motion-lint.mjs apps/web/styles",
     "smoke": "node scripts/smoke.mjs",
     "verify": "node scripts/smoke.mjs && node scripts/motion-lint.mjs apps/web/styles",
@@ -24,6 +26,7 @@
     "click-check": "node scripts/click-check.mjs",
     "gallery-check": "node scripts/gallery-check.mjs",
     "heic-check": "node scripts/heic-check.mjs",
+    "dnd-check": "node scripts/dnd-check.mjs",
     "browser-checks": "node scripts/run-checks.mjs",
     "motion-lint": "node scripts/motion-lint.mjs apps/web/styles",
     "motion-check": "node scripts/motion-lint.mjs apps/web/styles && node scripts/feel-check.mjs",

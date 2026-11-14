@@ -6,6 +6,119 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.22.0] - 2026-11-14
+
+A repository tidy-up, and three gestures that had quietly stopped working.
+
+The changelog entry for this batch said "nothing new to use, less of everything
+else". That was true of the refactor and false of the rest: two of the diffs
+repair behaviour a user could see, and one is a feature that had been landing in
+the wrong route since 0.21.0. They are listed under *Fixed* rather than folded
+into the cleanup, because that is what someone deciding to upgrade needs to read.
+
+### Added
+
+- **A drag badge.** Dragging a multi-selection showed one browser ghost for the
+  whole batch, so there was no way to tell whether one file or twelve were in
+  hand. The count now follows the cursor for the duration of the gesture, and the
+  source rows step back so the drop targets read as the live surface.
+- **Escape cancels a drag.** Every desktop file manager does this and the HTML
+  spec leaves it to the page; without it the only way to abandon a drag was to
+  drop it somewhere harmless. Dropping the page's drag state is what stops a
+  gesture the user abandoned from acting on release.
+- **`scripts/dead-code.mjs`** — the import-graph audit the repository never had.
+  It resolves static *and* lazy imports (including the `?variant` cache-busters
+  the tests use), treats tests, `package.json` scripts, workspace `bin` entries
+  and `index.html` as entries, and reports three things: modules nothing
+  reaches, exports nothing imports, and local declarations nothing mentions.
+  `npm run dead-code` prints it, `--json` is for tooling, `--strict` exits
+  non-zero and runs in CI.
+- **`scripts/dnd-check.mjs`** — 14 browser assertions over the drop model: a
+  folder row accepts a folder, a refused target is not highlighted, finishing a
+  drag clears every highlight, a *file* row refuses a node, and the sidebar still
+  works. CDP's synthetic mouse drag produces no dragover/drop, so the check
+  dispatches the real events the browser would.
+- **`apps/web/test/thumbnail-source.test.js`** — pins which route a row asks for
+  its thumbnail, including the HEIC case that was reaching the wrong one.
+- **`scripts/lib/args.mjs`** — one `--flag value` reader for the operation
+  scripts. Five of them (`backup`, `smoke`, `s3-check`, `s3-fixture`,
+  `tiered-check`) each carried their own copy, and the copies had already drifted
+  (two spellings of the template literal, two of the quote). A missing value now
+  falls back instead of swallowing the next switch, and `scripts/test/args.test.mjs`
+  pins that contract.
+
+### Changed
+
+- **115 exports became module-local.** Every one was reachable only from inside
+  the module that declared it — an `export` that advertised an interface no caller
+  used, which is how a module grows a fake public surface. Worked examples:
+  `http.js` (`contentTypeFor`, `parseRange`), `auth.js` (`createUser`),
+  `config.js` (`repoRoot`), `db.js` (`ensureSearchIndex`, `migrateSearchIndex`,
+  `migrateWorkspaces`), `mime.js` (`GENERIC_MIMES`), `nodes.js`
+  (`requireFolder`), `workspaces.js` (`ROLES`), `routes/office.js`
+  (`MAX_OFFICE_BYTES`), the nine XML helpers in `text/office.js`
+  (`localName`, `elements`, `attr`, `textOf`, `runText`…), fifteen constants in
+  `upload.js` / `api.js` / `sync.js`, and the page builders in `views.js`
+  (see below).
+- **`views.js` stopped exporting its page builders** — `listContext`,
+  `skeletonView`, `hints`, `describeResults`, `matchNotes`, `searchView`,
+  `listView` are now private, and `actions.js`, `context.js`, `files.js`,
+  `dom.js` and `state.js` gave up the helpers that only they called. The web
+  modules export what other modules use and nothing else, and
+  `scripts/dead-code.mjs --strict` is what keeps it that way.
+
+### Removed
+
+- **Code nothing reached**, verified by zero references across source, tests and
+  docs: `sendFile`/`sendEmpty` (`http.js`), `createTieredBackend`
+  (`storage/tiered.js`, which `backend.js` had stopped calling when it began
+  constructing `TieredBackend` directly), `XLSX_LIMITS`, `PDF_PREVIEW_LIMIT`,
+  `HASH_CONCURRENCY`, `locksFor`, `expiredTrash`, `sharesWorkspace`,
+  `materialize`, `blobSize`, `toReadable`, `isExempt`, `notify`, `uuidArgument`,
+  `profileFor`, `decodePreview` (`image-fit.js`), `copyNode`/`shareUrl`
+  (`files.js`), `foldersOf`/`folderTree`/`subtreeFolders`/`emptySelection`
+  (`state.js`), and `sendWholeFile` in `routes/files.js`.
+- **28 dead import bindings** across server, web, CLI and scripts that imported a
+  name and then never used it — `blobPath`, `randomId`, `tmpdir`, `writeFileSync`,
+  `unlinkSync`, `createHash`, `Readable`, `canThumbnail`, `nodeJson`,
+  `requireFile`, `safeMime`… Each is invisible in review and each one makes the
+  dependency graph lie.
+- **Four copies of the same `flag()`** — one per operation script, all replaced
+  by `scripts/lib/args.mjs`.
+
+### Fixed
+
+- **A folder could not be dropped onto a folder in the main list.** The rows had
+  lost their drop handlers when the list context was split out of `app.js`:
+  `lib/files.js` guards with `if (ctx.onFolderDragOver)`, the projection in
+  `listContext()` never carried the three handlers, and the guard installed
+  nothing. The sidebar kept working because it reads the context directly — so
+  the gesture looked half broken, and no check covered the half that was gone.
+  The row is now a real drop target (a *file* row still refuses, since dropping
+  onto a file means nothing), and `scripts/dnd-check.mjs` is the gate.
+- **An internal drag was rejected by some engines.** `isMoveDrag()` decided from
+  `dataTransfer.types` alone, which not every engine exposes for a custom MIME
+  while the drag is in flight. A drag that started in this page has already
+  recorded its ids, so that is now the first signal — with `Files` excluded
+  ahead of it, so an OS file drop keeps going to the window uploader.
+- **A HEIC row had no thumbnail.** `/thumbnail` answers 415 for HEIC and the row
+  only asked `canThumbnail()`, so a folder of phone photos rendered as a grid of
+  generic picture icons — the decoder added in 0.21.0 was never asked. Rows and
+  grid cards now choose between `/thumbnail` and `/preview-image` by format
+  (`thumbnailSourceFor()`), which is one decode per blob either way.
+- **A drag started during boot was dropped.** `onRowDragStart` bailed on
+  `session.shellEls === null`, true for a moment during boot and any time the
+  shell rebuilds. What a drag needs is the tree index, not the shell.
+- **A drag whose payload could not be set failed silently.** Firefox refuses a
+  drag with no data at all; the `catch` swallowed it and the user got a cursor
+  that never picked anything up.
+- **`docs/STRUCTURE.md` had drifted again.** `release.js`, `routes/updates.js`,
+  `lib/updates.js` and three script entries were missing, and the file listed
+  `dead-code.mjs` twice. The map is what the dead-code gate is compared against,
+  so it is checked, not trusted.
+- **Three files ended in a stray blank line**, which `git diff --check` reports
+  as whitespace noise on every future change to them.
+
 ## [0.21.0] - 2026-11-14
 
 The photos an iPhone produces, and the files a browser refuses to name.
@@ -78,6 +191,22 @@ The photos an iPhone produces, and the files a browser refuses to name.
   to the version the licence notice is written against.
 
 ### Fixed
+
+- **文件夹拖不进另一个文件夹。** `lib/views.js` 的 `listContext()` 只转发了
+  `onRowDragStart`/`onRowDragEnd`，三个 drop handler
+  （`onFolderDragOver`/`onFolderDragLeave`/`onFolderDrop`）没有转发，于是行上的
+  `if (ctx.onFolderDragOver)` 全部跳过——行和卡片根本不是放置目标。侧边栏和面包屑
+  直接读同一个 ctx，所以**只有它们能拖**，这就是"一半能用"的来源。
+- **HEIC 在列表和网格里没有缩略图。** `/thumbnail` 对 HEIC 返回 415，而门禁只问
+  `canThumbnail()`，所以整片手机相册渲染成一片通用图片图标。现在按
+  `thumbnailSourceFor()` 分流：三种原生格式走 `/thumbnail`，HEIC/HEIF 走
+  `/preview-image`，两者都按 blob 不可变缓存，列表与抽屉共用一次解码。
+- **拖拽期间没有任何视觉状态。** `body.is-moving` 一直被加上又摘掉，却没有一条
+  CSS 消费它；现在被拖的行降到 45% 不透明度、光标变 `grabbing`。
+- **`setData` 的异常被 `catch {}` 吞掉。** Firefox 在没有 data 时拒绝启动拖拽，
+  所以那条路径等于"在某浏览器里功能消失且无日志"；现在打一次 warn。
+- **`onRowDragStart` 用 `session.shellEls === null` 提前返回**，而 shell 在启动
+  和重建时正是 null——那个窗口里的拖拽会被静默丢弃。改为检查树索引。
 
 - **A missing HEIC fixture failed the whole browser sweep.** `heic-check` exited
   with a curl instruction when `.tmp/sample.heic` was absent, which is the state

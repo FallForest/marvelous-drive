@@ -67,7 +67,7 @@ export function extensionOf(name) {
   return clean.slice(index + 1).toLowerCase();
 }
 
-export const GENERIC_MIMES = new Set([
+const GENERIC_MIMES = new Set([
   'application/octet-stream', 'binary/octet-stream', 'application/unknown', '',
 ]);
 

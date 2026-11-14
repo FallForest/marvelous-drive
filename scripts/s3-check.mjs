@@ -12,20 +12,17 @@
  */
 
 import { spawn } from 'node:child_process'
-import { existsSync, mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { setTimeout as sleep } from 'node:timers/promises'
+import { argv, flagReader } from './lib/args.mjs'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const repoRoot = join(here, '..')
 
-const args = process.argv.slice(2)
-const flag = (name, fallback) => {
-  const index = args.indexOf('--' + name)
-  return index >= 0 && args[index + 1] ? args[index + 1] : fallback
-}
+const flag = flagReader(argv())
 const s3Port = Number(flag('s3-port', 9101))
 const drivePort = Number(flag('drive-port', 4401))
 const BUCKET = 'drive'

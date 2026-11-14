@@ -1,4 +1,4 @@
-import { resolve as resolvePathOnDisk, sep } from 'node:path';
+import { resolve as resolvePathOnDisk } from 'node:path';
 import { mkdir, realpath, stat } from 'node:fs/promises';
 import { CliError, EXIT, usageError } from '../errors.js';
 import { formatBytes, formatRelative } from '../output.js';

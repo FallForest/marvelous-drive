@@ -30,7 +30,7 @@ let cached = null;
  * Never throws when called silently: a failed check means "unknown", not an
  * error the user has to dismiss. The caller decides what to render.
  */
-export async function checkForUpdate(options) {
+async function checkForUpdate(options) {
   const opts = options || {};
   try {
     const result = await api.get('/system/update-check');
@@ -43,7 +43,7 @@ export async function checkForUpdate(options) {
 }
 
 /** True when this account may start an update (the workspace admin). */
-export function canUpdate() {
+function canUpdate() {
   const user = store.state.user;
   const workspace = user && user.workspace;
   return Boolean(workspace && workspace.role === 'admin');

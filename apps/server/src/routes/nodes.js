@@ -7,7 +7,7 @@ import { acquireLock, activeLock, releaseLock } from '../ops/locks.js'
 import { indexNode, removeFromIndex, renameInIndex } from '../ops/search-index.js'
 import { dropVersions } from '../versions.js'
 import {
-  childrenCount, createNode, getNode, nodeJson, pathTo, requireFile, requireNode,
+  childrenCount, createNode, getNode, nodeJson, pathTo, requireNode,
   restoreNode, subtreeIds, trashNode, uniqueName, updateNode, upsertFile,
 } from '../nodes.js'
 

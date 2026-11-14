@@ -1,10 +1,9 @@
 import { createHash } from 'node:crypto'
-import { createReadStream } from 'node:fs'
-import { mkdir, readdir, stat, unlink, writeFile } from 'node:fs/promises'
+import { mkdir, readdir, stat, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { db, nowIso } from '../db.js'
 import { config } from '../config.js'
-import { backend, blobPath } from '../storage/backend.js'
+import { backend } from '../storage/backend.js'
 
 /**
  * Blob store integrity.

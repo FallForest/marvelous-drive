@@ -1,6 +1,5 @@
 import { createWriteStream } from 'node:fs'
 import { createHash } from 'node:crypto'
-import { unlink } from 'node:fs/promises'
 import { join } from 'node:path'
 import { db, nowIso } from '../db.js'
 import { config } from '../config.js'

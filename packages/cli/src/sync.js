@@ -31,9 +31,6 @@ import { mimeFor } from './commands/files.js';
  * file that moved under us becomes a conflict instead of a silent overwrite.
  */
 
-/** Files are read in chunks by createReadStream; nothing is buffered whole. */
-const HASH_CONCURRENCY = 4;
-
 const toPosix = (path) => path.split(sep).join('/');
 
 /** sha256 of a file, streamed. */
@@ -285,7 +282,7 @@ export function summarize(ops) {
  * Idempotent: a folder already in `folders` is skipped, so a resume after a crash
  * costs one listing per folder that is still missing and nothing else.
  */
-export async function ensureRemoteFolders(client, folders, ops, workspace, write, log = () => {}) {
+async function ensureRemoteFolders(client, folders, ops, workspace, write, log = () => {}) {
   const needed = new Set();
   for (const op of ops) {
     if (op.action !== 'upload') continue;

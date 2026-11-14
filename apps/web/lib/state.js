@@ -92,10 +92,6 @@ export function childrenOf(index, folderId) {
   return index.children.get(folderId || 'root') || [];
 }
 
-export function foldersOf(index, folderId) {
-  return childrenOf(index, folderId).filter((node) => node.kind === 'folder');
-}
-
 /** Ancestors from root to the folder itself; broken chains stop at the root. */
 export function ancestorPath(index, folderId) {
   const path = [];
@@ -140,15 +136,3 @@ export function moveTargets(index, node) {
     .filter((candidate) => candidate.kind === 'folder' && !blocked.has(candidate.id))
     .sort((a, b) => String(a.name).localeCompare(String(b.name), 'zh-CN'));
 }
-
-/** flatten a folder subtree for the sidebar tree (folders only). */
-export function folderTree(index) {
-  const roots = foldersOf(index, null).map((node) => ({ node, depth: 0, children: [] }));
-  return roots;
-}
-
-export function subtreeFolders(index, folderId) {
-  return foldersOf(index, folderId);
-}
-
-export function emptySelection() { return new Set(); }

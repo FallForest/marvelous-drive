@@ -38,6 +38,7 @@ nodes.js          Tree rules: names, collisions, moves, subtrees, trash, restore
 versions.js       The only writer of version rows; blob refcounting for history
 workspaces.js     Membership resolution (own drive first) + member management
 admin.js          Workspace-owner check (the only role Drive has)
+release.js        Release manifest: parse, compare, pick the image tag
 mime.js           Extension → MIME; a .heic is an image even when the upload
                   declared octet-stream (applied on write and repaired on read)
 ```
@@ -94,6 +95,7 @@ office.js         GET /files/:id/office — OOXML preview extraction
 preview-image.js  GET /files/:id/preview-image — HEIC transcoded to PNG, cached
 maintenance.js    Blob scan / reclaim / forget-missing (owner only)
 cluster.js        Storage nodes: enrol, probe, drain, replication sweep
+updates.js        /updates/check and /updates/apply — the update agent bridge
 ```
 
 Rules:
@@ -154,6 +156,7 @@ lib/
   sidebar.js      Sidebar tree, breadcrumbs, toolbar
   motion.js       Motion semantics on the JS side: timings, stagger cap, VT guard
   select.js       Dropdowns built from the app's own menu (no native <select>)
+  updates.js      The update banner: manifest read, apply, progress polling
 styles/
   index.css       Entry: imports the layers below in cascade order
   tokens.css      Design tokens (colour, spacing, type, motion values)
@@ -192,6 +195,13 @@ Rules:
   to the opener on release. A control that is "unavailable" uses
   `aria-disabled`, never the `disabled` attribute — a disabled button cannot hold
   focus, so disabling it at the end of a list drops the keyboard onto `<body>`.
+- Drag and drop has one rule that keeps breaking: a drop target needs BOTH the
+  three handlers and the context that carries them. `listContext()` in
+  `lib/views.js` is the seam where a handler silently goes missing — the row
+  guard reads `if (ctx.onFolderDragOver)` and installs nothing, so the gesture
+  looks broken while the sidebar (which reads the context directly) still works.
+  Every new list surface must be added to that projection, and
+  `scripts/dnd-check.mjs` is what catches it.
 - A picture previews as a gallery: `←`/`→` walk the pictures of the current
   view, `Home`/`End` jump to the ends, and the ends do not wrap. Every picture
   is requested from `/thumbnail` (the only route with an immutable cache
@@ -228,6 +238,7 @@ A check script keeps only its seed data, its page interactions and its assertion
 
 ```
 lib/browser.mjs      Chrome launcher, CDP page, check recorder — the shared harness
+lib/args.mjs         the one "--name value" reader for the operation scripts
 smoke.mjs            API-level checks against a running instance
 browser-check.mjs    the shell: login, list, preview, trash, share, mobile
 feature-check.mjs    thumbnails, batch bar, draggable rows, duplicates drawer
@@ -243,10 +254,12 @@ team-check.mjs       the team panel lists and labels roles
 feel-check.mjs       runtime motion: press, stagger cap, VT flag, replay
 motion-lint.mjs      static: the ten motion rules (CI gate)
 check-syntax.mjs     node --check over the whole repo
+dead-code.mjs        static: unreachable modules, exports nothing imports (npm run dead-code)
 s3-fixture.mjs       S3 server that verifies SigV4 (no Docker needed)
 s3-check.mjs         the whole server on DRIVE_STORAGE=s3
 tiered-check.mjs     upload hot, demote, read cold
 backup.mjs           checkpointed SQLite + blobs into a tar
+test/                node --test suites for the shared script helpers
 ```
 
 ## Documentation

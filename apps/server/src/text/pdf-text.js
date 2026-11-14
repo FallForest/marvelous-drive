@@ -28,7 +28,7 @@ import { inflateRawSync, inflateSync } from 'node:zlib'
 export const MAX_PDF_INDEX_BYTES = 24 * 1024 * 1024
 
 /** Bounds that keep a malformed or hostile file from becoming a denial of service. */
-export const PDF_LIMITS = Object.freeze({
+const PDF_LIMITS = Object.freeze({
   maxObjects: 20000,
   maxPages: 400,
   maxStreamBytes: 8 * 1024 * 1024,
@@ -81,7 +81,7 @@ function skipSpace(text, cursor) {
 }
 
 /** Decodes a PDF literal string body: escapes, octal and escaped newlines. */
-export function decodePdfString(body) {
+function decodePdfString(body) {
   let out = ''
   for (let index = 0; index < body.length; index++) {
     const char = body[index]
@@ -105,7 +105,7 @@ export function decodePdfString(body) {
 }
 
 /** Decodes a PDF hex string body (`<...>`): two hex digits become one byte. */
-export function decodeHexString(body) {
+function decodeHexString(body) {
   const clean = body.replace(/[^0-9a-fA-F]/g, '')
   let out = ''
   for (let index = 0; index + 1 < clean.length; index += 2) out += String.fromCharCode(Number.parseInt(clean.slice(index, index + 2), 16))
@@ -226,7 +226,7 @@ function inflateStream(body) {
  * Exported for tests: when extraction returns nothing, the question is always
  * "did the scan see the objects at all".
  */
-export function scanObjects(buffer) {
+function scanObjects(buffer) {
   const text = buffer.toString('latin1')
   const objects = []
   const pattern = /(\d+)\s+(\d+)\s+obj\b/g
@@ -341,7 +341,7 @@ const CP1252_HIGH = {
 }
 
 /** WinAnsi/Latin-1 byte → character. */
-export const decodeWinAnsi = (code) => CP1252_HIGH[code] ?? String.fromCharCode(code & 0xff)
+const decodeWinAnsi = (code) => CP1252_HIGH[code] ?? String.fromCharCode(code & 0xff)
 
 /** UTF-16BE hex (4 digits per unit) → string, as CMaps spell destination text. */
 function utf16beFromHex(hex) {
@@ -477,7 +477,7 @@ function decodeShown(raw, font) {
  * how a content stream is meant to be read. Unknown operators are dropped; a
  * misread operator would produce plausible-but-wrong text, which is worse.
  */
-export function textFromContent(content, fonts) {
+function textFromContent(content, fonts) {
   let out = ''
   const args = []
   let font = null

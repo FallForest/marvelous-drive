@@ -30,7 +30,7 @@ export function formatDate(value) {
 }
 
 /** Compact date used in list columns: 11月10日 20:34. */
-export function formatShortDate(value) {
+function formatShortDate(value) {
   if (!value) return '';
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return '';
@@ -150,7 +150,7 @@ export function fileKind(mime, name) {
   return byExtension || 'file';
 }
 
-export const TEXT_KINDS = new Set(['markdown', 'text', 'code']);
+const TEXT_KINDS = new Set(['markdown', 'text', 'code']);
 export function isTextLike(mime, name) {
   return TEXT_KINDS.has(fileKind(mime, name));
 }
@@ -252,8 +252,6 @@ export function icon(name, size) {
     '" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">' +
     body + '</svg>';
 }
-
-export function hasIcon(name) { return Object.prototype.hasOwnProperty.call(ICON_BODY, name); }
 
 /**
  * Nodes sorted folders-first, then by the requested key.

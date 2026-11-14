@@ -1,7 +1,6 @@
 import { createHash, createHmac } from 'node:crypto'
-import { createReadStream, readFileSync, statSync, unlinkSync } from 'node:fs'
-import { copyFile, mkdir, stat, unlink, writeFile } from 'node:fs/promises'
-import { tmpdir } from 'node:os'
+import { createReadStream } from 'node:fs'
+import { mkdir, stat, unlink, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { Readable } from 'node:stream'
 
@@ -29,7 +28,6 @@ import { Readable } from 'node:stream'
 
 const ALGORITHM = 'AWS4-HMAC-SHA256'
 const EMPTY_SHA256 = createHash('sha256').update('').digest('hex')
-const UNSIGNED_PAYLOAD = 'UNSIGNED-PAYLOAD'
 
 /** RFC 3986 percent-encoding, the one AWS expects (not encodeURIComponent). */
 function uriEncode(value, keepSlash = false) {
@@ -264,4 +262,4 @@ async function sha256File(path) {
   return hash.digest('hex')
 }
 
-export { EMPTY_SHA256, UNSIGNED_PAYLOAD, uriEncode }
+export { EMPTY_SHA256, uriEncode }

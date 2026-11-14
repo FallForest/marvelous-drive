@@ -19,8 +19,8 @@ import { fail } from '../http.js'
  */
 
 /** Default TTL: long enough to edit, short enough that a crash self-heals. */
-export const LOCK_TTL_MS = 15 * 60 * 1000
-export const LOCK_TTL_MAX_MS = 8 * 60 * 60 * 1000
+const LOCK_TTL_MS = 15 * 60 * 1000
+const LOCK_TTL_MAX_MS = 8 * 60 * 60 * 1000
 
 /** Drops expired rows opportunistically; called on every lock operation. */
 function sweepExpired(now = Date.now()) {
@@ -99,17 +99,4 @@ export function releaseLock(nodeId, userId) {
   }
   db.prepare('DELETE FROM node_locks WHERE node_id=?').run(nodeId)
   return { released: true }
-}
-
-/** Locks held by one user, for a "you have open documents" view. */
-export function locksFor(userId) {
-  sweepExpired()
-  return db.prepare('SELECT * FROM node_locks WHERE user_id=? ORDER BY acquired_at DESC').all(userId)
-    .map((row) => ({
-      nodeId: row.node_id,
-      userId: row.user_id,
-      client: row.client,
-      acquiredAt: row.acquired_at,
-      expiresAt: row.expires_at,
-    }))
 }

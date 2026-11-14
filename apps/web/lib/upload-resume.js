@@ -184,11 +184,6 @@ export function setLiveHandle(file, handle) {
   else liveHandles.delete(key);
 }
 
-export function liveHandleFor(file) {
-  const key = resumeKey(file);
-  return key ? liveHandles.get(key) || null : null;
-}
-
 export function clearLiveHandle(file) {
   setLiveHandle(file, null);
 }

@@ -89,15 +89,8 @@ export function append(parent, children) {
   return parent;
 }
 
-/** Build a fragment from a list of children. */
-export function frag(...children) {
-  const f = document.createDocumentFragment();
-  append(f, children);
-  return f;
-}
-
 /** Replace all children of an element. */
-export function clear(el) {
+function clear(el) {
   while (el.firstChild) el.removeChild(el.firstChild);
   return el;
 }
@@ -113,22 +106,6 @@ export function raw(htmlString) {
   const template = document.createElement('template');
   template.innerHTML = String(htmlString).trim();
   return template.content.firstElementChild;
-}
-
-export function qs(selector, root) {
-  return (root || document).querySelector(selector);
-}
-
-/** Delegated listener: on(root, '.selector', 'click', handler). */
-export function on(root, selector, type, handler, options) {
-  const listener = (event) => {
-    const target = event.target;
-    if (!target || typeof target.closest !== 'function') return;
-    const match = target.closest(selector);
-    if (match && root.contains(match)) handler(event, match);
-  };
-  root.addEventListener(type, listener, options);
-  return () => root.removeEventListener(type, listener, options);
 }
 
 export function debounce(fn, wait) {

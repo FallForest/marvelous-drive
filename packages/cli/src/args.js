@@ -23,7 +23,7 @@ export const GLOBAL_FLAGS = [
 const GLOBAL_NAMES = new Set(GLOBAL_FLAGS.map(flag => flag.name));
 const GLOBAL_SHORTS = new Map(GLOBAL_FLAGS.filter(flag => flag.short).map(flag => [flag.short, flag.name]));
 
-export function flagKind(definition) {
+function flagKind(definition) {
   return definition.kind ?? 'string';
 }
 

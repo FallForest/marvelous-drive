@@ -5,7 +5,7 @@ import { fail } from './http.js'
  * role that exists. The check is kept as a function (not inlined) so a future
  * multi-user workspace can change the rule in one place.
  */
-export function isWorkspaceOwner(user) {
+function isWorkspaceOwner(user) {
   return Boolean(user) && user.role === 'owner'
 }
 
