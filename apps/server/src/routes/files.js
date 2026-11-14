@@ -17,6 +17,7 @@ import { recordAudit } from '../ops/audit.js'
 import { assertWithinQuota } from '../ops/quota.js'
 import { indexNode, removeFromIndex } from '../ops/search-index.js'
 import { touchBlob } from '../ops/access-log.js'
+import { resolveMime } from '../mime.js'
 
 /**
  * File content: simple upload, instant (deduplicated) upload, download with
@@ -202,7 +203,7 @@ export function registerFileRoutes(router) {
     if (blob.size !== size) {
       ctx.fail(400, 'INVALID_INPUT', `size does not match the stored blob (${blob.size} bytes).`)
     }
-    const mime = input.mime ? safeMime(input.mime) : safeMime(null)
+    const mime = resolveMime(name, input.mime)
     // `skip` must not touch the refcount at all: no node is created, so the
     // reference that retainBlob would add would never be released.
     const existing = onConflict === 'skip' ? findFileByName(user.id, parentId, name) : null
@@ -236,7 +237,10 @@ export function registerFileRoutes(router) {
     const onConflict = normalizeConflictStrategy(ctx.url.searchParams.get('onConflict'))
     const name = normalizeName(nameFromRequest(ctx.url, ctx.req))
     const parentId = ctx.url.searchParams.get('parentId') || null
-    const mime = safeMime(ctx.req.headers['content-type'])
+    // The name decides the type where the table knows it: a .heic from a phone
+    // arrives with a generic content-type, and storing it as octet-stream costs
+    // the file its icon and its chance of any preview.
+    const mime = resolveMime(name, ctx.req.headers['content-type'])
     // Quota is checked twice: once from Content-Length so an over-quota upload
     // costs no disk I/O, and once against the bytes actually stored because a
     // chunked request has no Content-Length at all.
@@ -284,7 +288,7 @@ export function registerFileRoutes(router) {
       sendJson(ctx.res, 200, { node: nodeJson(row), skipped: true })
       return
     }
-    const mime = safeMime(ctx.req.headers['content-type'] || row.mime)
+    const mime = resolveMime(row.name, ctx.req.headers['content-type'] || row.mime)
     // Replacing bytes only charges the difference: the old size is still on the
     // books until the update lands.
     const declared = Number(ctx.req.headers['content-length'] || 0)

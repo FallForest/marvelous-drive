@@ -6,6 +6,94 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.21.0] - 2026-11-14
+
+The photos an iPhone produces, and the files a browser refuses to name.
+
+### Added
+
+- **`apps/server/src/routes/preview-image.js`** — `GET /files/:id/preview-image`
+  decodes a HEIC and answers a downscaled PNG, cached on disk by
+  `blobHash@width` and de-duplicated in flight, so opening a folder of twenty
+  phone photos starts one decode per distinct file rather than twenty.
+- **`apps/server/src/text/image-normalize.js`** — HEIC frame → downscaled RGBA →
+  PNG, using a box filter over the decoded frame and `node:zlib` for the encode,
+  so the server gains no image dependency of its own. The long edge matches
+  `lib/image-fit.js` (1600px), which is why a preview lands at 1–2 MB rather
+  than the 48 MB an undownscaled 12 MP frame would take.
+- **`apps/server/src/text/heif-loader.js`** — the only file that imports libheif.
+  A dynamic import behind a cached promise, so a deployment that never receives
+  a HEIC never loads the WebAssembly module, and a missing optional dependency
+  degrades to "no HEIC preview" instead of a boot failure. The failure is not
+  cached: installing the decoder later works without a restart.
+- **`apps/server/src/mime.js`** — the extension → MIME table, applied on upload
+  and again on read. The read-side repair is what fixes files stored before the
+  table existed, with no migration and no re-upload.
+- **`apps/server/THIRD-PARTY.md`** — the LGPL-3.0 notice libheif requires, with
+  the four things that keep it satisfied written down: use-not-link, keep the
+  `.wasm` replaceable, ship the notice, claim no other licence for it.
+- **`scripts/heic-check.mjs`** — 10 browser assertions against libheif's own
+  example file: it uploads as an image with no content-type, renders as a
+  picture, keeps the 1280×854 aspect ratio, and comes from the transcoding route.
+  The fixture is fetched into `.tmp/` on first run rather than committed, so a
+  fresh clone is green without a manual pre-step.
+- **`package-lock.json`** — the decoder pinned at 1.18.2, which is the version
+  the notice describes and the only runtime dependency in the image.
+
+### Changed
+
+- **HEIC now previews.** An iPhone stores photos as HEIC, no Chromium build
+  decodes HEVC stills, so a whole camera roll used to be a wall of "this format
+  cannot be previewed". The server decodes on demand — libheif as WebAssembly,
+  loaded only when a HEIC actually arrives — downscales, and re-encodes a PNG
+  cached by `blobHash@width`, so one decode serves every node pointing at those
+  bytes. The browser gains zero bytes.
+- **File types are no longer guessed by the browser.** An upload carries whatever
+  `content-type` it was given, and browsers say `application/octet-stream` for
+  `.heic`, `.tiff` and anything else they do not know. The extension table now
+  decides first and the declared type only fills in what is left, so
+  `readme.md` is Markdown rather than unknown binary. Uploads and `nodeJson()`
+  both consult it, which is what repairs rows written before it existed.
+- **The extension table grew by about 60 formats** — heic/heif/tiff/psd/jxl/ico/
+  jfif; mov/avi/wmv/flv/m4v/3gp; opus/aac/wma/aiff/amr; epub; srt/vtt/ass; ipynb;
+  and the language set the code preview was already lexing but could not name.
+- **Animated pictures keep their animation.** A decoded `ImageBitmap` is a single
+  frame, so routing a GIF, an APNG or an animated WebP through the bitmap path
+  drew frame one and silently discarded the timeline. Those four now go straight
+  to an `<img>`, which every engine this app supports decodes natively — correct
+  and cheaper, since there is no decode of ours to pay for.
+- **Apple iWork and legacy binary Office stop pretending to be previewable.**
+  `.pages/.numbers/.key` are ZIP containers of IWA protobuf and `.doc/.ppt/.xls`
+  are OLE compound files; both were routed to `/office` by extension, answered
+  400, and surfaced as "无法预览". They are now `opaque`: the drawer offers a
+  download instead of asking an endpoint that must refuse.
+- **Static assets are gzipped.** Nothing was compressed before, including `.wasm`;
+  a 1.4 MB `libheif.wasm` is about 480 KB gzipped, which is the precondition for
+  loading the decoder on demand at all. Only the extensions where it pays are
+  compressed, and only above 1 KB, with `Vary: Accept-Encoding`.
+- **The image installs its decoder.** The Dockerfile copied source only, so
+  `libheif-js` was never present in the image and every HEIC answered 503. It now
+  installs from the lockfile in a layer of its own — manifests first, source
+  after — so a source edit does not invalidate it, and `npm ci` pins the decoder
+  to the version the licence notice is written against.
+
+### Fixed
+
+- **A missing HEIC fixture failed the whole browser sweep.** `heic-check` exited
+  with a curl instruction when `.tmp/sample.heic` was absent, which is the state
+  of every fresh clone — so the one check that proves the feature works was the
+  one that went red for a reason that was not a bug. It now downloads the fixture
+  itself, caches it in the git-ignored scratch directory, and reports a fetch
+  failure as its own failed check rather than a crash.
+- **`image.display()` in libheif-js is asynchronous.** Reading the pixel buffer
+  set by its callback on the next line always finds it empty; the callback is the
+  only place the pixels exist. Decoding is now a promise, with a 20-second guard
+  so a malformed frame cannot hold a request open.
+- **A compressed HEIC can declare a canvas it does not carry.** `MAX_SOURCE_BYTES`
+  bounds the input, not the output — HEIC compresses about 10:1, so a 9 MB file
+  can claim 100 MP and ask for 400 MB of RGBA. The frame is refused above 50 MP
+  before anything is allocated.
+
 ## [0.20.0] - 2026-11-14
 
 A drive you open with one click, and an upload a reload can no longer throw away.

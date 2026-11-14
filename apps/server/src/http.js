@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto'
 import { createReadStream, createWriteStream } from 'node:fs'
-import { stat, unlink } from 'node:fs/promises'
+import { readFile, stat, unlink } from 'node:fs/promises'
+import { gzipSync } from 'node:zlib'
 import { basename, extname, join, normalize, sep } from 'node:path'
 import { config } from './config.js'
 
@@ -30,6 +31,16 @@ export function sendJson(res, status, value, headers = {}) {
     ...headers,
   })
   res.end(payload)
+}
+
+/** Sends an already-encoded body (an image, a zip) with caller-chosen headers. */
+export function sendRaw(res, status, payload, headers = {}) {
+  const body = Buffer.isBuffer(payload) ? payload : Buffer.from(payload)
+  res.writeHead(status, {
+    'content-length': body.length,
+    ...headers,
+  })
+  res.end(body)
 }
 
 export function sendEmpty(res, status = 204) {
@@ -230,6 +241,9 @@ export async function sendBlob(req, res, backend, key, { mime, download = false,
   res.end()
 }
 
+/** Below this, the gzip header costs more than the compression saves. */
+const COMPRESS_MIN_BYTES = 1024
+
 /**
  * Serves a file from the web bundle, guarding against path traversal and
  * falling back to index.html for client-side routes.
@@ -258,6 +272,34 @@ export async function serveStatic(req, res, rootDir, urlPath) {
       res.writeHead(304, headers)
       res.end()
       return
+    }
+    // Compression for the files where it pays: a WebAssembly module is the one
+    // asset in this bundle that is both large and highly compressible (a 1.4 MB
+    // libheif.wasm is ~480 KB gzipped). Text assets compress too, but they are
+    // small enough that the CPU per request is not worth it.
+    const ext = extname(target).toLowerCase()
+    const compressible = ext === '.wasm' || ext === '.js' || ext === '.mjs'
+      || ext === '.css' || ext === '.json' || ext === '.svg' || ext === '.md'
+    const accepted = String(req.headers['accept-encoding'] || '')
+    if (compressible && /\bgzip\b/.test(accepted) && info.size > COMPRESS_MIN_BYTES) {
+      let body
+      try {
+        body = gzipSync(await readFile(target), { level: 6 })
+      } catch {
+        body = null
+      }
+      if (body) {
+        res.writeHead(200, {
+          ...headers,
+          'content-encoding': 'gzip',
+          'content-length': body.length,
+          // A single representation, keyed by the encoding that produced it.
+          vary: 'Accept-Encoding',
+        })
+        if (req.method === 'HEAD') { res.end(); return }
+        res.end(body)
+        return
+      }
     }
     res.writeHead(200, { ...headers, 'content-length': info.size })
     if (req.method === 'HEAD') { res.end(); return }

@@ -24,6 +24,7 @@ const CHECKS = [
   ['browser-check', 'the shell: login, list, preview, trash, share, mobile'],
   ['click-check', 'the click model: click opens, checkbox selects'],
   ['gallery-check', 'the picture browser: arrows, counter, cache, no upscale'],
+  ['heic-check', 'a HEIC upload becomes a preview a browser can show'],
   ['feature-check', 'thumbnails, batch bar, draggable rows, duplicates'],
   ['versions-check', 'the history drawer, absent on a v1 file'],
   ['team-check', 'the team panel and its role labels'],

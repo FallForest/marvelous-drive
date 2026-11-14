@@ -10,6 +10,7 @@ import { adoptBlob, releaseBlob, retainBlob } from '../storage/blobs.js'
 import { findFileByName, nodeJson, normalizeConflictStrategy, upsertFile } from '../nodes.js'
 import { randomId } from '../security.js'
 import { safeMime } from './files.js'
+import { resolveMime } from '../mime.js'
 import { assertWithinQuota } from '../ops/quota.js'
 import { backend } from '../storage/backend.js'
 
@@ -227,7 +228,7 @@ export function registerUploadRoutes(router) {
         adopted = upsertFile(user.id, {
           name: session.name,
           parentId: session.parent_id,
-          mime: safeMime(String(ctx.req.headers['content-type'] || 'application/octet-stream')),
+          mime: resolveMime(session.name, ctx.req.headers['content-type']),
           size: session.size,
           blobHash: digest,
           onConflict,
@@ -287,7 +288,7 @@ export function registerUploadRoutes(router) {
     const result = upsertFile(user.id, {
       name: session.name,
       parentId: session.parent_id,
-      mime: safeMime(String(ctx.req.headers['content-type'] || 'application/octet-stream')),
+      mime: resolveMime(session.name, ctx.req.headers['content-type']),
       size: session.size,
       blobHash: hashValue,
       onConflict,

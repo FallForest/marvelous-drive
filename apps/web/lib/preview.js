@@ -15,8 +15,8 @@ import { isOfficeKind, loadOfficePreview } from './office-preview.js';
 import { highlight, languageOf } from './highlight.js';
 import { peekThumbUrl } from './files.js';
 import {
-  arrowDelta, cancelDirection, galleryFor, indexOfId, isGalleryImage, jumpDelta, positionLabel,
-  prefetchWindow, stepIndex,
+  arrowDelta, cancelDirection, galleryFor, indexOfId, isAnimated, isGalleryImage, jumpDelta,
+  positionLabel, prefetchWindow, stepIndex,
 } from './gallery.js';
 import { createImageCache } from './image-cache.js';
 import { loadPicture } from './image-loader.js';
@@ -303,6 +303,8 @@ export function openPreview(node, options) {
       const key = pictureKey(neighbour);
       if (!key || imageCache.has(key)) continue;
       if (neighbour.kind !== 'file' || !neighbour.id) continue;
+      // Warming an animation would decode frame one and cache a still of it.
+      if (isAnimated(neighbour.mime)) continue;
       const controller = new AbortController();
       const tracked = track(controller, list.indexOf(neighbour));
       loadPicture(neighbour, {
@@ -422,6 +424,31 @@ async function loadImage(node, body, context) {
   // flight, and a captured boolean would always read "not closed".
   const gone = () => (typeof context.disposed === 'function' ? context.disposed() : !!context.disposed);
   const { objectUrls } = context;
+
+  // An animated picture must NOT go through createImageBitmap(): a bitmap is a
+  // single frame, so a GIF, an APNG or an animated WebP would be drawn once and
+  // sit there frozen while the timeline it carries is thrown away. These four
+  // formats have been natively decoded by every engine for years, so the
+  // browser's own <img> is both correct and cheaper — no decode on our side.
+  if (isAnimated(node.mime)) {
+    const controller = new AbortController();
+    const tracked = context.track(controller, -1);
+    try {
+      const blob = await fetchBlob(imageRequestUrl(node), { signal: controller.signal });
+      context.untrack(tracked);
+      if (gone() || controller.signal.aborted) return;
+      // No cache entry: a Blob held for an animation would pin the whole file,
+      // and re-fetching a GIF is answered by the HTTP cache anyway.
+      mount(body, legacyImage(node, blob, objectUrls));
+    } catch (error) {
+      context.untrack(tracked);
+      if (error && error.name === 'AbortError') return;
+      if (gone()) return;
+      mount(body, notice('无法载入图片。', (error && error.message) || '请重试。', 'file-image'));
+    }
+    return;
+  }
+
   const cached = imageCache.get(pictureKey(node));
   if (cached) {
     mount(body, pictureFrame(node, cached));

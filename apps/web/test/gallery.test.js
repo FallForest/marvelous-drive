@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
 import {
   PREFETCH_RADIUS, NEIGHBOUR_BYTE_LIMIT, isGalleryImage, galleryFor, indexOfId, stepIndex,
-  prefetchWindow, positionLabel, arrowDelta, jumpDelta, cancelDirection,
+  prefetchWindow, positionLabel, arrowDelta, jumpDelta, cancelDirection, isAnimated,
 } from '../lib/gallery.js'
 
 /**
@@ -198,5 +198,23 @@ describe('cancelDirection', () => {
 
   it('cancels everything when there is no direction', () => {
     assert.equal(cancelDirection(0), 'all')
+  })
+})
+describe('isAnimated', () => {
+  it('recognises the formats whose animation is the point', () => {
+    for (const mime of ['image/gif', 'image/apng', 'image/webp', 'image/avif']) {
+      assert.equal(isAnimated(mime), true, mime)
+    }
+  })
+
+  it('strips parameters', () => {
+    assert.equal(isAnimated('image/gif; charset=binary'), true)
+  })
+
+  it('leaves the still formats on the bitmap path', () => {
+    for (const mime of ['image/png', 'image/jpeg', 'image/heic', 'text/plain']) {
+      assert.equal(isAnimated(mime), false, mime)
+    }
+    assert.equal(isAnimated(null), false)
   })
 })

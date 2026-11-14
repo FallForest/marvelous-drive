@@ -69,17 +69,37 @@ export function expiryLabel(expiresAt, now) {
 const EXT_KIND = {
   md: 'markdown', markdown: 'markdown', mdx: 'markdown',
   txt: 'text', log: 'text', csv: 'text', tsv: 'text', json: 'code', yml: 'code', yaml: 'code',
-  js: 'code', mjs: 'code', ts: 'code', tsx: 'code', jsx: 'code', css: 'code', html: 'code',
-  py: 'code', rb: 'code', go: 'code', rs: 'code', java: 'code', sh: 'code', sql: 'code', toml: 'code', ini: 'code',
-  png: 'image', jpg: 'image', jpeg: 'image', gif: 'image', webp: 'image', svg: 'image', avif: 'image', bmp: 'image',
-  pdf: 'pdf', zip: 'archive', gz: 'archive', tar: 'archive', rar: 'archive', '7z': 'archive',
-  mp3: 'audio', wav: 'audio', flac: 'audio', m4a: 'audio', ogg: 'audio',
-  mp4: 'video', webm: 'video', mov: 'video', mkv: 'video',
+  js: 'code', mjs: 'code', cjs: 'code', ts: 'code', tsx: 'code', jsx: 'code', css: 'code', html: 'code',
+  py: 'code', rb: 'code', go: 'code', rs: 'code', java: 'code', kt: 'code', swift: 'code',
+  c: 'code', h: 'code', cpp: 'code', hpp: 'code', cs: 'code', php: 'code',
+  sh: 'code', bash: 'code', zsh: 'code', ps1: 'code', sql: 'code', toml: 'code', ini: 'code',
+  xml: 'code', vue: 'code', svelte: 'code', dart: 'code', lua: 'code', r: 'code', scala: 'code',
+  ipynb: 'code', dockerfile: 'code', env: 'code',
+  // Images. The four after webp are the ones a browser will NOT decode
+  // everywhere, which is exactly why the icon has to be right even when the
+  // preview cannot be: heic/heif are the iPhone defaults, tif/tiff come from
+  // scanners, psd from Photoshop.
+  png: 'image', jpg: 'image', jpeg: 'image', jpe: 'image', gif: 'image', webp: 'image',
+  svg: 'image', avif: 'image', bmp: 'image', ico: 'image', jfif: 'image',
+  heic: 'image', heif: 'image', tiff: 'image', tif: 'image', psd: 'image', jxl: 'image',
+  pdf: 'pdf', epub: 'epub',
+  zip: 'archive', gz: 'archive', tgz: 'archive', tar: 'archive', rar: 'archive', '7z': 'archive', bz2: 'archive', xz: 'archive',
+  mp3: 'audio', wav: 'audio', flac: 'audio', m4a: 'audio', ogg: 'audio', oga: 'audio',
+  opus: 'audio', aac: 'audio', wma: 'audio', aiff: 'audio', amr: 'audio',
+  mp4: 'video', webm: 'video', mov: 'video', mkv: 'video', m4v: 'video',
+  avi: 'video', wmv: 'video', flv: 'video', mpg: 'video', mpeg: 'video', '3gp': 'video',
   // Office documents get their own kind so the row icon and the preview can
   // branch on it; the server renders them through /files/:id/office.
-  ppt: 'slides', pptx: 'slides', odp: 'slides',
+  ppt: 'slides', pptx: 'slides', odp: 'slides', key: 'slides',
   doc: 'doc', docx: 'doc', odt: 'doc', rtf: 'doc',
   xls: 'sheet', xlsx: 'sheet', ods: 'sheet',
+  // Apple iWork (.pages/.numbers/.key) and legacy binary Office are NOT
+  // extractable: they are ZIP-of-IWA and OLE compound files respectively. They
+  // get their own kind so the drawer offers an honest "download to open"
+  // instead of asking /office for something it must refuse.
+  pages: 'opaque', numbers: 'opaque', key: 'opaque',
+  // Subtitles are text; a player would read them, the drawer shows them.
+  srt: 'text', vtt: 'text', ass: 'text', ssa: 'text',
 };
 
 export function extension(name) {
@@ -94,6 +114,13 @@ export function extension(name) {
  * generic text mime still consults the extension so "text/plain" + ".md" is
  * previewed as Markdown instead of plain text.
  */
+/** The pre-OOXML Office container: OLE compound file. */
+const LEGACY_BINARY_MIMES = new Set([
+  'application/msword',
+  'application/vnd.ms-powerpoint',
+  'application/vnd.ms-excel',
+]);
+
 export function fileKind(mime, name) {
   const type = String(mime || '').toLowerCase();
   if (type.startsWith('image/')) return 'image';
@@ -103,8 +130,16 @@ export function fileKind(mime, name) {
   if (type.startsWith('text/markdown')) return 'markdown';
   const officeByExtension = EXT_KIND[extension(name)];
   if (officeByExtension === 'slides' || officeByExtension === 'doc' || officeByExtension === 'sheet') {
+    // The server extracts OOXML/ODF only. A legacy binary .doc that arrives
+    // with an OLE mime is not extractable, and pretending otherwise sends the
+    // drawer to an endpoint that must answer 400.
+    if (LEGACY_BINARY_MIMES.has(type)) return 'opaque';
     return officeByExtension;
   }
+  if (officeByExtension === 'opaque') return 'opaque';
+  // epub is a ZIP inside, but "a book I can read" outranks "an archive I can
+  // only download": the MIME check for zip would otherwise swallow it.
+  if (officeByExtension === 'epub' || type === 'application/epub+zip') return 'epub';
   if (type.includes('zip') || type.includes('tar') || type.includes('rar') || type.includes('7z') || type.includes('gzip')) return 'archive';
   const byExtension = EXT_KIND[extension(name)];
   if (type.startsWith('text/') || type === 'application/json' || !type || type === 'application/octet-stream') {

@@ -39,6 +39,11 @@ export function imageRequestUrl(node, options) {
   const opts = options || {};
   const mime = String(node.mime || '').split(';')[0].trim().toLowerCase();
   if (THUMBNAIL_MIMES.has(mime)) return thumbnailUrl(node.id, opts.width || 1024);
+  // HEIC/HEIF: no browser decodes these, so the server transcodes a preview.
+  // The route answers a PNG with the same immutable cache contract.
+  if (mime === 'image/heic' || mime === 'image/heif') {
+    return '/api/v1/files/' + encodeURIComponent(node.id) + '/preview-image?w=' + (opts.width || 1600);
+  }
   return contentUrl(node.id);
 }
 

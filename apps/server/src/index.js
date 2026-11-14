@@ -17,6 +17,7 @@ import { sweepExpiredTrash } from './ops/retention.js'
 import { indexIsEmpty, rebuildIndex } from './ops/search-index.js'
 import { backend } from './storage/backend.js'
 import { registerOfficeRoutes } from './routes/office.js'
+import { registerPreviewImageRoutes } from './routes/preview-image.js'
 import { registerUpdateRoutes } from './routes/updates.js'
 import { userFromRequest } from './auth.js'
 
@@ -42,6 +43,7 @@ registerShareRoutes(router)
 registerMaintenanceRoutes(router)
 registerClusterRoutes(router)
 registerOfficeRoutes(router)
+registerPreviewImageRoutes(router)
 // System updates answer per instance rather than per user, but starting one is
 // an administrator action, so the routes resolve the caller themselves.
 registerUpdateRoutes(router, deps, { userFromRequest })

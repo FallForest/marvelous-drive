@@ -39,3 +39,17 @@ describe('imageRequestUrl', () => {
     assert.equal(imageRequestUrl({ name: 'x.jpg' }), null)
   })
 })
+describe('HEIC routing', () => {
+  it('sends heic and heif to the transcoding route', () => {
+    assert.equal(imageRequestUrl({ id: 'n1', mime: 'image/heic' }), '/api/v1/files/n1/preview-image?w=1600')
+    assert.equal(imageRequestUrl({ id: 'n1', mime: 'image/heif' }, { width: 800 }), '/api/v1/files/n1/preview-image?w=800')
+  })
+
+  it('keeps the immutable thumbnail route for the three native formats', () => {
+    assert.match(imageRequestUrl({ id: 'n1', mime: 'image/jpeg' }), /thumbnail/)
+  })
+
+  it('falls back to the plain content route for anything else', () => {
+    assert.equal(imageRequestUrl({ id: 'n1', mime: 'image/bmp' }), '/api/v1/files/n1/content')
+  })
+})

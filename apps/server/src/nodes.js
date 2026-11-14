@@ -2,6 +2,7 @@ import { db, nowIso, transaction } from './db.js'
 import { fail } from './http.js'
 import { randomId } from './security.js'
 import { recordVersion } from './versions.js'
+import { resolveMime } from './mime.js'
 
 /**
  * The node tree: folders and files, one tree per account.
@@ -20,7 +21,11 @@ export function nodeJson(row, extra = {}) {
     kind: row.kind,
     parentId: row.parent_id ?? null,
     size: row.size,
-    mime: row.mime,
+    // Repaired against the extension on the way out: rows written before the
+    // MIME table existed (or by a client that sent no type at all) still say
+    // application/octet-stream, which costs the file its icon and its preview
+    // without a migration or a re-upload.
+    mime: resolveMime(row.name, row.mime),
     version: row.version,
     starred: Boolean(row.starred),
     blobHash: row.blob_hash ?? null,

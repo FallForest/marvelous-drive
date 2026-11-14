@@ -38,6 +38,8 @@ nodes.js          Tree rules: names, collisions, moves, subtrees, trash, restore
 versions.js       The only writer of version rows; blob refcounting for history
 workspaces.js     Membership resolution (own drive first) + member management
 admin.js          Workspace-owner check (the only role Drive has)
+mime.js           Extension → MIME; a .heic is an image even when the upload
+                  declared octet-stream (applied on write and repaired on read)
 ```
 
 ### `storage/` — bytes, and nothing above them
@@ -62,6 +64,8 @@ office-text.js    Flattens pptx/docx/xlsx and PDFs to searchable text (one-way)
 pdf-text.js       Dependency-free PDF text: object scan, Flate, ToUnicode CMaps
 zip.js            Stored ZIP writer (CRC32, streaming)
 zip-read.js       Minimal ZIP reader (stored/deflate, zip64, bomb caps)
+image-normalize.js HEIC frame → downscaled RGBA → PNG (box filter + node:zlib)
+heif-loader.js    The only importer of libheif: lazy WASM, LGPL, fails soft
 ```
 
 ### `ops/` — scheduled and cross-cutting work
@@ -87,6 +91,7 @@ uploads.js        Resumable sessions: create, chunk, status, complete, delete
 shares.js         Share links and the anonymous /shared/:token surface
 misc.js           healthz, version, search, storage stats, audit, duplicates
 office.js         GET /files/:id/office — OOXML preview extraction
+preview-image.js  GET /files/:id/preview-image — HEIC transcoded to PNG, cached
 maintenance.js    Blob scan / reclaim / forget-missing (owner only)
 cluster.js        Storage nodes: enrol, probe, drain, replication sweep
 ```
@@ -174,6 +179,13 @@ Rules:
   `lib/row-action.js` is the only place that rule is written down; a row must
   never grow a second `dblclick` handler. The trash is the exception: nothing
   there is meant to be opened, so a click selects.
+- Format support is a table, not a series of `if`s. `apps/server/src/mime.js`
+  decides what a file *is* (the extension wins over a generic content-type),
+  `lib/format.js` maps that to a row kind, and the drawer branches on the kind.
+  A format the server cannot render is `opaque`: the drawer offers a download
+  instead of asking an endpoint that must refuse it.
+- Animated pictures (GIF/APNG/animated WebP/AVIF) bypass `createImageBitmap`:
+  a bitmap is one frame, so the bitmap path would freeze the animation.
 - An overlay owns the keyboard, therefore it must take focus: `trapFocus()`
   defers the focus call to the next frame (a synchronously focused detached
   panel is silently ignored, which leaves the whole panel deaf) and returns focus

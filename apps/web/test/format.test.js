@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
-import { bytes, sortNodes, relativeTime, escapeHtml, extension, expiryLabel } from '../lib/format.js'
+import { bytes, sortNodes, relativeTime, escapeHtml, extension, expiryLabel, fileKind } from '../lib/format.js'
 
 /** Pure helpers the file list depends on; no DOM needed. */
 
@@ -85,5 +85,36 @@ describe('extension', () => {
     assert.equal(extension('report.MD'), 'md')
     assert.equal(extension('archive.tar.gz'), 'gz')
     assert.equal(extension('README'), '')
+  })
+})
+describe('fileKind for formats the server cannot extract', () => {
+  it('marks Apple iWork as opaque, not as an office document', () => {
+    // Routing these to /office returned 400: .pages is a ZIP of IWA protobuf,
+    // not OOXML, so the drawer showed "无法预览" for a perfectly valid file.
+    for (const name of ['report.pages', 'budget.numbers', 'deck.key']) {
+      assert.equal(fileKind('application/octet-stream', name), 'opaque', name)
+    }
+  })
+
+  it('marks a legacy binary .doc as opaque when the mime says OLE', () => {
+    assert.equal(fileKind('application/msword', 'old.doc'), 'opaque')
+    assert.equal(fileKind('application/vnd.ms-excel', 'old.xls'), 'opaque')
+    assert.equal(fileKind('application/vnd.ms-powerpoint', 'old.ppt'), 'opaque')
+  })
+
+  it('still recognises the OOXML formats it can extract', () => {
+    assert.equal(fileKind('application/vnd.openxmlformats-officedocument.wordprocessingml.document', 'a.docx'), 'doc')
+    assert.equal(fileKind('', 'b.pptx'), 'slides')
+    assert.equal(fileKind('', 'c.xlsx'), 'sheet')
+  })
+
+  it('keeps the new document and image extensions classifiable', () => {
+    assert.equal(fileKind('application/epub+zip', 'book.epub'), 'epub')
+    assert.equal(fileKind('image/heic', 'IMG_1.heic'), 'image')
+    assert.equal(fileKind('application/octet-stream', 'IMG_1.heif'), 'image')
+    assert.equal(fileKind('', 'scan.tiff'), 'image')
+    assert.equal(fileKind('', 'clip.mov'), 'video')
+    assert.equal(fileKind('', 'song.opus'), 'audio')
+    assert.equal(fileKind('', 'subs.srt'), 'text')
   })
 })

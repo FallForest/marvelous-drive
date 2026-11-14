@@ -19,6 +19,31 @@ import { fileKind } from './format.js';
 const GALLERY_KINDS = new Set(['image']);
 
 /**
+ * Formats the server transcodes for us.
+ *
+ * fileKind() already calls these "image", so they are gallery members by the
+ * rule above; the set exists to make the dependency explicit — if the decoder
+ * is missing from a deployment, these are the ones that degrade to the
+ * unsupported card (the route answers 503 with a reason).
+ */
+export const TRANSCODED_IMAGE_MIMES = new Set(['image/heic', 'image/heif']);
+
+/**
+ * Formats whose whole point is the animation.
+ *
+ * A decoded ImageBitmap is a single frame, so sending a GIF, an APNG or an
+ * animated WebP through the bitmap path draws frame one and silently discards
+ * the timeline. These four are natively decoded by every engine this app
+ * supports, so the drawer hands them straight to an <img> instead.
+ */
+const ANIMATED_MIMES = new Set(['image/gif', 'image/apng', 'image/webp', 'image/avif']);
+
+/** True when the format may carry more than one frame. */
+export function isAnimated(mime) {
+  return ANIMATED_MIMES.has(String(mime || '').split(';')[0].trim().toLowerCase());
+}
+
+/**
  * How many neighbours to warm on each side.
  *
  * Two is the number a person reaches by pressing → twice before deciding to

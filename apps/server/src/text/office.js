@@ -366,12 +366,29 @@ const MIME_KIND = {
   'application/vnd.ms-excel.sheet.macroenabled.12': 'xlsx',
 }
 
+/**
+ * Formats that LOOK like an office document but are not OOXML/ODF.
+ *
+ * Apple's iWork packages (.pages/.numbers/.key) are ZIP containers of
+ * IWA + Snappy + protobuf, which this extractor cannot read, and legacy
+ * binary .doc/.ppt/.xls are OLE compound files. Both used to be routed here by
+ * their extension, which produced a 400 and a "无法预览" card that made the app
+ * look broken; the client now shows an honest "download to open" instead, and
+ * this set keeps the route from being asked.
+ */
+export const NOT_EXTRACTABLE = new Set([
+  'pages', 'numbers', 'key',
+  'doc', 'ppt', 'xls', 'vsd', 'vsdx', 'pub', 'ai', 'eps', 'xd',
+])
+
 /** Maps a file name (and optional MIME) to pptx | docx | xlsx | null. */
 export function detectOffice(name, mime) {
   const base = String(name || '').split(/[\\/]/).pop() || ''
   const dot = base.lastIndexOf('.')
   if (dot > 0 && dot < base.length - 1) {
-    const byExtension = EXTENSION_KIND[base.slice(dot + 1).toLowerCase()]
+    const suffix = base.slice(dot + 1).toLowerCase()
+    if (NOT_EXTRACTABLE.has(suffix)) return null
+    const byExtension = EXTENSION_KIND[suffix]
     if (byExtension) return byExtension
   }
   const type = String(mime || '').split(';')[0].trim().toLowerCase()

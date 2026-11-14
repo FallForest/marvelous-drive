@@ -69,7 +69,9 @@ describe('node tree', () => {
     const file = await api('POST', '/api/v1/nodes', auth({ body: { name: 'readme.md', parentId: folderId } }))
     assert.equal(file.status, 201)
     assert.equal(file.json.node.parentId, folderId)
-    assert.equal(file.json.node.mime, 'application/octet-stream')
+    // The name decides the type: an empty file called readme.md is a Markdown
+    // document, and reporting octet-stream would cost it its icon and preview.
+    assert.equal(file.json.node.mime, 'text/markdown')
   })
 
   it('rejects duplicate names in one folder and illegal characters', async () => {
