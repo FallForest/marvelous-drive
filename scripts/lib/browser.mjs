@@ -66,6 +66,13 @@ class Page {
     this.version = version
     this.consoleErrors = []
     this.failedRequests = []
+    // Every URL the page actually asked for, in order, with the answer's status
+    // and whether the browser served it from its own cache. Checks about
+    // "this route, once" need the evidence, not a guess.
+    this.networkRequests = []
+    /** URLs the browser answered without touching the network. */
+    this.cachedRequests = []
+    this._requestUrls = new Map()
     this.nextId = 1
     this.pending = new Map()
     this.logPageConsole = false
@@ -98,6 +105,19 @@ class Page {
     }
     if (message.method === 'Network.loadingFailed' && !message.params.canceled) {
       this.failedRequests.push(message.params.errorText)
+      return
+    }
+    if (message.method === 'Network.requestWillBeSent') {
+      const { requestId, request } = message.params
+      if (request && request.url) this._requestUrls.set(requestId, request.url)
+      return
+    }
+    if (message.method === 'Network.responseReceived') {
+      const url = message.params.response?.url
+      if (!url) return
+      const cacheHeaders = message.params.response?.fromDiskCache || message.params.response?.fromMemoryCache
+      this.networkRequests.push(url)
+      if (cacheHeaders) this.cachedRequests.push(url)
     }
   }
 

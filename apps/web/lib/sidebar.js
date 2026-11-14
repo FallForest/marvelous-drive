@@ -8,6 +8,7 @@
 
 import { h, raw } from './dom.js';
 import { icon, bytes, initials } from './format.js';
+import { renderMenu } from './select.js';
 
 const NAV = [
   { key: 'drive', label: '我的云盘', icon: 'harddrive', path: () => '/' },
@@ -276,17 +277,20 @@ export function renderToolbar(ctx) {
   nodes.push(h('span', { class: 'push' }));
   nodes.push(h('span', { class: 'seg-label', text: '排序' }));
 
-  const sortSelect = h('select', {
-    class: 'select', attrs: { 'aria-label': '排序方式', style: 'width:auto;height:26px;font-size:11px;padding-right:24px' },
-    on: { change: (event) => ctx.onSort(event.target.value) },
-  },
-    h('option', { attrs: { value: 'name' }, text: '按名称' }),
-    h('option', { attrs: { value: 'size' }, text: '按大小' }),
-    h('option', { attrs: { value: 'updated' }, text: '按更新时间' }),
-  );
-  sortSelect.value = state.sortKey;
-
-  nodes.push(sortSelect);
+  // A button, not a <select>: this control sits in a row of 28px buttons, and
+  // the native widget brought its own height, its own type scale and an arrow
+  // that sat below the optical centre. The menu behind it is the app's own.
+  nodes.push(renderMenu({
+    label: '排序方式',
+    className: 'sort-menu',
+    value: state.sortKey,
+    options: [
+      { value: 'name', label: '按名称' },
+      { value: 'size', label: '按大小' },
+      { value: 'updated', label: '按更新时间' },
+    ],
+    onChange: (value) => ctx.onSort(value),
+  }));
   nodes.push(h('button', {
     class: 'icon-btn', attrs: {
       type: 'button',

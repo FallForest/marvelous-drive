@@ -14,10 +14,46 @@ import { createFolder } from './files.js';
 import { openMenu } from './ui.js';
 import { pickDirectoryPlan, uploadPlan } from './folder-upload.js';
 import { store, session } from './session.js';
+import {
+  clearLiveHandle, fileFromHandle, forgetHandle, listHandles, matchSessions, receivedBytes,
+  rememberHandle, resumeKey, resumeLabel, setLiveHandle,
+} from './upload-resume.js';
 import { runtime } from './runtime.js';
 
 /** The lazily created <input type=file>. One per page, kept for the session. */
 export function pickFiles(uploader) {
+  if (session.filePicker) {
+    session.filePicker.click();
+    return;
+  }
+  // The handle picker is preferred when the browser has it: the handle is the
+  // only thing that survives a reload, which is what makes an interrupted
+  // upload resumable instead of merely reported. Everything about it is
+  // optional — a browser without it, or a permission the user declines, falls
+  // through to the plain input below.
+  if (typeof window !== 'undefined' && typeof window.showOpenFilePicker === 'function') {
+    window.showOpenFilePicker({ multiple: true, mode: 'read' }).then(async (handles) => {
+      const picked = [];
+      for (const handle of handles || []) {
+        try {
+          const file = await handle.getFile();
+          setLiveHandle(file, handle);
+          rememberHandle(file, handle);
+          picked.push(file);
+        } catch { /* a handle that cannot be read is simply skipped */ }
+      }
+      if (picked.length) uploadFiles(uploader, picked);
+    }).catch((error) => {
+      if (error && error.name === 'AbortError') return; // the user cancelled
+      openPlainPicker(uploader);
+    });
+    return;
+  }
+  openPlainPicker(uploader);
+}
+
+/** The fallback picker: no handles, so no cross-reload resume for these files. */
+function openPlainPicker(uploader) {
   if (!session.filePicker) {
     session.filePicker = h('input', {
       attrs: { type: 'file', multiple: 'multiple', style: 'position:fixed;left:-9999px;opacity:0', 'aria-hidden': 'true', tabindex: '-1' },
@@ -93,8 +129,12 @@ export async function uploadFolderPlan(uploader, plan, parentId) {
         throw error;
       }
     },
-    // The folder plan is sequential by design (it reuses one directory id at a
-    // time), so it queues each file and waits for it instead of starting it.
+    // One file per slot, no more: the plan keeps `concurrency` files in flight
+    // and the shared scheduler caps the real transfers, so this number only has
+    // to be big enough to keep every slot fed. It used to be 1, which meant the
+    // three-slot scheduler never saw a second file until the first had finished
+    // — a folder upload was a strict relay of single requests.
+    concurrency: Math.max(1, Number(uploader.limit) || 1),
     uploadFile: (file, targetParent) => uploader.enqueueAndWait(file, targetParent),
   });
   const failed = summary.total - summary.uploaded;
@@ -128,6 +168,17 @@ export function uploadFiles(uploader, files) {
   // in flight and refills a slot as soon as one settles, so dropping 200 files
   // no longer means 200 parallel requests.
   const tasks = uploader.enqueueAll(list, parentId);
+  // A finished upload has no reason to keep a filesystem handle alive: the
+  // entry is what the next page would offer to resume.
+  for (const task of tasks) {
+    task.on('state', (event) => {
+      if (event.state === 'done' || event.state === 'canceled') {
+        forgetHandle({ name: task.name, size: task.size, lastModified: task.lastModified });
+        const original = list.find((file) => resumeKey(file) === resumeKey(task));
+        if (original) clearLiveHandle(original);
+      }
+    });
+  }
   uploader.whenIdle().then(async () => {
     const done = tasks.filter((task) => task.state === 'done').length;
     const failed = tasks.length - done;
@@ -139,17 +190,124 @@ export function uploadFiles(uploader, files) {
   toast('开始上传 ' + list.length + ' 个文件', { type: 'info', timeout: 1800 });
 }
 
-/* The queue survives a reload as history only: a File object cannot be rebuilt,
-   so finished rows are shown again and unfinished ones are just counted. */
+/**
+ * Boot-time recovery for uploads the last page did not finish.
+ *
+ * Two different things are recovered, and the difference matters:
+ *
+ *   - finished rows come back as history (they carry no file, only a summary);
+ *   - unfinished *sessions* stay alive on the server for 24 h, so they are
+ *     claimed and offered as resumable. Where the browser kept a filesystem
+ *     handle (showOpenFilePicker was used), resuming needs no interaction at
+ *     all; otherwise the row asks for the file again and matches it by
+ *     name + size + sha256.
+ */
 export function restoreUploads(uploader) {
   if (session.uploadsRestored) return;
   session.uploadsRestored = true;
   const interrupted = uploader.restore();
-  if (interrupted > 0) {
-    toast('上次有 ' + interrupted + ' 个上传未完成', {
-      type: 'warning',
-      detail: '浏览器不能保留文件本身，请重新选择文件上传。',
+  claimResumables(uploader).then((claimed) => {
+    if (claimed === 0) {
+      if (interrupted > 0) {
+        toast('上次有 ' + interrupted + ' 个上传未完成', {
+          type: 'warning',
+          detail: '浏览器不能保留文件本身，请重新选择文件上传。',
+          timeout: 6000,
+        });
+      }
+      return;
+    }
+    toast('有 ' + claimed + ' 个上传可以继续', {
+      type: 'info',
+      detail: '文件已在服务器上分段保存，点队列里的「继续」即可，不必重传。',
       timeout: 6000,
     });
+  });
+}
+
+/** Matches stored handles to live sessions and parks them in the queue. */
+async function claimResumables(uploader) {
+  let records = [];
+  try {
+    records = await listHandles();
+  } catch {
+    records = [];
   }
+  const result = await uploader.claimSessions({
+    match: (sessions) => matchSessions(sessions, records).map((hit) => ({
+      ...hit,
+      label: resumeLabel(hit.session),
+    })),
+    // Sessions without a stored handle still get a row: the label comes from the
+    // session itself, so the user sees how much is already on the server.
+    ratio: (session) => {
+      const size = Number(session.size) || 0;
+      return size > 0 ? receivedBytes(session) / size : 0;
+    },
+    onResume: (item) => resumeClaimed(uploader, item),
+  });
+  return result.claimed;
+}
+
+/**
+ * Starts one claimed session.
+ *
+ * With a handle the bytes are re-read in place. Without one the picker opens;
+ * the chosen file must match the session (name, size, and sha256 when both
+ * sides know it), because resuming with different bytes would only fail at
+ * complete time with a checksum error after the whole upload.
+ */
+async function resumeClaimed(uploader, item) {
+  const record = item.record || {};
+  const session = item.session || {};
+  const handle = record.handle || null;
+  let file = null;
+
+  if (handle) {
+    file = await fileFromHandle(record, handle);
+    if (!file) {
+      toast('「' + session.name + '」所在文件已改动，无法接着上次的进度。', {
+        type: 'warning',
+        detail: '请重新选择这个文件，或点「放弃」清掉服务端的分段。',
+        timeout: 7000,
+      });
+      return;
+    }
+  } else {
+    const picked = await pickMatchingFile(session);
+    if (!picked) return;
+    file = picked;
+  }
+
+  uploader.claimSessionRow(session.id);
+  const task = uploader.enqueueResume(file, session, record.parentId ?? session.parentId ?? null);
+  task.on('state', (event) => {
+    if (event.state === 'done' || event.state === 'canceled') forgetHandle(record.key || resumeKey(file));
+  });
+  toast('继续上传「' + session.name + '」', { type: 'info', timeout: 2000 });
+}
+
+/** One-file picker used when a session has no stored handle. */
+function pickMatchingFile(session) {
+  return new Promise((resolve) => {
+    const input = h('input', {
+      attrs: { type: 'file', style: 'position:fixed;left:-9999px;opacity:0', 'aria-hidden': 'true', tabindex: '-1' },
+      on: {
+        change: () => {
+          const file = input.files && input.files[0];
+          input.remove();
+          if (!file) { resolve(null); return; }
+          if (Number(file.size) !== Number(session.size)) {
+            toast('选择的文件大小不一致，无法继续这个上传。', { type: 'warning' });
+            resolve(null);
+            return;
+          }
+          resolve(file);
+        },
+        cancel: () => { input.remove(); resolve(null); },
+      },
+    });
+    document.body.appendChild(input);
+    input.click();
+  });
 }

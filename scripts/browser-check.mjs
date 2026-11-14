@@ -58,7 +58,7 @@ process.exit(await runBrowserCheck({ title: 'Marvelous Drive browser check', net
   const opened = await page.run(() => {
     const row = Array.from(document.querySelectorAll('[data-id]')).find((node) => node.innerText.includes('说明.md'))
     if (!row) return false
-    row.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }))
+    row.dispatchEvent(new MouseEvent('click', { bubbles: true }))
     return true
   })
   check('a file row can be opened', opened)

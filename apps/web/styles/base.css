@@ -3,6 +3,12 @@
  * Layout only; component appearance lives in components.css and app.css.
  */
 *,*::before,*::after{box-sizing:border-box}
+
+/* The UA sheet's [hidden]{display:none} loses to any component rule that sets
+   `display`, which is every .btn and .icon-btn in this app: a control hidden
+   with the attribute kept rendering (and kept being counted by tests). This one
+   line makes the attribute mean what it says, everywhere. */
+[hidden]{display:none!important}
 html,body{margin:0;height:100%}
 body{
   background:var(--bg);
@@ -39,6 +45,36 @@ table{border-collapse:collapse}
 *::-webkit-scrollbar-track{background:transparent}
 *::-webkit-scrollbar-thumb{background:#2c313a;border-radius:6px;border:3px solid transparent;background-clip:content-box}
 *::-webkit-scrollbar-thumb:hover{background:#3a414d;background-clip:content-box}
+
+/* ── the shell is an interface, not a document ──────────────────
+ *
+ * Everything is unselectable by default and content opts back in. The inverse
+ * (listing every piece of chrome) is what breaks: a click on a label that has
+ * no focusable target leaves the browser a collapsed caret to draw, and it
+ * blinks between two words of a heading. Drag-selecting across the sidebar
+ * painted a text highlight over the rows for the same reason.
+ *
+ * `user-select:none` stops the highlight; `caret-color:transparent` stops the
+ * caret, because the caret survives user-select in Chrome.
+ *
+ * Both properties inherit, so the rule goes on the viewport and nowhere else.
+ * An `#app *` selector would work too and would be a trap: an id beats any
+ * class, so every opt-in below would need `!important` or an id of its own to
+ * win. Declared once here, a plain `.frow .name` on the opt-in side is enough.
+ */
+html,body{-webkit-user-select:none;user-select:none;caret-color:transparent}
+
+/* Text a user actually copies: file names, previews, counts, error lines. */
+.frow .name,.gcard .gname,.preview-body,.preview-body *,.preview-md,.preview-text,
+.preview-meta dd,.section-head h1,.empty p,.empty b,.statusbar span,
+.dialog-body p,.drawer-body p,.lock-banner,.activity-row,.version-meta,
+.member-copy,.match-note,.field-hint,.dialog-note,.auth-sub,.public-file b{
+  -webkit-user-select:text;user-select:text;
+}
+/* Fields take typing, so they get a real caret back. */
+input,textarea,select,[contenteditable="true"]{
+  -webkit-user-select:text;user-select:text;caret-color:auto;
+}
 
 /* ── app frame ────────────────────────────────────────────────── */
 .app-shell{

@@ -16,6 +16,61 @@ const COLUMNS = [
   { key: 'updated', label: '更新时间', cls: 'col-date' },
 ];
 
+/**
+ * The per-row checkbox: the explicit "select without opening" gesture.
+ *
+ * A plain click on a row opens the item now (see row-action.js), so selection
+ * needs its own target — the same split Finder, Google Drive and Notion all
+ * arrive at. It is a real <input type=checkbox> so the keyboard, screen readers
+ * and the browser's own checked state work without a role of our own.
+ */
+function selectionBox(ctx, node, selected, extraClass) {
+  const box = h('input', {
+    class: 'pick' + (extraClass ? ' ' + extraClass : ''),
+    attrs: {
+      type: 'checkbox',
+      'aria-label': '选择 ' + node.name,
+      'data-action': 'pick',
+      // Not data-id: that attribute means "a row" to the selection painter, the
+      // drag layer and every browser check that counts rows.
+      'data-for': node.id,
+    },
+    checked: selected,
+    on: {
+      // never let the checkbox's click reach the row: that click means select.
+      click: (event) => {
+        event.stopPropagation();
+        ctx.onSelectToggle(node);
+      },
+      dblclick: (event) => event.stopPropagation(),
+      keydown: (event) => event.stopPropagation(),
+    },
+  });
+  return box;
+}
+
+/** Header checkbox: select all / clear, with the indeterminate state for a partial pick. */
+function selectAllBox(ctx, nodes, selectedCount) {
+  const all = nodes.length > 0 && selectedCount >= nodes.length;
+  const box = h('input', {
+    class: 'pick pick-all',
+    attrs: { type: 'checkbox', 'aria-label': '全选', 'data-action': 'pick-all' },
+    checked: all,
+    on: {
+      // The shell's handler reads the live selection; passing a checkbox state
+      // captured here would make the second click behave like the first.
+      click: (event) => {
+        event.stopPropagation();
+        ctx.onSelectAll(nodes);
+      },
+      keydown: (event) => event.stopPropagation(),
+    },
+  });
+  // A half-checked header is the honest picture of "some of these are selected".
+  box.indeterminate = selectedCount > 0 && selectedCount < nodes.length;
+  return box;
+}
+
 /** Rows + header. ctx: { nodes, sortKey, sortDir, selection, view, onSort } */
 export function renderFileList(ctx) {
   const state = ctx.state;
@@ -33,6 +88,8 @@ export function renderFileList(ctx) {
   }
 
   const head = h('div', { class: 'list-head', attrs: { role: 'row' } });
+  const selectedCount = nodes.filter((node) => state.selection.has(node.id)).length;
+  head.appendChild(h('span', { class: 'col-pick' }, selectAllBox(ctx, nodes, selectedCount)));
   for (const column of COLUMNS) {
     const active = state.sortKey === column.key;
     head.appendChild(h('button', {
@@ -67,6 +124,8 @@ function renderRow(ctx, node, selected) {
   const main = h('div', { class: 'frow-main' },
     kindEl,
     nameEl,
+    // A folder advertises the click that goes in; a file has nothing to promise.
+    isFolder ? h('span', { class: 'open-hint', html: icon('chevron-right', 12) }) : null,
   );
 
   const starBtn = h('button', {
@@ -96,20 +155,20 @@ function renderRow(ctx, node, selected) {
   });
 
   const row = h('div', {
-    class: 'frow',
-    dataset: { id: node.id, selected: selected ? 'true' : 'false' },
+    class: 'frow' + (isFolder ? ' is-folder' : ''),
+    dataset: { id: node.id, selected: selected ? 'true' : 'false', kind: node.kind || 'file' },
     attrs: { role: 'row', tabindex: '0', draggable: 'true', 'aria-selected': selected ? 'true' : 'false', 'aria-label': node.name },
     on: {
       click: (event) => ctx.onRowClick(node, event),
-      dblclick: (event) => { event.preventDefault(); ctx.onOpen(node); },
       keydown: (event) => ctx.onRowKey(event, node),
-      contextmenu: (event) => { event.preventDefault(); ctx.onRowClick(node, event); openRowMenu(ctx, node, moreBtn); },
+      contextmenu: (event) => { event.preventDefault(); ctx.onSelectOnly(node, event); openRowMenu(ctx, node, moreBtn); },
       // Dragging a row moves it (or the whole selection); dropping it on a
       // folder row / breadcrumb is handled by the drop targets in app.js.
       dragstart: (event) => { if (ctx.onRowDragStart) ctx.onRowDragStart(node, event); },
       dragend: (event) => { if (ctx.onRowDragEnd) ctx.onRowDragEnd(node, event); },
     },
   },
+    selectionBox(ctx, node, selected, 'row-pick'),
     main,
     h('span', { class: 'meta num', attrs: { role: 'cell' }, text: isFolder ? '—' : bytes(node.size) }),
     h('span', { class: 'meta date', attrs: { role: 'cell', title: formatDate(node.updatedAt) }, text: relativeTime(node.updatedAt) }),
@@ -125,12 +184,23 @@ function renderRow(ctx, node, selected) {
    re-downloading every thumbnail on each navigation is the whole problem. */
 const thumbCache = new Map();
 const THUMB_CACHE_LIMIT = 200;
-const LIST_THUMB_WIDTH = 96;
-const GRID_THUMB_WIDTH = 240;
 
-/** Server-side thumbnail URL. Width is a hint; the bytes are the original. */
+/**
+ * ONE width for every caller, on purpose.
+ *
+ * The route does not resize: `?w=` is echoed in a response header and the bytes
+ * are the original blob. Two different widths are therefore two different URLs
+ * that answer with the same bytes, and a browser caches per URL — asking for
+ * `w=96` in the list and `w=1024` in the drawer puts one 30 MB photo in the
+ * HTTP cache twice. The value is kept because a future server-side resizer will
+ * want it; it is just not allowed to vary per call site.
+ */
+export const THUMBNAIL_WIDTH = 1024;
+const LIST_THUMB_WIDTH = THUMBNAIL_WIDTH;
+
+/** Server-side thumbnail URL. Width is a hint; today the bytes are the original. */
 export function thumbnailUrl(id, width) {
-  return '/api/v1/files/' + encodeURIComponent(id) + '/thumbnail?w=' + (width || LIST_THUMB_WIDTH);
+  return '/api/v1/files/' + encodeURIComponent(id) + '/thumbnail?w=' + (width || THUMBNAIL_WIDTH);
 }
 
 function thumbFor(node, width) {
@@ -144,6 +214,11 @@ function thumbFor(node, width) {
     for (const evicted of stored.evicted) URL.revokeObjectURL(evicted);
     return stored.url;
   });
+}
+
+/** The cached render URL of one row thumbnail, or null when it is not fetched yet. */
+export function peekThumbUrl(id) {
+  return thumbCache.get(id) || null;
 }
 
 export function clearThumbCache() {
@@ -174,7 +249,7 @@ function renderGrid(ctx, nodes) {
     if (kind === 'image') {
       const placeholder = raw(icon('file-image', 26));
       thumb.appendChild(placeholder);
-      thumbFor(node, GRID_THUMB_WIDTH).then((url) => {
+      thumbFor(node, THUMBNAIL_WIDTH).then((url) => {
         if (!thumb.isConnected) return;
         const img = h('img', { attrs: { alt: '', loading: 'lazy', decoding: 'async', src: url } });
         thumb.replaceChildren(img);
@@ -197,18 +272,18 @@ function renderGrid(ctx, nodes) {
     });
 
     grid.appendChild(h('div', {
-      class: 'gcard',
-      dataset: { id: node.id, selected: selected ? 'true' : 'false' },
+      class: 'gcard' + (isFolder ? ' is-folder' : ''),
+      dataset: { id: node.id, selected: selected ? 'true' : 'false', kind: node.kind || 'file' },
       attrs: { role: 'listitem', tabindex: '0', draggable: 'true', 'aria-selected': selected ? 'true' : 'false', 'aria-label': node.name },
       on: {
         click: (event) => ctx.onRowClick(node, event),
-        dblclick: (event) => { event.preventDefault(); ctx.onOpen(node); },
         keydown: (event) => ctx.onRowKey(event, node),
-        contextmenu: (event) => { event.preventDefault(); ctx.onRowClick(node, event); openRowMenu(ctx, node, moreBtn); },
+        contextmenu: (event) => { event.preventDefault(); ctx.onSelectOnly(node, event); openRowMenu(ctx, node, moreBtn); },
         dragstart: (event) => { if (ctx.onRowDragStart) ctx.onRowDragStart(node, event); },
         dragend: (event) => { if (ctx.onRowDragEnd) ctx.onRowDragEnd(node, event); },
       },
     },
+      selectionBox(ctx, node, selected, 'card-pick'),
       thumb,
       h('div', { class: 'gname' },
         h('span', { text: node.name }),

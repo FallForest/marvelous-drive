@@ -355,6 +355,23 @@ function paintSelection() {
       el.dataset.selected = isSelected ? 'true' : 'false';
       el.setAttribute('aria-selected', isSelected ? 'true' : 'false');
     }
+    // The checkboxes are the selection's own control, so a selection change has
+    // to reach them without re-rendering the list: a re-render would replay the
+    // row entrance and steal the focus ring off the box the user just clicked.
+    const rows = Array.from(view.querySelectorAll('.frow[data-id], .gcard[data-id]'));
+    for (const box of view.querySelectorAll('.frow .pick, .gcard .pick')) {
+      // Each box names its own node, so a paint never has to guess which row
+      // owns it (and the box itself must not carry data-id — that attribute
+      // means "a row" to the drag layer and to every browser check).
+      const id = box.dataset.for;
+      if (id) box.checked = selected.has(id);
+    }
+    const headAll = view.querySelector('.list-head .pick-all');
+    if (headAll) {
+      const count = rows.filter((row) => selected.has(row.dataset.id)).length;
+      headAll.checked = rows.length > 0 && count === rows.length;
+      headAll.indeterminate = count > 0 && count < rows.length;
+    }
   }
   if (session.selectionSlot && session.selectionSlot.isConnected) {
     if (selected.size) mount(session.selectionSlot, selectionBar());

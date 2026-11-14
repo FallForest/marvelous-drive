@@ -109,11 +109,15 @@ button.crumb:active{transform:scale(var(--press-scale));transition-duration:var(
 
 /* ═══ file list ════════════════════════════════════════════════ */
 .list{padding:0 8px 24px}
+/* The leading 20px column is the selection checkbox. It exists so that a plain
+   click can mean "open" without making selection unreachable: the checkbox is
+   the selection gesture, the row is the action (see lib/row-action.js). */
 .list-head,.frow{
   display:grid;
-  grid-template-columns:minmax(0,1fr) 92px 132px 26px 28px;
+  grid-template-columns:20px minmax(0,1fr) 92px 132px 26px 28px;
   align-items:center;gap:10px;
 }
+.col-pick{display:flex;align-items:center;justify-content:center}
 .list-head{
   height:26px;padding:0 8px;margin-top:6px;
   font-size:10px;font-weight:600;letter-spacing:.07em;text-transform:uppercase;color:var(--text-faint);
@@ -143,6 +147,17 @@ button.crumb:active{transform:scale(var(--press-scale));transition-duration:var(
   position:relative;cursor:pointer;
 }
 .frow:hover{background:var(--hover)}
+/* A folder's hover is an invitation to go in, not another grey rectangle: the
+   name picks up the accent and a chevron slides out, the same "this opens"
+   affordance Notion puts on the row it is about to open. */
+.frow.is-folder:hover .name{color:var(--accent-strong)}
+.frow.is-folder:hover .kind{color:var(--accent)}
+.frow .open-hint{
+  display:inline-flex;align-items:center;color:var(--text-faint);
+  opacity:0;transform:translateX(-3px);
+  transition:opacity var(--duration-fast) var(--ease-standard),transform var(--duration-fast) var(--ease-standard);
+}
+.frow.is-folder:hover .open-hint,.frow.is-folder[data-selected="true"] .open-hint{opacity:1;transform:none}
 /* A full-width row cannot shrink like a button — at 1400px wide, .97 is 40px of
    travel and the list looks like it is jumping. So the row acknowledges a press
    the way a table row does: the surface darkens, with a barely-there scale on
@@ -182,16 +197,37 @@ button.crumb:active{transform:scale(var(--press-scale));transition-duration:var(
 .frow:hover .more,.frow[data-selected="true"] .more,.frow .more[aria-expanded="true"]{opacity:1}
 .frow .more svg{width:14px;height:14px}
 .frow .badge{margin-left:2px;height:16px;font-size:10px}
+/* Checkbox: quiet until the row is hovered or chosen, but never a hit target the
+   user has to guess at — it keeps its 14px box and its own focus ring. */
+.pick{
+  width:14px;height:14px;margin:0;appearance:none;flex:0 0 14px;
+  border:1.5px solid var(--border-strong);border-radius:4px;background:var(--surface);
+  cursor:pointer;display:grid;place-items:center;
+  transition:background var(--duration-instant) var(--ease-standard),border-color var(--duration-instant) var(--ease-standard);
+}
+.pick:hover{border-color:var(--accent)}
+.pick:checked,.pick:indeterminate{background:var(--accent-solid);border-color:var(--accent-solid)}
+.pick:checked::after{content:'';width:7px;height:4px;border-left:1.6px solid #fff;border-bottom:1.6px solid #fff;transform:rotate(-45deg) translate(.5px,-1px)}
+.pick:indeterminate::after{content:'';width:7px;height:1.6px;background:#fff;border-radius:1px}
+.pick:focus-visible{outline:2px solid var(--focus-ring);outline-offset:2px}
+.row-pick{justify-self:center;opacity:0;transition:opacity var(--duration-fast) var(--ease-standard)}
+.frow:hover .row-pick,.frow[data-selected="true"] .row-pick,.row-pick:focus-visible{opacity:1}
 .frow-skel{height:var(--row-h);margin:1px 8px;border-radius:var(--radius-sm)}
 .frow-skel .skeleton{height:100%}
 
 /* grid view */
 .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(148px,1fr));gap:10px;padding:12px 16px 32px}
 .gcard{
+  position:relative;
   display:flex;flex-direction:column;gap:8px;padding:9px;
   background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-md);
   transition:var(--transition-surface);
 }
+/* The card's checkbox sits in its own corner: a click anywhere else on the card
+   opens the item, so the two gestures never fight over the same pixels. */
+.gcard .card-pick{position:absolute;top:7px;left:7px;z-index:1;opacity:0;transition:opacity var(--duration-fast) var(--ease-standard)}
+.gcard:hover .card-pick,.gcard[data-selected="true"] .card-pick,.gcard .card-pick:focus-visible{opacity:1}
+@media (max-width:880px){.gcard .card-pick{opacity:1}}
 .gcard:hover{border-color:var(--border-strong);background:var(--surface-2);transform:translateY(-1px)}
 .gcard:active{transform:scale(.985);transition-duration:var(--duration-instant)}
 .gcard .thumb img,.gcard .thumb svg{transition:transform var(--duration-base) var(--ease-spring-snappy)}
@@ -231,6 +267,7 @@ button.crumb:active{transform:scale(var(--press-scale));transition-duration:var(
 .drop-box small{font-size:var(--fs-xs);color:var(--text-muted);font-weight:400}
 
 /* ═══ preview drawer ═══════════════════════════════════════════ */
+.preview-stage{display:flex;flex-direction:column;flex:1 1 0;min-height:0}
 .preview-body{
   flex:1;min-height:0;display:flex;flex-direction:column;
   background:var(--bg);overflow:auto;
@@ -240,6 +277,46 @@ button.crumb:active{transform:scale(var(--press-scale));transition-duration:var(
    is the difference between "the preview loaded" and "the preview appeared". */
 .preview-body > *{animation:motion-fade-in var(--duration-fast) var(--ease-standard) backwards}
 .preview-body.centered{align-items:center;justify-content:center;padding:16px}
+
+/* ── picture viewer (the gallery half of the drawer) ──────────── */
+/* Prev/next live in the header, next to the title, because that is where the
+   hand already is: the footer holds download/share/details. */
+.preview-nav{display:flex;align-items:center;gap:2px;flex:0 0 auto}
+/* The control stays focusable at the ends (no `disabled`) so the keyboard never
+   loses its place; this is the visual half of that decision. */
+.preview-nav .icon-btn[aria-disabled="true"]{opacity:.35;cursor:default}
+/* The counter rides beside the name and never truncates it away. */
+.preview-drawer .drawer-head h2{gap:9px}
+.preview-drawer .drawer-head .sub{font-variant-numeric:tabular-nums;flex:0 0 auto}
+/* The frame owns the size and the picture is letterboxed inside it, so moving
+   to a taller neighbour never relayouts the drawer: the image cannot push the
+   chrome around, which is the whole of the "no layout jump" rule here. */
+.picture-frame{
+  position:relative;flex:1 1 0;min-height:0;display:grid;place-items:center;
+  background:var(--bg);overflow:hidden;
+}
+.picture-canvas,.picture-frame .preview-media{
+  max-width:100%;max-height:100%;width:auto;height:auto;object-fit:contain;
+  display:block;border-radius:var(--radius-sm);
+  animation:motion-fade-in var(--duration-fast) var(--ease-standard) backwards;
+}
+/* The 96px row thumbnail, stretched and blurred: free (already in the row
+   cache) and it gives the eye the right colours while the picture decodes. */
+.picture-backdrop{
+  position:absolute;inset:0;width:100%;height:100%;object-fit:cover;
+  filter:blur(18px) saturate(1.15);transform:scale(1.08);
+  opacity:.55;pointer-events:none;
+}
+/* Delayed 400ms rather than shown at once: most pictures arrive faster than the
+   eye registers a spinner, and a flash of "loading" reads as jank. */
+.picture-spinner{
+  position:absolute;opacity:0;
+  animation:motion-fade-in var(--duration-fast) var(--ease-standard) var(--delay-spinner) forwards;
+}
+@media (prefers-reduced-motion:reduce){
+  /* The delay is the point, not the fade: keep the delay, drop the travel. */
+  .picture-spinner{animation-delay:var(--delay-spinner)}
+}
 .preview-media{max-width:100%;max-height:100%;object-fit:contain;border-radius:var(--radius-sm);background:var(--surface-2)}
 .preview-frame{width:100%;flex:1;min-height:0;border:0;background:#fff;border-radius:var(--radius-sm)}
 .preview-text{
@@ -284,6 +361,12 @@ button.crumb:active{transform:scale(var(--press-scale));transition-duration:var(
 .queue-head{display:flex;align-items:center;gap:8px;height:32px;padding:0 6px 0 10px;border-bottom:1px solid var(--border)}
 .queue-head b{font-size:var(--fs-sm);font-weight:600}
 .queue-head span{font-size:var(--fs-xs);color:var(--text-muted)}
+.queue-total{display:flex;flex-direction:column;gap:5px;padding:7px 10px 8px;border-bottom:1px solid var(--border-soft)}
+.queue-total[hidden]{display:none}
+.qmeta{font-size:10px;color:var(--text-faint);font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+/* The batch bar sits above the rows and is thicker than a row bar: it is the
+   only element that answers "how far along is the whole drop". */
+.qbar.qbar-total{grid-column:auto;height:3px;margin-top:0}
 .queue-list{max-height:min(38vh,290px);overflow:auto;padding:4px;display:flex;flex-direction:column;gap:2px}
 .qitem{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:2px 8px;padding:6px 7px;border-radius:var(--radius-xs);transition:var(--transition-colors)}
 .qitem:hover{background:var(--hover)}
@@ -298,6 +381,8 @@ button.crumb:active{transform:scale(var(--press-scale));transition-duration:var(
 .qbar i{display:block;height:100%;width:100%;background:var(--accent);transform:scaleX(0);transform-origin:left center;transition:transform var(--duration-fast) var(--ease-standard)}
 .qitem.is-error .qbar i{background:var(--danger)}
 .qitem.is-done .qbar i{background:var(--success)}
+.qitem.is-resumable .qbar i{background:var(--warning);opacity:.7}
+.qitem .qstate.is-resumable{color:var(--warning)}
 .qitem .icon-btn{width:18px;height:18px}
 .qitem .icon-btn svg{width:11px;height:11px}
 .qactions{display:flex;align-items:center;gap:1px}
@@ -360,12 +445,15 @@ button.crumb:active{transform:scale(var(--press-scale));transition-duration:var(
   .nav-toggle{display:inline-flex}
   /* two columns on small screens: name + a compact meta line, no star column
      (starring stays available from the row menu and the grid card) */
-  .list-head{grid-template-columns:minmax(0,1fr) 68px 24px;gap:8px}
+  .list-head{grid-template-columns:20px minmax(0,1fr) 68px 24px;gap:8px}
   .list-head .col-date,.list-head .col-star,.frow .meta.date,.frow .star{display:none}
-  /* the head carries two aria-hidden spacer columns; dropping them keeps the
-     declared 3-column template from spawning implicit, overflowing tracks */
-  .list-head > span{display:none}
-  .frow{grid-template-columns:minmax(0,1fr) 68px 24px;gap:8px;height:34px}
+  /* the head carries aria-hidden spacer columns; dropping them keeps the
+     declared template from spawning implicit, overflowing tracks. The leading
+     checkbox column is real content, so it selects the ones to drop. */
+  .list-head > span[aria-hidden="true"]{display:none}
+  .frow{grid-template-columns:20px minmax(0,1fr) 68px 24px;gap:8px;height:38px}
+  /* A touch screen has no hover, so the checkbox has to be visible there. */
+  .row-pick{opacity:1}
   .frow .meta.num{min-width:0;font-size:10.5px;text-align:right}
   .toolbar{padding:8px 12px;gap:6px}
   .toolbar .seg-label{display:none}

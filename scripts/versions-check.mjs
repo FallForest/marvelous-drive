@@ -36,7 +36,7 @@ process.exit(await runBrowserCheck({ title: 'Version history check', network: fa
   await openRow(page, seeded.id)
   await sleep(1800)
 
-  const footer = await page.evaluate("Array.from(document.querySelectorAll('.drawer-foot button')).map((b) => b.innerText.trim())")
+  const footer = await visibleFooter(page)
   check('preview offers 历史版本', footer.some((text) => /历史版本/.test(text)), JSON.stringify(footer))
 
   await page.run(() => {
@@ -64,7 +64,7 @@ process.exit(await runBrowserCheck({ title: 'Version history check', network: fa
   await openRow(page, fresh)
   await sleep(1500)
 
-  const freshFooter = await page.evaluate("Array.from(document.querySelectorAll('.drawer-foot button')).map((b) => b.innerText.trim())")
+  const freshFooter = await visibleFooter(page)
   check('a v1 file does not offer 历史版本', !freshFooter.some((text) => /历史版本/.test(text)), JSON.stringify(freshFooter))
   await page.evaluate("document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))")
   await sleep(400)
@@ -74,11 +74,26 @@ process.exit(await runBrowserCheck({ title: 'Version history check', network: fa
   void session
 }))
 
-/** Double-clicks the row for one node id; the drawer opens from the list row. */
+/**
+ * The drawer's footer buttons that a person can actually see.
+ *
+ * `innerText` still returns the text of a `display:none` element, so a
+ * "the button is gone" assertion written against it silently passes for a
+ * button that is merely hidden — and would fail the moment a hidden-but-present
+ * button is the correct design (it is here: the footer keeps the slot and toggles
+ * visibility as you arrow between pictures).
+ */
+async function visibleFooter(page) {
+  return page.run(() => Array.from(document.querySelectorAll('.drawer-foot button'))
+    .filter((button) => button.offsetParent !== null && getComputedStyle(button).display !== 'none')
+    .map((button) => button.textContent.replace(/\s+/g, ' ').trim()))
+}
+
+/** Clicks the row for one node id; a plain click opens the drawer (lib/row-action.js). */
 async function openRow(page, nodeId) {
   return page.run((id) => {
     const row = Array.from(document.querySelectorAll('[data-id]')).find((element) => element.getAttribute('data-id') === id)
-    if (row) row.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }))
+    if (row) row.dispatchEvent(new MouseEvent('click', { bubbles: true }))
     return Boolean(row)
   }, nodeId)
 }

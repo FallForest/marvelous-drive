@@ -1,4 +1,5 @@
-import { unlink } from 'node:fs/promises'
+import { readdir, rm, unlink } from 'node:fs/promises'
+import { join } from 'node:path'
 import { db, nowIso } from '../db.js'
 import { config } from '../config.js'
 import { blobPath } from '../storage/blobs.js'
@@ -98,5 +99,48 @@ export async function sweepExpiredTrash(now = Date.now()) {
   // The audit log has its own window; pruning it here keeps one timer for all
   // housekeeping instead of a second scheduler nobody remembers.
   const audit = pruneAudit(now)
-  return { roots: roots.length, nodes, bytes, blobs, cutoff, at: nowIso(), auditRemoved: audit.removed }
+  const sessions = await sweepExpiredSessions(now)
+  return {
+    roots: roots.length, nodes, bytes, blobs, cutoff, at: nowIso(),
+    auditRemoved: audit.removed,
+    sessions: sessions.sessions, orphanSessions: sessions.orphans,
+  }
+}
+
+/** Where a resumable upload session keeps its chunk files. */
+export const sessionDirFor = (id) => join(config.tmpDir, 'sessions', id)
+
+/**
+ * Drops upload sessions that expired while nobody was looking.
+ *
+ * Expiry used to be purely lazy: `requireSession` deletes a row the moment a
+ * client touches it, so a session that is abandoned and never resumed kept its
+ * row *and* its chunk directory forever. On a drive that people actually use
+ * that is gigabytes of dead temp files, and no timer ever noticed. The TTL is
+ * 24 h, so this runs on the same hourly clock as the trash sweep.
+ *
+ * Two kinds of garbage are removed, and the second one is why a plain
+ * `DELETE WHERE expires_at < now` is not enough:
+ *   - rows past their TTL;
+ *   - session directories with no row at all (a crash between INSERT and mkdir,
+ *     or a delete that removed the row and died before the unlink).
+ */
+export async function sweepExpiredSessions(now = Date.now()) {
+  const cutoff = new Date(now).toISOString()
+  const expired = db.prepare('SELECT id FROM upload_sessions WHERE expires_at<=?').all(cutoff)
+  for (const row of expired) {
+    db.prepare('DELETE FROM upload_sessions WHERE id=?').run(row.id)
+    await rm(sessionDirFor(row.id), { recursive: true, force: true }).catch(() => {})
+  }
+
+  // Directories left behind by a row that is already gone.
+  let orphans = 0
+  const root = join(config.tmpDir, 'sessions')
+  for (const name of await readdir(root).catch(() => [])) {
+    const live = db.prepare('SELECT 1 AS present FROM upload_sessions WHERE id=?').get(name)
+    if (live) continue
+    await rm(join(root, name), { recursive: true, force: true }).catch(() => {})
+    orphans += 1
+  }
+  return { sessions: expired.length, orphans }
 }

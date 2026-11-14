@@ -188,23 +188,119 @@ export function createUploader(options) {
     return tasks;
   }
 
+  /**
+   * Queue a file into an existing server session.
+   *
+   * The task starts with the session id already set, so it skips the dedup
+   * probe and asks the server which chunks it still needs. `uploaded` is
+   * pre-seeded with the bytes the server already holds, so the row opens at the
+   * real percentage instead of 0%.
+   */
+  function enqueueResume(file, session, parentId) {
+    const task = add(createUploadTask({
+      file,
+      parentId: parentId === undefined ? null : parentId,
+      onConflict: null,
+      api: client,
+      sessionId: session.id,
+    }));
+    const already = session.receivedChunks ? session.receivedChunks : [];
+    const chunkSize = Number(session.chunkSize) || 0;
+    const size = Number(session.size) || file.size;
+    let bytes = 0;
+    for (const index of already) {
+      const start = index * chunkSize;
+      if (chunkSize && start < size) bytes += Math.min(size, start + chunkSize) - start;
+    }
+    if (bytes > 0) {
+      task.uploaded = bytes;
+      task.progress = size > 0 ? Math.min(1, bytes / size) : 0;
+    }
+    return task;
+  }
+
+  /**
+   * Removes the `可继续` row once the user has claimed its session.
+   *
+   * The queue keeps a placeholder per live session so a resume is one click;
+   * as soon as the real task exists the placeholder would be a second row for
+   * the same bytes.
+   */
+  function claimSessionRow(sessionId) {
+    if (queue && typeof queue.dropResumable === 'function') queue.dropResumable(sessionId);
+  }
+
   /** Queue one file and wait for it — the folder plan uploads sequentially. */
   async function enqueueAndWait(file, parentId, conflict) {
     const task = enqueue(file, parentId, conflict);
     return outcomeOf(task);
   }
 
-  /** Reads the stored history once at boot; returns how many uploads were cut off. */
+  /**
+   * Reads the stored history once at boot, then asks the server which sessions
+   * are still alive.
+   *
+   * This used to stop at history: a page that closed mid-upload showed "上次有
+   * N 个上传未完成" and the N entries were deleted. The session, however, lives
+   * for another 24 h with every chunk on disk — the client was throwing away a
+   * resumable upload it only had to claim. Now the interrupt is counted, the
+   * finished rows come back as history, and every live session becomes a row
+   * that can actually be resumed.
+   *
+   * Returns the number of uploads that were cut off by the reload.
+   */
   function restore() {
     const stored = sanitizeHistory(readStored(), UPLOAD_HISTORY_LIMIT);
     const split = splitHistory(stored);
     finished = split.history;
     interrupted = split.interrupted.length;
-    // Unfinished entries cannot be re-created without their File object, so
-    // they are counted once and then dropped instead of faked.
     persist();
     if (queue && typeof queue.trackHistory === 'function') queue.trackHistory(finished);
     return interrupted;
+  }
+
+  /**
+   * Claims this account's live upload sessions and shows them as resumable.
+   *
+   * `resolve` maps a server session to a local record (a stored file handle);
+   * the caller supplies it because only the page knows about IndexedDB and the
+   * picker. A session with no resolver still gets a row — resuming it then goes
+   * through the file picker.
+   */
+  async function claimSessions(options) {
+    const opts = options || {};
+    if (!queue || typeof queue.trackResumable !== 'function') return { claimed: 0 };
+    if (typeof client.request !== 'function') return { claimed: 0 };
+    let payload;
+    try {
+      payload = await client.request('/uploads/sessions');
+    } catch {
+      return { claimed: 0 }; // an old server, an offline tab: nothing to claim
+    }
+    const sessions = (payload && (payload.uploads || payload.sessions)) || [];
+    if (!Array.isArray(sessions) || !sessions.length) return { claimed: 0 };
+    const matched = typeof opts.match === 'function' ? opts.match(sessions) : [];
+    // Every live session is worth a row, matched or not: without a stored handle
+    // resuming asks for the file again, which is still infinitely better than
+    // re-uploading bytes the server already has.
+    const claimedIds = new Set(matched.map((item) => item.session && item.session.id));
+    for (const session of sessions) {
+      if (!session || !session.id || claimedIds.has(session.id)) continue;
+      matched.push({ session, record: null });
+    }
+    for (const item of matched) {
+      queue.trackResumable({
+        session: item.session,
+        ratio: typeof opts.ratio === 'function' ? opts.ratio(item.session) : 0,
+        label: item.label,
+        onResume: () => { if (typeof opts.onResume === 'function') opts.onResume(item); },
+        onDiscard: () => {
+          client.request('/uploads/sessions/' + encodeURIComponent(item.session.id), { method: 'DELETE' }).catch(() => {});
+          queue.dropResumable(item.session.id);
+        },
+      });
+    }
+    return { claimed: matched.length };
   }
 
   return {
@@ -216,7 +312,10 @@ export function createUploader(options) {
     enqueue,
     enqueueAll,
     enqueueAndWait,
+    enqueueResume,
+    claimSessionRow,
     restore,
+    claimSessions,
     whenIdle: () => scheduler.whenIdle(),
 
     pauseAll() {

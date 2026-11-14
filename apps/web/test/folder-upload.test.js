@@ -111,6 +111,90 @@ describe('uploadPlan', () => {
     assert.equal(result.total, 3);
   });
 
+  it('runs several files at once when asked, instead of one round trip each', async () => {
+    const files = Array.from({ length: 6 }, (_, index) => ({ file: file('f' + index + '.bin'), path: 'Batch' }));
+    let inFlight = 0;
+    let peak = 0;
+    let uploaded = 0;
+    const summary = await uploadPlan(
+      { name: 'Batch', dirs: new Set(['', 'Batch']), files },
+      {
+        concurrency: 3,
+        createFolder: async () => ({ id: 'dir' }),
+        uploadFile: async () => {
+          inFlight += 1;
+          peak = Math.max(peak, inFlight);
+          await new Promise((resolve) => setTimeout(resolve, 5));
+          inFlight -= 1;
+          uploaded += 1;
+        },
+      },
+    );
+    assert.equal(summary.uploaded, 6);
+    assert.equal(uploaded, 6);
+    // Three slots were busy at the same time: this is the whole point.
+    assert.equal(peak, 3);
+  });
+
+  it('still uploads one file at a time by default', async () => {
+    let inFlight = 0;
+    let peak = 0;
+    await uploadPlan(
+      { name: 'Solo', dirs: new Set(['', 'Solo']), files: [{ file: file('a'), path: 'Solo' }, { file: file('b'), path: 'Solo' }] },
+      {
+        createFolder: async () => ({ id: 'dir' }),
+        uploadFile: async () => {
+          inFlight += 1;
+          peak = Math.max(peak, inFlight);
+          await new Promise((resolve) => setTimeout(resolve, 1));
+          inFlight -= 1;
+        },
+      },
+    );
+    assert.equal(peak, 1);
+  });
+
+  it('starts the largest files first once it parallelises', async () => {
+    const started = [];
+    await uploadPlan(
+      {
+        name: 'Mixed',
+        dirs: new Set(['', 'Mixed']),
+        files: [
+          { file: { name: 'small', size: 10 }, path: 'Mixed' },
+          { file: { name: 'huge', size: 900 }, path: 'Mixed' },
+          { file: { name: 'medium', size: 100 }, path: 'Mixed' },
+        ],
+      },
+      {
+        concurrency: 2,
+        createFolder: async () => ({ id: 'dir' }),
+        uploadFile: async (entry) => { started.push(entry.name); await new Promise((resolve) => setTimeout(resolve, 2)); },
+      },
+    );
+    // Largest first: the batch ends on small files, not on one huge tail.
+    assert.deepEqual(started, ['huge', 'medium', 'small']);
+  });
+
+  it('keeps the plan order when the caller asks for one file at a time', async () => {
+    const started = [];
+    await uploadPlan(
+      {
+        name: 'Mixed',
+        dirs: new Set(['', 'Mixed']),
+        files: [
+          { file: { name: 'small', size: 10 }, path: 'Mixed' },
+          { file: { name: 'huge', size: 900 }, path: 'Mixed' },
+        ],
+      },
+      {
+        createFolder: async () => ({ id: 'dir' }),
+        uploadFile: async (entry) => { started.push(entry.name); },
+      },
+    );
+    assert.deepEqual(started, ['small', 'huge']);
+  });
+
   it('an empty folder still creates its directory', async () => {
     const result = await uploadPlan({ name: 'Empty', dirs: new Set(['', 'Empty']), files: [] }, {
       createFolder: async () => ({ id: 'n' }),

@@ -22,6 +22,8 @@ import { serverUrl, flag } from './lib/browser.mjs'
 /** Order matters only for readability: cheap checks first, slow ones last. */
 const CHECKS = [
   ['browser-check', 'the shell: login, list, preview, trash, share, mobile'],
+  ['click-check', 'the click model: click opens, checkbox selects'],
+  ['gallery-check', 'the picture browser: arrows, counter, cache, no upscale'],
   ['feature-check', 'thumbnails, batch bar, draggable rows, duplicates'],
   ['versions-check', 'the history drawer, absent on a v1 file'],
   ['team-check', 'the team panel and its role labels'],
@@ -29,7 +31,8 @@ const CHECKS = [
   ['search-check', 'content hits, snippets, .docx text'],
   ['storage-check', 'ZIP menu entry, storage breakdown, archives'],
   ['folder-check', 'a dropped entry tree keeps nesting and empty dirs'],
-  ['upload-check', 'picker, 9 MiB resumable session, cancel'],
+  ['upload-check', 'picker, 9 MiB resumable session, batch bar, cancel'],
+  ['resume-check', 'a reloaded page claims its live session and can discard it'],
   ['feel-check', 'runtime motion: press, stagger cap, VT flag'],
 ]
 

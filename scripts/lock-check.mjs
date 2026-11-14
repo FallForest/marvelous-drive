@@ -71,11 +71,11 @@ process.exit(await runBrowserCheck({ title: 'Edit lock check' }, async (page, ch
   check('no console errors', page.consoleErrors.length === 0, page.consoleErrors.slice(0, 2).join(' | '))
 }))
 
-/** Double-clicks the row for one node id; the drawer opens from the list row. */
+/** Clicks the row for one node id; a plain click opens the drawer (lib/row-action.js). */
 async function openRow(page, nodeId) {
   return page.run((id) => {
     const row = Array.from(document.querySelectorAll('[data-id]')).find((element) => element.getAttribute('data-id') === id)
-    if (row) row.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }))
+    if (row) row.dispatchEvent(new MouseEvent('click', { bubbles: true }))
     return Boolean(row)
   }, nodeId)
 }

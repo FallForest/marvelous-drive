@@ -61,7 +61,10 @@ describe('file thumbnails', () => {
     const response = await raw('/api/v1/files/' + node.id + '/thumbnail?w=240')
     assert.equal(response.status, 200)
     assert.equal(response.headers.get('content-type'), 'image/png')
-    assert.equal(response.headers.get('cache-control'), 'public, max-age=604800, immutable')
+    // `private`: a week of freshness, scoped to one browser profile. A public
+    // response would let a second account in the same profile read this picture.
+    assert.equal(response.headers.get('cache-control'), 'private, max-age=604800, immutable')
+    assert.equal(response.headers.get('vary'), 'Authorization')
     assert.equal(response.headers.get('content-length'), String(PNG.length))
     assert.equal(response.headers.get('x-thumbnail-width'), '240')
     assert.equal(response.headers.get('x-thumbnail'), null, 'a small image is not tagged as a passthrough')
@@ -75,6 +78,15 @@ describe('file thumbnails', () => {
     const nonsense = await api('GET', '/api/v1/files/' + node.id + '/thumbnail?w=abc', auth())
     assert.equal(nonsense.status, 200)
     assert.equal(nonsense.headers.get('x-thumbnail-width'), '240')
+  })
+
+  it('is never shared across accounts by a cache', async () => {
+    const node = await upload('scoped.png', PNG, 'image/png')
+    const response = await raw('/api/v1/files/' + node.id + '/thumbnail')
+    const cacheControl = String(response.headers.get('cache-control') || '')
+    assert.ok(!/\bpublic\b/.test(cacheControl), 'a bearer-protected body must not be marked public')
+    assert.match(cacheControl, /\bprivate\b/)
+    assert.match(String(response.headers.get('vary') || ''), /Authorization/i)
   })
 
   it('ignores Range: a thumbnail is always one whole response', async () => {

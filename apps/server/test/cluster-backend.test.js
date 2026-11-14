@@ -213,9 +213,14 @@ describe('replication report', () => {
       .run(hash, 'node-a', 100, 'present', new Date().toISOString())
     const strict = new ClusterBackend({ dataDir, writes: 2 })
     const report = strict.replicationReport()
-    assert.equal(report.count, 1)
-    assert.equal(report.blobs[0].replicas, 1)
-    assert.deepEqual(report.blobs[0].nodes, ['a'])
+    // The report covers the whole store, and the test runner shares one database
+    // process-wide: blobs written by another suite (local-driver uploads, which
+    // have no placements at all) are legitimately under-replicated here. Assert
+    // on this file's own hash instead of on the total.
+    const mine = report.blobs.find((entry) => entry.hash === hash)
+    assert.ok(mine, JSON.stringify(report.blobs.map((entry) => entry.hash.slice(0, 4))))
+    assert.equal(mine.replicas, 1)
+    assert.deepEqual(mine.nodes, ['a'])
   })
 
   it('reports nothing when every blob meets the target', () => {
@@ -226,7 +231,10 @@ describe('replication report', () => {
     db.prepare("INSERT INTO blob_placements(hash,node_id,size,state,created_at) VALUES (?,?,?,?,?)")
       .run(hash, 'node-a', 10, 'present', new Date().toISOString())
     const single = new ClusterBackend({ dataDir, writes: 1 })
-    assert.equal(single.replicationReport().count, 0)
+    // Same scoping: this file's fully replicated blob must not be reported,
+    // whatever else is in the shared database.
+    const report = single.replicationReport()
+    assert.equal(report.blobs.some((entry) => entry.hash === hash), false)
   })
 })
 

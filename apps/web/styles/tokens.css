@@ -79,7 +79,12 @@
   --z-sidebar:10;
   --z-sticky:20;
   --z-panel:40;
-  --z-menu:60;
+  /* A menu is a child of the layer that opened it, not a sibling of the modal:
+     every dialog here contains at least one control that opens one (the share
+     form's permission select), and a menu at 60 under a scrim at 70 opens
+     underneath it — visible in the DOM, invisible to the user. Menus therefore
+     sit above the modal they belong to, and toasts stay above those. */
+  --z-menu:75;
   --z-modal:70;
   --z-toast:80;
 
@@ -98,6 +103,13 @@
   --duration-lazy:420ms;
   --duration-loop:700ms;
   --duration-shimmer:1300ms;
+
+  /* ── motion: delays ─────────────────────────────────────────────
+     spinner   how long a fast load is allowed to stay silent before the
+               loading state appears at all. A picture that arrives in 80ms
+               must not flash a spinner, and 400ms is under the threshold
+               where a person starts to wonder.                          */
+  --delay-spinner:400ms;
 
 
   /* ── motion: easing ─────────────────────────────────────────────

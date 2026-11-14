@@ -34,6 +34,9 @@ export function listContext(ctx, nodes) {
     index: session.index,
     onSort: ctx.onSort,
     onRowClick: ctx.onRowClick,
+    onSelectOnly: ctx.onSelectOnly,
+    onSelectToggle: ctx.onSelectToggle,
+    onSelectAll: ctx.onSelectAll,
     onRowKey: ctx.onRowKey,
     onToggleStar: ctx.onToggleStar,
     onOpen: ctx.onOpen,
@@ -67,6 +70,10 @@ export function skeletonView() {
 export function hints() {
   const item = (kbd, label) => h('span', {}, h('span', { class: 'kbd', text: kbd }), label);
   return h('div', { class: 'hint-card' },
+    // The click model is stated here because it is the one rule a new user has
+    // to learn: a click acts, the checkbox selects.
+    item('单击', '打开'),
+    item('空格', '选择'),
     item('Enter', '打开'),
     item('F2', '重命名'),
     item('Del', '删除'),

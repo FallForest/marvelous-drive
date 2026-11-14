@@ -21,6 +21,29 @@ export const SIMPLE_LIMIT = 8 * 1024 * 1024; // 8 MiB
 export const CHUNK_SIZE = 8 * 1024 * 1024;   // 8 MiB, matches the contract default
 export const INSTANT_LIMIT = 1024 * 1024;    // only files above 1 MiB probe for a dedup hit
 export const UPLOAD_CONCURRENCY = 3;         // transfers in flight at once
+export const CHUNK_PARALLEL = 2;             // chunks of one file in flight at once
+export const MAX_ATTEMPTS = 4;               // first try plus three automatic retries
+/** Backoff before retry 1/2/3. A dropped wifi link is usually back within seconds. */
+export const RETRY_BACKOFF = [1000, 3000, 9000];
+
+/**
+ * Whether an error is worth another attempt.
+ *
+ * 408/429/5xx are transient by definition; a 0 means the XHR never reached the
+ * server at all. Everything else — quota, bad chunk size, checksum mismatch —
+ * is a statement about the request, and repeating it would just waste a slot.
+ */
+export function isRetryable(error) {
+  if (!error) return false;
+  if (error.name === 'AbortError') return false;
+  const status = Number(error.status) || 0;
+  if (status === 0) return error.code === 'NETWORK_ERROR' || /network|offline|中断/i.test(String(error.message || ''));
+  return status === 408 || status === 429 || status >= 500;
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 /** Tiny emitter: on(event, fn) -> off(). Events: progress, state, done. */
 export function createEmitter() {
@@ -179,6 +202,14 @@ export function createUploadTask(options) {
   const parentId = opts.parentId || null;
   const onConflict = opts.onConflict || null;
   const client = opts.api || { request, putRaw };
+  // A task handed a session id is a *resume*: the bytes are partly on the
+  // server already, so it skips the dedup probe and the hash has usually been
+  // computed before the reload that lost the File object.
+  const resumeSessionId = opts.sessionId || null;
+  // Injected in tests so the backoff does not make the suite wait 13 seconds.
+  const backoff = Array.isArray(opts.retryBackoff) && opts.retryBackoff.length ? opts.retryBackoff : RETRY_BACKOFF;
+  const maxAttempts = Math.max(1, Number(opts.maxAttempts) || MAX_ATTEMPTS);
+  const chunkParallel = Math.max(1, Number(opts.chunkParallel) || CHUNK_PARALLEL);
   const emitter = createEmitter();
   let controller = new AbortController();
   let running = null;
@@ -188,14 +219,19 @@ export function createUploadTask(options) {
     id: nextId(),
     name: file.name,
     size: file.size,
+    // Kept so the stored resume handle can be identified and dropped later: a
+    // task outlives the File object in every code path that has no handle.
+    lastModified: Number(file.lastModified) || 0,
     type: mimeOf(file),
     parentId,
     onConflict,
     state: 'queued',     // queued | hashing | uploading | finalizing | paused | done | error | canceled
     progress: 0,         // 0..1
     uploaded: 0,
-    sessionId: null,
+    sessionId: resumeSessionId,
+    resumed: Boolean(resumeSessionId),
     chunkSize: CHUNK_SIZE,
+    hash: opts.hash || '', // cached SHA-256: a retry must not re-read the whole file
     deduplicated: false, // true when the server already held these bytes
     error: null,
     node: null,
@@ -210,8 +246,12 @@ export function createUploadTask(options) {
     emitter.emit('state', { task, state, ...(extra || {}) });
   }
   function setProgress(loaded, total) {
-    task.uploaded = loaded;
-    task.progress = total > 0 ? Math.min(1, loaded / total) : 0;
+    // Never backwards: a chunk that restarts reports its own base again, and a
+    // resumed session re-reports bytes the server already holds. The bar may
+    // pause, it may not retreat.
+    const next = Math.max(0, Number(loaded) || 0);
+    task.uploaded = Math.max(task.uploaded, next);
+    task.progress = total > 0 ? Math.min(1, task.uploaded / total) : 0;
     const elapsed = Date.now() - task.startedAt;
     task.speed = elapsed > 400 ? loaded / (elapsed / 1000) : 0;
     emitter.emit('progress', { task, loaded, total, progress: task.progress, speed: task.speed });
@@ -276,17 +316,30 @@ export function createUploadTask(options) {
   async function runUpload(signal) {
     task.attempts += 1;
     task.startedAt = Date.now();
-    task.progress = 0;
-    task.uploaded = 0;
+    // A resumed session keeps the bytes it already delivered on screen: resetting
+    // the bar to 0 and then jumping to 62% reads as a stall followed by a lie.
+    if (!task.sessionId) {
+      task.progress = 0;
+      task.uploaded = 0;
+    }
     task.speed = 0;
     if (!task.sessionId) task.deduplicated = false;
     setState('hashing');
     try {
-      let hash = '';
-      try { hash = await sha256(file); } catch { hash = ''; }
+      // Hash once per task, not once per attempt: a 2 GiB file costs a full read.
+      let hash = task.hash;
+      if (!hash) {
+        try { hash = await sha256(file); } catch { hash = ''; }
+        task.hash = hash;
+      }
       if (signal.aborted) throw abortError();
 
-      const instant = await tryInstantUpload(task, file, { hash, parentId, onConflict, client, signal });
+      // A resume already has a session and a partially written blob target:
+      // probing for a dedup hit here would create a *second* node and leak the
+      // session, so the shortcut is skipped for it.
+      const instant = task.sessionId
+        ? null
+        : await tryInstantUpload(task, file, { hash, parentId, onConflict, client, signal });
       if (instant) {
         task.node = instant.node;
         task.deduplicated = true;
@@ -314,6 +367,7 @@ export function createUploadTask(options) {
       } else {
         task.node = await resumableUpload(task, file, {
           parentId, hash, client, signal, onConflict, setState, setProgress,
+          parallel: chunkParallel,
         });
       }
       setProgress(task.size, task.size);
@@ -322,6 +376,14 @@ export function createUploadTask(options) {
       emitter.emit('done', { task, node: task.node });
       return task.node;
     } catch (error) {
+      // A dropped connection is not a verdict. Network errors and 5xx get three
+      // more attempts with backoff; every other failure (413, 409, CHECKSUM)
+      // would fail identically again, so it goes straight to the row.
+      if (isRetryable(error) && task.attempts < maxAttempts && !isPaused()) {
+        const delay = backoff[Math.min(task.attempts - 1, backoff.length - 1)];
+        await sleep(delay);
+        if (!isPaused() && !controller.signal.aborted) return runUpload(controller.signal);
+      }
       fail(error);
       throw error;
     }
@@ -349,8 +411,12 @@ export function createUploadTask(options) {
 async function resumableUpload(task, file, options) {
   const client = options.client;
   const request = client.request;
-  const chunkSize = Math.min(Math.max(CHUNK_SIZE, 64 * 1024), 64 * 1024 * 1024);
-  const totalChunks = Math.max(1, Math.ceil(file.size / chunkSize));
+  // The chunk size is only authoritative once the session exists: a resumed
+  // session may have been opened with a size this client did not choose. The
+  // chunk count therefore has to be derived *after* the session is known —
+  // deriving it here first (as this used to) silently mislabels every boundary
+  // of a resumed upload whose chunkSize differs from CHUNK_SIZE.
+  const requestedChunkSize = Math.min(Math.max(CHUNK_SIZE, 64 * 1024), 64 * 1024 * 1024);
 
   let session = null;
   if (task.sessionId) {
@@ -367,36 +433,74 @@ async function resumableUpload(task, file, options) {
         size: file.size,
         sha256: options.hash || undefined,
         parentId: options.parentId || undefined,
-        chunkSize,
+        chunkSize: requestedChunkSize,
       },
     });
     session = created && created.upload ? created.upload : created;
   }
   task.sessionId = session.id;
-  task.chunkSize = session.chunkSize || chunkSize;
+  task.chunkSize = Number(session.chunkSize) || requestedChunkSize;
 
+  const size = Math.max(1, Math.floor(task.chunkSize));
+  const totalChunks = Number(session.totalChunks) > 0
+    ? Number(session.totalChunks)
+    : Math.max(1, Math.ceil(file.size / size));
   const received = new Set(Array.isArray(session.receivedChunks) ? session.receivedChunks : []);
-  const size = task.chunkSize;
-  let sent = 0;
-  for (let index = 0; index < totalChunks; index += 1) {
+  // Start the bar where the server actually is: on resume the already stored
+  // chunks are bytes delivered, and reporting 0% first reads as a fresh upload.
+  const chunkLength = (index) => {
     const start = index * size;
-    const end = Math.min(file.size, start + size);
-    if (received.has(index)) { sent += end - start; continue; }
-    const chunk = file.slice(start, end);
-    // Progress is reported across the whole file, not per chunk.
-    const baseUploaded = sent;
-    await (client.putRaw || putRaw)(
-      '/uploads/sessions/' + encodeURIComponent(session.id) + '/chunks/' + index,
-      chunk,
-      {
-        contentType: 'application/octet-stream',
-        signal: options.signal,
-        onProgress: (loaded) => options.setProgress(baseUploaded + loaded, file.size),
-      },
-    );
-    sent += end - start;
-    options.setProgress(sent, file.size);
-  }
+    return Math.min(file.size, start + size) - start;
+  };
+  let settled = 0;
+  for (const index of received) settled += chunkLength(index);
+  // Bytes of the chunks currently in flight, keyed by index: progress is the
+  // settled total plus whatever the open requests have delivered so far.
+  const inFlight = new Map();
+  const report = () => {
+    let partial = 0;
+    for (const loaded of inFlight.values()) partial += loaded;
+    options.setProgress(Math.min(settled + partial, file.size), file.size);
+  };
+  options.setProgress(Math.min(settled, file.size), file.size);
+
+  const missing = [];
+  for (let index = 0; index < totalChunks; index += 1) if (!received.has(index)) missing.push(index);
+
+  // Two chunks in flight per session. One at a time leaves the pipe empty for a
+  // full round trip after every 8 MiB — on a 40 ms link that is a visible ceiling
+  // far below the line rate. More than two starts to compete with the other
+  // files the scheduler is already running.
+  let cursor = 0;
+  const worker = async () => {
+    while (cursor < missing.length) {
+      const index = missing[cursor];
+      cursor += 1;
+      const length = chunkLength(index);
+      const start = index * size;
+      inFlight.set(index, 0);
+      await (client.putRaw || putRaw)(
+        '/uploads/sessions/' + encodeURIComponent(session.id) + '/chunks/' + index,
+        file.slice(start, start + length),
+        {
+          contentType: 'application/octet-stream',
+          signal: options.signal,
+          onProgress: (loaded) => { inFlight.set(index, Math.min(loaded, length)); report(); },
+        },
+      );
+      inFlight.delete(index);
+      settled += length;
+      report();
+    }
+  };
+  const lanes = Math.min(Math.max(1, Number(options.parallel) || CHUNK_PARALLEL), missing.length);
+  // allSettled, not all: when the user pauses, one lane rejects with AbortError
+  // while its sibling is mid-chunk. Waiting for the sibling to unwind keeps the
+  // accounting honest — a chunk that finished during the abort is counted as
+  // stored, so resume does not re-send bytes the server already holds.
+  const outcomes = await Promise.allSettled(Array.from({ length: lanes }, () => worker()));
+  const failure = outcomes.find((outcome) => outcome.status === 'rejected');
+  if (failure) throw failure.reason;
 
   options.setState('finalizing');
   const completed = await request('/uploads/sessions/' + encodeURIComponent(session.id) + '/complete', { method: 'POST' });

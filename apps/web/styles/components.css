@@ -74,7 +74,7 @@
 .field{display:flex;flex-direction:column;gap:6px}
 .field > label,.field-label{font-size:var(--fs-xs);font-weight:600;color:var(--text-secondary);letter-spacing:.02em}
 .field-hint{font-size:var(--fs-xs);color:var(--text-muted);line-height:1.5}
-.input,.select,.textarea{
+.input,.textarea{
   width:100%;height:30px;padding:0 9px;
   background:var(--surface-2);color:var(--text);
   border:1px solid var(--border-strong);border-radius:var(--radius-sm);
@@ -83,16 +83,56 @@
 }
 .textarea{height:auto;min-height:64px;padding:8px 9px;resize:vertical;line-height:1.55}
 .input::placeholder,.textarea::placeholder{color:var(--text-faint)}
-.input:hover,.select:hover,.textarea:hover{border-color:var(--border-strong)}
-.input:focus,.select:focus,.textarea:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft);background:var(--surface)}
+.input:hover,.textarea:hover{border-color:var(--border-strong)}
+.input:focus,.textarea:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft);background:var(--surface)}
 .input[aria-invalid="true"]{border-color:var(--danger);box-shadow:0 0 0 3px var(--danger-soft)}
-.input[disabled],.select[disabled]{color:var(--text-faint);background:var(--surface);cursor:not-allowed}
+.input[disabled]{color:var(--text-faint);background:var(--surface);cursor:not-allowed}
+/* ── select: a field that opens the app's own menu ────────────────
+ *
+ * The native <select> is not used anywhere: its popup is painted by the OS, so
+ * a themed control still opened a white sheet with a system-blue highlight, and
+ * the control sized itself from its widest option. This is a button wearing the
+ * field chrome; the menu it opens is the same .menu every other popup uses.
+ */
 .select{
-  appearance:none;padding-right:26px;cursor:pointer;
-  background-image:linear-gradient(45deg,transparent 50%,var(--text-muted) 50%),linear-gradient(135deg,var(--text-muted) 50%,transparent 50%);
-  background-position:calc(100% - 13px) 13px,calc(100% - 9px) 13px;
-  background-size:4px 4px,4px 4px;background-repeat:no-repeat;
+  display:flex;width:100%;align-items:center;gap:6px;
+  height:30px;padding:0 9px;min-width:0;
+  background:var(--surface-2);color:var(--text);
+  border:1px solid var(--border-strong);border-radius:var(--radius-sm);
+  font-size:var(--fs-sm);text-align:left;
+  transition:var(--transition-surface);
+  transform-origin:center;
 }
+.select:hover{background:var(--hover)}
+.select:active:not([disabled]){transform:scale(var(--press-scale));transition-duration:var(--duration-instant)}
+.select:focus-visible{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft)}
+.select[aria-expanded="true"]{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft)}
+.select[disabled]{color:var(--text-faint);background:var(--surface);cursor:not-allowed}
+.select .select-value{
+  flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+}
+.select.is-placeholder .select-value{color:var(--text-faint)}
+/* The chevron is a real glyph from the icon set, so it is the same weight and
+   the same optical size as every other caret in the app — the old control drew
+   a CSS-triangle arrow that sat 2px below the optical centre. */
+.select svg{
+  width:13px;height:13px;flex:0 0 13px;color:var(--text-muted);
+  transition:transform var(--duration-base) var(--ease-spring-snappy),color var(--duration-fast) var(--ease-standard);
+}
+.select:hover svg{color:var(--text-secondary)}
+.select[aria-expanded="true"] svg{transform:rotate(180deg);color:var(--accent)}
+
+/* Toolbar weight: the sort control sits in a row of 28px buttons, so it takes
+   their height and type scale instead of the 30px field size. */
+.btn-menu{
+  gap:5px;height:28px;padding:0 8px 0 9px;
+  background:var(--surface-2);border-color:var(--border-strong);color:var(--text-secondary);
+  font-size:var(--fs-xs);font-weight:500;
+}
+.btn-menu:hover{background:var(--hover);color:var(--text);border-color:var(--border-strong)}
+.btn-menu[aria-expanded="true"]{background:var(--active);color:var(--text);border-color:var(--border-strong)}
+.btn-menu svg{width:12px;height:12px;color:var(--text-muted);transition:transform var(--duration-base) var(--ease-spring-snappy),color var(--duration-fast) var(--ease-standard)}
+.btn-menu[aria-expanded="true"] svg{transform:rotate(180deg);color:var(--text-secondary)}
 .checkline{display:flex;align-items:center;gap:8px;font-size:var(--fs-sm);color:var(--text-secondary);cursor:pointer}
 .checkline input{width:14px;height:14px;accent-color:var(--accent-solid);cursor:pointer;margin:0}
 .inline-fields{display:grid;grid-template-columns:1fr 1fr;gap:10px}
@@ -216,6 +256,12 @@
 .menu-item:active:not([disabled]){background:var(--active);transform:scale(.985);transition-duration:var(--duration-instant)}
 .menu-item:hover svg{color:var(--text)}
 .menu-item kbd{margin-left:auto;font:600 10px/1 var(--font-ui);color:var(--text-faint)}
+/* A row that represents the current value. The tick is the accent; the row is
+   not given a filled background, because a menu opened to read the current
+   state should not look like one row is hovered. */
+.menu-item.is-checked{color:var(--text)}
+.menu-item.is-checked svg{color:var(--accent)}
+.menu-item[role="menuitemradio"][aria-checked="false"] svg{opacity:0}
 .menu-item.is-danger{color:var(--danger)}
 .menu-item.is-danger svg{color:var(--danger)}
 .menu-item.is-danger:hover{background:var(--danger-soft);color:var(--danger)}

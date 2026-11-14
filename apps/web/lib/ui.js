@@ -337,7 +337,10 @@ function dismissOverlay(panel, scrim) {
 export function openMenu(options) {
   const opts = options || {};
   const anchor = opts.anchor;
-  const menu = h('div', { class: 'menu', attrs: { role: 'menu' } });
+  const menu = h('div', {
+    class: 'menu',
+    attrs: { role: opts.role || 'menu', 'aria-label': opts.label || null },
+  });
 
   const onOutside = (event) => {
     if (!menu.contains(event.target) && !(anchor && anchor.contains(event.target))) close();
@@ -376,11 +379,24 @@ export function openMenu(options) {
     if (!item) continue;
     if (item.separator) { menu.appendChild(h('div', { class: 'menu-sep', attrs: { role: 'separator' } })); continue; }
     if (item.heading) { menu.appendChild(h('div', { class: 'menu-label', text: item.heading })); continue; }
+    // A checked row is a choice, not a command: it gets the tick and the
+    // aria state, so a select built on this menu is readable to a screen reader
+    // as a listbox rather than as a pile of buttons.
     menu.appendChild(h('button', {
-      class: 'menu-item' + (item.danger ? ' is-danger' : ''),
-      attrs: { type: 'button', role: 'menuitem', disabled: item.disabled || undefined },
+      class: 'menu-item'
+        + (item.danger ? ' is-danger' : '')
+        + (item.checked ? ' is-checked' : ''),
+      attrs: {
+        type: 'button',
+        role: opts.role || (item.checked !== undefined ? 'menuitemradio' : 'menuitem'),
+        'aria-checked': item.checked === undefined ? null : (item.checked ? 'true' : 'false'),
+        disabled: item.disabled || undefined,
+      },
       on: { click: () => { close(); if (item.onSelect) item.onSelect(); } },
-    }, raw(icon(item.icon || 'file', 15)), h('span', { text: item.label }), item.kbd ? h('kbd', { text: item.kbd }) : null));
+    },
+    raw(icon(item.icon || (item.checked === undefined ? 'file' : item.checked ? 'check' : 'blank'), 15)),
+    h('span', { text: item.label }),
+    item.kbd ? h('kbd', { text: item.kbd }) : null));
   }
 
   document.body.appendChild(menu);

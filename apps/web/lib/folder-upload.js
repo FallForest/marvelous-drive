@@ -98,7 +98,7 @@ export async function planFromDataTransfer(items) {
  * the traversal stays testable without HTTP. Returns a summary the caller can
  * toast.
  */
-export async function uploadPlan(plan, { parentId = null, createFolder, uploadFile, onFolder, onFile }) {
+export async function uploadPlan(plan, { parentId = null, createFolder, uploadFile, onFolder, onFile, concurrency = 1 }) {
   const folderIds = new Map([['', parentId]])
   const ordered = [...plan.dirs].sort((a, b) => a.split('/').length - b.split('/').length || a.localeCompare(b))
   let folders = 0
@@ -124,17 +124,38 @@ export async function uploadPlan(plan, { parentId = null, createFolder, uploadFi
       if (onFolder) onFolder(path, null, error)
     }
   }
+  // Files run `concurrency` at a time. The default of 1 keeps a caller that
+  // wants a strict order (and every test that asserts one) unchanged; the web
+  // client passes the whole list and lets its own scheduler decide, because
+  // awaiting each file here made a folder of 200 files a 200-request relay: one
+  // round trip of latency per file, one connection in flight, and a 200 Mbps
+  // link that never went above a few MB/s.
+  const limit = Math.max(1, Math.floor(Number(concurrency)) || 1)
+  const queue = plan.files.slice()
+  if (limit > 1) {
+    // Largest first: with a fixed number of slots, starting the files that
+    // dominate the batch keeps every slot busy to the end instead of leaving
+    // one 900 MB file to crawl alone after the small ones are gone.
+    queue.sort((a, b) => (Number(b.file && b.file.size) || 0) - (Number(a.file && a.file.size) || 0))
+  }
   let uploaded = 0
-  for (const entry of plan.files) {
-    const targetParent = folderIds.get(entry.path) ?? parentId
-    try {
-      await uploadFile(entry.file, targetParent)
-      uploaded += 1
-      if (onFile) onFile(entry, true)
-    } catch (error) {
-      if (onFile) onFile(entry, false, error)
+  let cursor = 0
+  const worker = async () => {
+    while (cursor < queue.length) {
+      const entry = queue[cursor]
+      cursor += 1
+      const targetParent = folderIds.get(entry.path) ?? parentId
+      try {
+        await uploadFile(entry.file, targetParent)
+        uploaded += 1
+        if (onFile) onFile(entry, true)
+      } catch (error) {
+        if (onFile) onFile(entry, false, error)
+      }
     }
   }
+  const workers = Math.min(limit, queue.length)
+  await Promise.all(Array.from({ length: workers }, () => worker()))
   return { folders, failedFolders, uploaded, total: plan.files.length }
 }
 

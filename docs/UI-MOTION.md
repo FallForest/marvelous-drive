@@ -74,6 +74,49 @@ reads like UIKit. Move with a spring; change colour or opacity with
 - **Reduced motion** — `tokens.css` collapses the durations, so travel becomes a
   cross-fade without a component opting in. JS paths check
   `prefersReducedMotion()` before adding a class or starting a transition.
+- **The shell is an interface, not a document** — `base.css` makes everything
+  unselectable by default (`html,body{user-select:none;caret-color:transparent}`)
+  and content opts back in. Clicking a label that has no focusable target used to
+  leave the browser a collapsed caret to draw, blinking between two words of a
+  heading; dragging across the sidebar painted a text highlight over the chrome.
+  `user-select` alone does not stop the caret, which is why `caret-color` is set
+  with it. File names, previews, counts and error text stay selectable; fields
+  reset both properties so typing keeps a real caret.
+
+  The rule lives on the viewport and is inherited, **not** on `#app *`. An id
+  beats any class, so an `#app *` reset would force every opt-in to use
+  `!important` or an id of its own — the opt-in list is the one thing that must
+  stay cheap to extend.
+
+## Selects
+
+There is no `<select>` in the shell, and adding one would be a regression: the
+browser/OS paints the popup list and its highlight itself, so a themed control
+still opens a white (or system-blue) sheet over a near-black UI. The control
+also sizes itself from its widest option, which is how one dropdown drags a
+toolbar row out of alignment.
+
+`lib/select.js` provides the two shapes a form needs, both backed by
+`openMenu()` from `lib/ui.js`:
+
+| Shape | Use | Class |
+| --- | --- | --- |
+| `renderSelect({ value, options, onChange })` | inside a `.field` (share dialog) | `.select` |
+| `renderMenu({ value, options, onChange })` | in a row of buttons (sort) | `.btn-menu` |
+
+Both expose `.value` like a form control, so the submit handler that read a
+native select keeps working. Both mark the current row with a tick and
+`role="menuitemradio"`; the unchecked rows keep an invisible spacer icon so
+every label starts on the same x.
+
+The chevron is the shared `chevron-down` glyph, not a CSS triangle — the old
+triangle was positioned `13px` from the top of a `26px` control, i.e. 2px below
+the optical centre.
+
+**Layering:** `--z-menu` is above `--z-modal`, because a dialog contains
+controls that open menus. At the original 60-under-70 a menu opened inside the
+share dialog was painted underneath the scrim — present in the DOM, invisible
+to the user.
 
 ## Verifying
 

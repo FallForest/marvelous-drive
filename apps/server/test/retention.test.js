@@ -128,3 +128,60 @@ describe('storage report', () => {
     assert.equal(delta, 2 * 'same same same'.length, 'each node accounts for its own size');
   });
 });
+describe('expired upload sessions', () => {
+  /** A live session gets an artificial past expiry, then the sweep runs. */
+  async function expiredSession(name) {
+    const created = await api('POST', '/api/v1/uploads/sessions', auth({ body: { name, size: 128 * 1024, chunkSize: 64 * 1024 } }));
+    assert.equal(created.status, 201, created.text);
+    const session = created.json.upload;
+    withDb((db) => db.prepare('UPDATE upload_sessions SET expires_at=? WHERE id=?')
+      .run(new Date(Date.now() - 60_000).toISOString(), session.id));
+    return session;
+  }
+
+  it('drops the row and the chunk directory of a session nobody resumed', async () => {
+    const { sweepExpiredTrash } = await import('../src/ops/retention.js');
+    const { existsSync } = await import('node:fs');
+    const session = await expiredSession('abandoned.bin');
+    const dir = join(app.dataDir, 'tmp', 'sessions', session.id);
+    assert.equal(existsSync(dir), true);
+
+    const summary = await sweepExpiredTrash();
+    assert.ok(summary.sessions >= 1, JSON.stringify(summary));
+    assert.equal(existsSync(dir), false);
+    const rows = withDb((db) => db.prepare('SELECT COUNT(*) AS n FROM upload_sessions WHERE id=?').get(session.id));
+    assert.equal(rows.n, 0);
+  });
+
+  it('leaves a session that is still inside its window alone', async () => {
+    const { sweepExpiredTrash } = await import('../src/ops/retention.js');
+    const created = await api('POST', '/api/v1/uploads/sessions', auth({ body: { name: 'alive.bin', size: 128 * 1024, chunkSize: 64 * 1024 } }));
+    const session = created.json.upload;
+    await sweepExpiredTrash();
+    const rows = withDb((db) => db.prepare('SELECT COUNT(*) AS n FROM upload_sessions WHERE id=?').get(session.id));
+    assert.equal(rows.n, 1);
+  });
+
+  it('removes an orphan directory left by a row that is already gone', async () => {
+    const { sweepExpiredTrash } = await import('../src/ops/retention.js');
+    const { existsSync, mkdirSync } = await import('node:fs');
+    const orphan = join(app.dataDir, 'tmp', 'sessions', 'no-such-session');
+    mkdirSync(orphan, { recursive: true });
+    assert.equal(existsSync(orphan), true);
+
+    const summary = await sweepExpiredTrash();
+    assert.ok(summary.orphanSessions >= 1, JSON.stringify(summary));
+    assert.equal(existsSync(orphan), false);
+  });
+});
+
+describe('expired upload sessions', () => {
+  it('is reported by the trash sweep that the boot timer runs', async () => {
+    const { sweepExpiredTrash } = await import('../src/ops/retention.js');
+    const summary = await sweepExpiredTrash();
+    // The key contract: one timer owns the housekeeping, and the session count
+    // is part of its report rather than a second scheduler nobody remembers.
+    assert.equal(typeof summary.sessions, 'number');
+    assert.equal(typeof summary.orphanSessions, 'number');
+  });
+});

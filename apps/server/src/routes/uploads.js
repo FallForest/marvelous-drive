@@ -2,15 +2,16 @@ import { createHash } from 'node:crypto'
 import { createReadStream, createWriteStream } from 'node:fs'
 import { mkdir, readdir, stat, unlink } from 'node:fs/promises'
 import { join } from 'node:path'
-import { db, nowIso } from '../db.js'
+import { db, nowIso, transaction } from '../db.js'
 import { userFromRequest } from '../auth.js'
 import { config } from '../config.js'
 import { fail, sendJson } from '../http.js'
-import { adoptBlob, releaseBlob } from '../storage/blobs.js'
+import { adoptBlob, releaseBlob, retainBlob } from '../storage/blobs.js'
 import { findFileByName, nodeJson, normalizeConflictStrategy, upsertFile } from '../nodes.js'
 import { randomId } from '../security.js'
 import { safeMime } from './files.js'
 import { assertWithinQuota } from '../ops/quota.js'
+import { backend } from '../storage/backend.js'
 
 /**
  * Resumable uploads.
@@ -22,6 +23,20 @@ import { assertWithinQuota } from '../ops/quota.js'
  */
 
 const sessionDir = (id) => join(config.tmpDir, 'sessions', id)
+
+/**
+ * The blob record for `hash`, or null.
+ *
+ * "Exists" is a backend question: a row can survive a lost file, and adopting
+ * bytes out of a row that points at nothing would create a node that 500s on
+ * download. Same check the instant-upload route uses.
+ */
+async function existingBlob(hash) {
+  const row = db.prepare('SELECT size FROM blobs WHERE hash=?').get(hash)
+  if (!row) return null
+  const info = await backend.stat(hash)
+  return info ? { size: row.size } : null
+}
 
 const uploadJson = (row) => ({
   id: row.id,
@@ -136,9 +151,20 @@ export function registerUploadRoutes(router) {
       await unlink(target).catch(() => {})
       ctx.fail(400, 'INVALID_INPUT', `Chunk must be ${expectedLength} bytes, received ${written}.`)
     }
-    const received = new Set(JSON.parse(session.received || '[]'))
-    received.add(index)
-    db.prepare('UPDATE upload_sessions SET received=? WHERE id=?').run(JSON.stringify([...received]), session.id)
+    // Merge against the row as it is *now*, not as it was when this request
+    // started reading the body. A client that sends several chunks at once (or
+    // two tabs resuming the same session) interleaves inside the wait above, and
+    // a read-modify-write on the stale snapshot silently dropped the index of
+    // whichever chunk finished first: the bytes were on disk, the row forgot
+    // them, and complete answered 409 UPLOAD_INCOMPLETE forever.
+    // The connection is one synchronous SQLite handle, so this merge is atomic.
+    transaction(() => {
+      const fresh = db.prepare('SELECT received FROM upload_sessions WHERE id=?').get(session.id)
+      const merged = new Set(JSON.parse((fresh && fresh.received) || '[]'))
+      merged.add(index)
+      db.prepare('UPDATE upload_sessions SET received=? WHERE id=?')
+        .run(JSON.stringify([...merged].sort((a, b) => a - b)), session.id)
+    })
     sendJson(ctx.res, 200, { upload: uploadJson(requireSession(user.id, session.id)) })
   })
 
@@ -162,27 +188,87 @@ export function registerUploadRoutes(router) {
       for (let index = 0; index < session.total_chunks; index++) if (!received.includes(index)) missing.push(index)
       ctx.fail(409, 'UPLOAD_INCOMPLETE', `${missing.length} chunk(s) are still missing.`)
     }
-    const tempPath = join(config.tmpDir, `assembled-${session.id}.part`)
+    // Hash the chunks where they lie before writing anything.
+    //
+    // Assembly used to stream all chunks straight into `assembled-<id>.part`
+    // while hashing, so a 1 GiB upload needed 1 GiB of free space on top of the
+    // chunks themselves — and the hash only existed at the very end, which made
+    // the "these bytes are already in the store" check impossible to do up
+    // front. Hashing first costs one extra read of the chunks (they are in the
+    // page cache far more often than not) and buys two things: the sha256 is
+    // known before a byte is copied, and a mismatch is caught without ever
+    // producing the temp file.
     const hash = createHash('sha256')
+    for (let index = 0; index < session.total_chunks; index++) {
+      const chunkPath = join(sessionDir(session.id), String(index).padStart(6, '0'))
+      for await (const buffer of createReadStream(chunkPath)) hash.update(buffer)
+    }
+    const digest = hash.digest('hex')
+    if (session.sha256 && session.sha256 !== digest) {
+      await cleanupSession(session.id)
+      ctx.fail(409, 'CHECKSUM_MISMATCH', 'The assembled file does not match the declared sha256.')
+    }
+
+    // The bytes may already be in the store: the same file uploaded from another
+    // device, a retried completion, or a duplicate of something else entirely.
+    // Every path that skips assembly here is a multipart upload that cost no
+    // extra disk at all.
+    const known = await existingBlob(digest)
+    if (known && Number(known.size) === Number(session.size)) {
+      const existingNode = onConflict === 'skip' ? findFileByName(user.id, session.parent_id, session.name) : null
+      await cleanupSession(session.id)
+      if (existingNode) {
+        sendJson(ctx.res, 200, { node: nodeJson(existingNode), skipped: true, upload: { id: session.id, completed: true } })
+        return
+      }
+      retainBlob(digest)
+      let adopted
+      try {
+        adopted = upsertFile(user.id, {
+          name: session.name,
+          parentId: session.parent_id,
+          mime: safeMime(String(ctx.req.headers['content-type'] || 'application/octet-stream')),
+          size: session.size,
+          blobHash: digest,
+          onConflict,
+        })
+      } catch (error) {
+        await releaseBlob(digest)
+        throw error
+      }
+      if (adopted.skipped) await releaseBlob(digest)
+      if (adopted.previousBlob) await releaseBlob(adopted.previousBlob)
+      sendJson(ctx.res, adopted.skipped ? 200 : 201, {
+        node: nodeJson(adopted.node),
+        ...(adopted.renamedFrom ? { renamedFrom: adopted.renamedFrom } : {}),
+        ...(adopted.skipped ? { skipped: true } : {}),
+        deduplicated: true,
+        upload: { id: session.id, completed: true },
+      })
+      return
+    }
+
+    const tempPath = join(config.tmpDir, `assembled-${session.id}.part`)
     const out = createWriteStream(tempPath)
     for (let index = 0; index < session.total_chunks; index++) {
       const chunkPath = join(sessionDir(session.id), String(index).padStart(6, '0'))
       await new Promise((resolve, reject) => {
         const stream = createReadStream(chunkPath)
-        stream.on('data', (buffer) => { hash.update(buffer); if (!out.write(buffer)) stream.pause() })
+        stream.on('data', (buffer) => { if (!out.write(buffer)) stream.pause() })
         out.on('drain', () => stream.resume())
         stream.on('error', reject)
         stream.on('end', resolve)
       })
+      // The chunk has been copied into the assembly; drop it now instead of at
+      // cleanup. Chunks total exactly `size`, so without this the peak is two
+      // full copies of the file (chunks + assembled) and a 2 GiB upload on a
+      // drive with 3 GiB free fails at the last step. Unlinking as we go keeps
+      // the peak at roughly one file. A failure here is harmless — a leftover
+      // chunk is removed by cleanupSession / the retention sweep.
+      await unlink(chunkPath).catch(() => {})
     }
     out.end()
     await new Promise((resolve, reject) => { out.on('error', reject); out.on('finish', resolve) })
-    const digest = hash.digest('hex')
-    if (session.sha256 && session.sha256 !== digest) {
-      await unlink(tempPath).catch(() => {})
-      await cleanupSession(session.id)
-      ctx.fail(409, 'CHECKSUM_MISMATCH', 'The assembled file does not match the declared sha256.')
-    }
     // A skip that is already known up front does not need the bytes at all.
     const existing = onConflict === 'skip'
       ? findFileByName(user.id, session.parent_id, session.name)

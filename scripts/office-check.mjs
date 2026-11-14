@@ -88,7 +88,7 @@ process.exit(await runBrowserCheck({ title: 'Office preview check' }, async (pag
     const opened = await page.run((nodeId) => {
       const row = Array.from(document.querySelectorAll('[data-id]')).find((element) => element.getAttribute('data-id') === nodeId)
       if (!row) return 'row missing'
-      row.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }))
+      row.dispatchEvent(new MouseEvent('click', { bubbles: true }))
       return 'ok'
     }, entry.id)
     check('opens ' + entry.name + ' in the drawer', opened === 'ok', opened)

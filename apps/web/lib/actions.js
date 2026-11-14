@@ -22,6 +22,7 @@ import { checkForUpdate, openUpdatePanel } from './updates.js';
 import { clearToken } from './api.js';
 import { store, session } from './session.js';
 import { runtime } from './runtime.js';
+import { visibleNodes } from './views.js';
 
 /** Resolve a node id against the live tree and the current search page. */
 export function lookupNode(id) {
@@ -37,8 +38,16 @@ export function cssEscape(value) {
   return String(value).replace(/["\\]/g, '\\$&');
 }
 
+/**
+ * Opens the drawer for `node`.
+ *
+ * The gallery is everything the current view shows, so → walks the rows the
+ * user is looking at — in their sort order, in the current folder — and never
+ * jumps into a file that is only reachable through another directory.
+ */
 export function openPreviewFor(node) {
   openPreview(node, {
+    gallery: visibleNodes(),
     onDownload: (target) => downloadOne(target),
     onShare: (target) => openShareDialog(target),
     onDetails: (target) => showDetails(target),

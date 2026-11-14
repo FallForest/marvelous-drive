@@ -143,7 +143,23 @@ on disk.
 6. `GET /uploads/sessions` lists live sessions; `DELETE /uploads/sessions` drops
    the expired ones.
 
-Sessions expire after 24 hours and then answer `404`.
+Sessions expire after 24 hours and then answer `404`. The hourly retention sweep
+deletes expired session rows together with their chunk directories, and reclaims
+session directories whose row is already gone — an abandoned upload costs its
+disk for at most one TTL plus one sweep interval.
+
+Completion hashes the chunks **before** writing the assembled file, which buys
+three things:
+
+- a digest mismatch is rejected without ever producing the temp file;
+- when that digest is already in the blob store the bytes are adopted directly
+  (`201 { node, deduplicated: true }`) and no copy is written at all;
+- otherwise each chunk is unlinked as soon as it has been copied into the
+  assembly, so peak disk use is about one copy of the file, not two.
+
+`GET /uploads/sessions` is what makes an interrupted upload resumable after a
+reload: the client lists its live sessions and re-adopts them by name, size and
+(when both sides have it) `sha256`.
 
 ## Sharing
 

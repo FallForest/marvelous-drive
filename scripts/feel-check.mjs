@@ -105,6 +105,12 @@ process.exit(await runBrowserCheck({ title: 'Marvelous Drive motion feel check' 
       return { transform: computed.transform, transitionDuration: computed.transitionDuration }
     }, selector)
     await page.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: box.x, y: box.y, button: 'left', clickCount: 1 })
+    // The release completes a click, and a click on a row now opens its item
+    // (lib/row-action.js). Close whatever that opened before measuring the next
+    // element: a preview drawer's scrim would otherwise eat the next press and
+    // the check would report a missing :active on a button nobody hit.
+    await page.evaluate("document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))")
+    await sleep(320)
     return style
   }
 
@@ -226,6 +232,107 @@ process.exit(await runBrowserCheck({ title: 'Marvelous Drive motion feel check' 
   check('the toggle slides it in', drawer.opened.open && drawer.opened.transform === 'none', JSON.stringify(drawer.opened))
   check('the toggle reports its state', drawer.opened.expanded === 'true', String(drawer.opened.expanded))
   check('tapping the scrim dismisses the drawer', drawer.dismissed.open === false && drawer.dismissed.expanded === 'false', JSON.stringify(drawer.dismissed))
+
+  /* ── 9. the shell is an interface, not a document ─────────────── */
+  // A click on a label that has no focusable target used to leave the browser a
+  // collapsed caret to draw — blinking between two words of a heading. Dragging
+  // across the sidebar painted a text highlight over the chrome for the same
+  // reason. Neither is visible in a screenshot, so both are asserted here.
+  await page.send('Emulation.setDeviceMetricsOverride', { width: 1440, height: 960, deviceScaleFactor: 1, mobile: false })
+  await sleep(400)
+  const chromeText = await page.run(async () => {
+    const targets = ['.side-label', '.crumb', '.side-row', '.toolbar', '.statusbar', '.list-head', '.section-head h1', '.hint-card']
+    const caretLeft = []
+    let checked = 0
+    for (const selector of targets) {
+      for (const element of Array.from(document.querySelectorAll(selector))) {
+        const rect = element.getBoundingClientRect()
+        if (!rect.width || !rect.height) continue
+        checked += 1
+        window.getSelection().removeAllRanges()
+        const point = { clientX: Math.round(rect.left + Math.min(24, rect.width / 2)), clientY: Math.round(rect.top + rect.height / 2) }
+        element.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, ...point }))
+        element.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, ...point }))
+        await new Promise((resolve) => setTimeout(resolve, 20))
+        const selection = window.getSelection()
+        if (selection && selection.type === 'Caret') caretLeft.push(selector)
+        window.getSelection().removeAllRanges()
+      }
+    }
+    const read = (selector) => {
+      const element = document.querySelector(selector)
+      return element ? getComputedStyle(element) : null
+    }
+    const name = read('.frow .name')
+    const input = read('.side-search input')
+    const label = read('.side-label')
+    const row = read('.frow')
+    return {
+      checked,
+      caretLeft,
+      labelSelect: label ? label.userSelect : null,
+      rowSelect: row ? row.userSelect : null,
+      nameSelect: name ? name.userSelect : null,
+      inputSelect: input ? input.userSelect : null,
+      inputCaret: input ? input.caretColor : null,
+    }
+  })
+  check('clicking chrome leaves no caret', chromeText.caretLeft.length === 0, chromeText.caretLeft.join(', '))
+  check('the sweep actually touched chrome', chromeText.checked >= 8, 'elements: ' + chromeText.checked)
+  check('chrome text is not selectable', chromeText.labelSelect === 'none' && chromeText.rowSelect === 'none', JSON.stringify(chromeText))
+  check('file names stay selectable', chromeText.nameSelect === 'text', String(chromeText.nameSelect))
+  check('fields keep a real caret', chromeText.inputSelect === 'text' && chromeText.inputCaret !== 'rgba(0, 0, 0, 0)', JSON.stringify({ select: chromeText.inputSelect, caret: chromeText.inputCaret }))
+  await page.shot('09-feel-shell')
+
+  /* ── 10. selects are part of the design system ────────────────── */
+  // The native <select> was the one control whose popup the app could not
+  // style: it opened a system-painted sheet over a near-black UI. Every select
+  // is now a button over the app's own menu, and the sort control is a button
+  // so it matches the row it sits in.
+  await page.send('Emulation.setDeviceMetricsOverride', { width: 1440, height: 960, deviceScaleFactor: 1, mobile: false })
+  await sleep(400)
+  const selects = await page.run(() => {
+    const native = document.querySelectorAll('select').length
+    const sort = document.querySelector('.toolbar .sort-menu')
+    const sortStyle = sort ? getComputedStyle(sort) : null
+    const btn = document.querySelector('.toolbar .btn')
+    const btnStyle = btn ? getComputedStyle(btn) : null
+    return {
+      native,
+      heights: sort && btn ? [Math.round(sort.getBoundingClientRect().height), Math.round(btn.getBoundingClientRect().height)] : null,
+      sortHasChevron: sort ? Boolean(sort.querySelector('svg')) : false,
+      sameRadius: sortStyle && btnStyle ? sortStyle.borderRadius === btnStyle.borderRadius : false,
+    }
+  })
+  check('no native select is left in the shell', selects.native === 0, 'selects: ' + selects.native)
+  check('the sort control matches the button height', Boolean(selects.heights) && selects.heights[0] === selects.heights[1], JSON.stringify(selects.heights))
+  check('the sort control draws the shared chevron', selects.sortHasChevron)
+  check('the sort control shares the button radius', selects.sameRadius)
+
+  // Opening it must paint the app's menu, with the current value checked.
+  const opened = await page.run(async () => {
+    const sort = document.querySelector('.toolbar .sort-menu')
+    if (!sort) return { error: 'no sort control' }
+    sort.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await new Promise((resolve) => setTimeout(resolve, 60))
+    const menu = document.querySelector('.menu')
+    if (!menu) return { error: 'no menu' }
+    const rect = menu.getBoundingClientRect()
+    return {
+      error: null,
+      background: getComputedStyle(menu).backgroundColor,
+      radius: getComputedStyle(menu).borderRadius,
+      checked: Array.from(menu.querySelectorAll('[role="menuitemradio"]')).map((row) => row.getAttribute('aria-checked')),
+      inViewport: rect.top >= 0 && rect.bottom <= window.innerHeight,
+      expanded: sort.getAttribute('aria-expanded'),
+    }
+  })
+  check('the sort control opens the app menu', opened.error === null, JSON.stringify(opened))
+  check('the menu is the shared surface, not an OS sheet', opened.error === null && opened.radius !== '0px', JSON.stringify(opened))
+  check('the menu marks exactly one current value', opened.error === null && opened.checked.filter((v) => v === 'true').length === 1, JSON.stringify(opened.checked))
+  check('the control reports its open state', opened.expanded === 'true', String(opened.expanded))
+  await page.evaluate("document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))")
+  await sleep(250)
 
   check('no console errors', page.consoleErrors.length === 0, page.consoleErrors.slice(0, 3).join(' | '))
 }))

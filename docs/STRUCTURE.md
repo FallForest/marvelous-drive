@@ -67,7 +67,7 @@ zip-read.js       Minimal ZIP reader (stored/deflate, zip64, bomb caps)
 ### `ops/` — scheduled and cross-cutting work
 
 ```
-retention.js      Trash expiry: subtree purge plus blob release
+retention.js      Trash expiry (subtree purge + blob release) and session expiry
 scrub.js          Blob integrity: missing files, orphans, size mismatches
 audit.js          Append-only action log with a 90 day window
 access-log.js     Blob read tracking (one row per blob per day) + hot/cold split
@@ -125,10 +125,18 @@ lib/
   ui.js           Buttons, dialogs, toasts, menus, focus trap
   format.js       Bytes, dates, icons, markdown rendering
   files.js        File rows, breadcrumbs, drag & drop, context actions
+  gallery.js      Which files a picture drawer can walk, and which to prefetch
+  image-cache.js  Byte-budgeted LRU of decoded bitmaps (disposes on eviction)
+  image-fit.js    How big to decode: contain-fit, long-edge cap, pixel budget
+  image-loader.js Route choice + createImageBitmap downsampling for one picture
+  image-size.js   Reads width/height from a PNG/JPEG/GIF/WebP header
+  row-action.js   What a click means: action vs. selection (see the rules below)
   preview.js      Preview drawer: image, PDF, text, markdown, edit lock
-  upload.js       Simple + resumable upload, sha256, progress
-  upload-queue.js Scheduler singleton: concurrency 3, pause/resume, history
-  queue.js        Visible upload queue with cancel/retry
+  upload.js       Simple + resumable upload, sha256, chunk lanes, retry, progress
+  upload-queue.js Scheduler singleton: concurrency 3, pause/resume, history, claims
+  upload-resume.js  FileSystemFileHandle store (IndexedDB) + session matching
+  upload-stats.js   Batch aggregate over the queue: bytes, speed, ETA, summary
+  queue.js        Visible upload queue: batch bar, rows, cancel/retry/resume
   share.js        Share dialog and the public /s/<token> page
   move.js         Move dialog (folder picker)
   office-preview.js  Renders the office payload: slide/page cards, sheet grids
@@ -140,6 +148,7 @@ lib/
   workspace.js    Team panel: members, roles, add/remove
   sidebar.js      Sidebar tree, breadcrumbs, toolbar
   motion.js       Motion semantics on the JS side: timings, stagger cap, VT guard
+  select.js       Dropdowns built from the app's own menu (no native <select>)
 styles/
   index.css       Entry: imports the layers below in cascade order
   tokens.css      Design tokens (colour, spacing, type, motion values)
@@ -160,6 +169,23 @@ Rules:
   [UI-MOTION.md](UI-MOTION.md).
 - All user-facing strings live in the module that renders them; no i18n layer
   until there is a second language.
+- A plain click runs the row's primary action — a folder navigates, a file
+  previews. Selection is the checkbox, Ctrl/Cmd-click, Shift-click or Space.
+  `lib/row-action.js` is the only place that rule is written down; a row must
+  never grow a second `dblclick` handler. The trash is the exception: nothing
+  there is meant to be opened, so a click selects.
+- An overlay owns the keyboard, therefore it must take focus: `trapFocus()`
+  defers the focus call to the next frame (a synchronously focused detached
+  panel is silently ignored, which leaves the whole panel deaf) and returns focus
+  to the opener on release. A control that is "unavailable" uses
+  `aria-disabled`, never the `disabled` attribute — a disabled button cannot hold
+  focus, so disabling it at the end of a list drops the keyboard onto `<body>`.
+- A picture previews as a gallery: `←`/`→` walk the pictures of the current
+  view, `Home`/`End` jump to the ends, and the ends do not wrap. Every picture
+  is requested from `/thumbnail` (the only route with an immutable cache
+  header), decoded straight to the drawer's box, and kept in `image-cache.js`
+  keyed by `blobHash`. Nothing here resizes on the server — `image-fit.js` owns
+  the size decision, so a change there is a memory change, not a cosmetic one.
 
 ## `packages/cli`
 
@@ -193,7 +219,8 @@ lib/browser.mjs      Chrome launcher, CDP page, check recorder — the shared ha
 smoke.mjs            API-level checks against a running instance
 browser-check.mjs    the shell: login, list, preview, trash, share, mobile
 feature-check.mjs    thumbnails, batch bar, draggable rows, duplicates drawer
-upload-check.mjs     picker, 9 MiB resumable session, cancel
+upload-check.mjs     picker, 9 MiB resumable session, batch bar, cancel
+resume-check.mjs     a reloaded page claims its live session and can discard it
 folder-check.mjs     a dropped entry tree keeps folders, nesting and empty dirs
 versions-check.mjs   the history drawer, and its absence on a v1 file
 lock-check.mjs       the advisory edit lock: claim, supersede, release

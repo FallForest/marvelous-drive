@@ -10,6 +10,7 @@
 import { h, raw, mount } from './dom.js';
 import { icon, fileKind, bytes, expiryLabel, kindIcon } from './format.js';
 import { dialog, toast, copyText, withBusy, confirmDialog } from './ui.js';
+import { renderSelect } from './select.js';
 import { api, request, fetchBlob, saveBlob, sharedInfoUrl } from './api.js';
 
 export function absoluteShareUrl(share) {
@@ -33,16 +34,26 @@ export function openShareDialog(node, options) {
   const opts = options || {};
   const listHost = h('div', { class: 'share-list', attrs: { 'aria-live': 'polite' } }, h('p', { class: 'dialog-note', text: '正在载入已有链接…' }));
 
-  const permission = h('select', { class: 'select', attrs: { id: 'share-permission' } },
-    h('option', { attrs: { value: 'viewer' }, text: '仅查看（在线预览）' }),
-    h('option', { attrs: { value: 'downloader' }, text: '可下载' }),
-  );
-  const expiry = h('select', { class: 'select', attrs: { id: 'share-expiry' } },
-    h('option', { attrs: { value: '' }, text: '永不过期' }),
-    h('option', { attrs: { value: '1' }, text: '1 天' }),
-    h('option', { attrs: { value: '7' }, text: '7 天' }),
-    h('option', { attrs: { value: '30' }, text: '30 天' }),
-  );
+  const permission = renderSelect({
+    id: 'share-permission',
+    label: '权限',
+    value: 'viewer',
+    options: [
+      { value: 'viewer', label: '仅查看（在线预览）' },
+      { value: 'downloader', label: '可下载' },
+    ],
+  });
+  const expiry = renderSelect({
+    id: 'share-expiry',
+    label: '有效期',
+    value: '',
+    options: [
+      { value: '', label: '永不过期' },
+      { value: '1', label: '1 天' },
+      { value: '7', label: '7 天' },
+      { value: '30', label: '30 天' },
+    ],
+  });
   const password = h('input', { class: 'input', attrs: { id: 'share-password', type: 'password', autocomplete: 'new-password', placeholder: '留空则不设密码', maxlength: '200' } });
   const maxDownloads = h('input', { class: 'input', attrs: { id: 'share-max', type: 'number', min: '1', step: '1', placeholder: '留空则不限' } });
   const formError = h('div', { class: 'field-error', attrs: { role: 'alert', hidden: 'hidden' } });
@@ -140,6 +151,8 @@ export function openShareDialog(node, options) {
   form.addEventListener('submit', async (event) => {
     event.preventDefault();
     formError.setAttribute('hidden', 'hidden');
+    // The selects expose their value through a property, not `.value`: they are
+    // buttons over the app's own menu, not native form controls.
     const body = {
       permission: permission.value,
       expiresInDays: expiry.value ? Number(expiry.value) : undefined,

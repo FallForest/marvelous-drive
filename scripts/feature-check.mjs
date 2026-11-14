@@ -46,10 +46,12 @@ process.exit(await runBrowserCheck({ title: 'Feature surface check' }, async (pa
   const thumbs = await page.evaluate("document.querySelectorAll('.thumb, .row-thumb, .frow img').length")
   check('image row shows a thumbnail', thumbs >= 1, String(thumbs))
 
+  // A plain click opens now, so selection is driven by the row checkbox — the
+  // gesture the UI actually offers (lib/row-action.js).
   await page.run(() => {
-    const items = Array.from(document.querySelectorAll('[data-id]'))
-    items[0].dispatchEvent(new MouseEvent('click', { bubbles: true }))
-    items[1].dispatchEvent(new MouseEvent('click', { bubbles: true, ctrlKey: true }))
+    const boxes = Array.from(document.querySelectorAll('[data-id] .pick'))
+    boxes[0].click()
+    boxes[1].click()
   })
   await sleep(400)
 

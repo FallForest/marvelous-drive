@@ -11,7 +11,8 @@
 
 import { h, raw, mount } from './dom.js';
 import { icon, bytes } from './format.js';
-import { transferLabel } from './upload.js';
+import { transferLabel, formatSpeed } from './upload.js';
+import { aggregateTasks, summaryLabel, formatEta } from './upload-stats.js';
 
 /* The two transport controls the queue owns; the shared icon set stays untouched. */
 function glyph(body, size) {
@@ -30,7 +31,18 @@ export function createQueuePanel(options) {
   const rows = new Map();
   const list = h('div', { class: 'queue-list' });
   const summary = h('span', { text: '0 个任务' });
+  // The batch readout. A queue of 200 files cannot be read from 200 rows: the
+  // header owns one bar for the whole batch and the numbers behind it.
+  const totalBar = h('i', { style: { transform: 'scaleX(0)' } });
+  const totalFill = h('div', {
+    class: 'qbar qbar-total',
+    attrs: { role: 'progressbar', 'aria-valuemin': '0', 'aria-valuemax': '100', 'aria-valuenow': '0', 'aria-label': '上传总进度' },
+  }, totalBar);
+  const meta = h('span', { class: 'qmeta' });
+  const totals = h('div', { class: 'queue-total', attrs: { hidden: 'hidden' } }, meta, totalFill);
   let paused = false;
+  let totalsTimer = 0;
+  let lastTotalsAt = 0;
 
   const pauseBtn = h('button', {
     class: 'icon-btn',
@@ -62,6 +74,7 @@ export function createQueuePanel(options) {
         on: { click: () => hide() },
       }),
     ),
+    totals,
     list,
   );
   document.body.appendChild(panel);
@@ -78,12 +91,25 @@ export function createQueuePanel(options) {
     panel.setAttribute('hidden', 'hidden');
   }
 
-  function updateSummary() {
+  /**
+   * Repaint the header: the batch one-liner plus one bar for the whole queue.
+   *
+   * Progress events arrive several times a second per task; three tasks in
+   * flight would otherwise relayout this header thirty times a second. Totals
+   * are throttled to ~4Hz and a settled state forces an immediate pass, so the
+   * last number the user reads is always the true one.
+   */
+  function updateSummary(immediate) {
     const tasks = Array.from(rows.values());
     const active = tasks.filter((row) => !isSettled(row.task.state)).length;
+    // History rows are past uploads re-shown from storage: they are not part of
+    // this batch, and counting them would open the bar at 40% before a byte moves.
+    const live = tasks.filter((row) => !row.history && !row.resumable);
+    const resumable = tasks.filter((row) => row.resumable).length;
+    const stats = aggregateTasks(live.map((row) => row.task));
     summary.textContent = paused && active
       ? '已暂停 · ' + active + ' 个待继续'
-      : active ? active + ' 个进行中' : tasks.length + ' 个已完成';
+      : (paused ? '已暂停' : (stats.files ? summaryLabel(stats) : resumable ? resumable + ' 个可继续' : summaryLabel(stats)));
     pauseBtn.setAttribute('aria-label', paused ? '全部继续' : '全部暂停');
     pauseBtn.setAttribute('title', paused ? '全部继续' : '全部暂停');
     pauseBtn.innerHTML = paused ? playIcon(13) : pauseIcon(13);
@@ -93,6 +119,39 @@ export function createQueuePanel(options) {
       return;
     }
     if (!visible) show();
+    paintTotals(stats, immediate === true);
+  }
+
+  /** The batch bar and its numbers. Cheap: one transform, one text node. */
+  function paintTotals(stats, immediate) {
+    const now = Date.now();
+    if (!immediate && now - lastTotalsAt < 240) {
+      if (!totalsTimer) {
+        totalsTimer = setTimeout(() => { totalsTimer = 0; updateSummary(true); }, 260);
+      }
+      return;
+    }
+    lastTotalsAt = now;
+    const ratio = Math.max(0, Math.min(1, Number(stats.ratio) || 0));
+    const pct = Math.round(ratio * 100);
+    totalBar.style.transform = 'scaleX(' + ratio.toFixed(3) + ')';
+    totalFill.setAttribute('aria-valuenow', String(pct));
+    // A single file already shows its own percentage on its row: a second copy
+    // in the header is noise, so the batch readout only appears for a batch.
+    const multi = stats.files > 1;
+    if (multi) totals.removeAttribute('hidden');
+    else totals.setAttribute('hidden', 'hidden');
+    if (!multi) return;
+    // The header already carries "已完成 1/8"; the meta line spends its width on
+    // the numbers that are not up there — bytes, throughput, remaining time.
+    const parts = [];
+    parts.push(bytes(stats.doneBytes) + ' / ' + bytes(stats.totalBytes));
+    if (stats.speed > 0) parts.push(formatSpeed(stats.speed));
+    const eta = formatEta(stats.eta);
+    if (eta) parts.push(eta);
+    else if (stats.hashing > 0 && stats.hashing === stats.active) parts.push('校验中');
+    if (stats.failed) parts.push(stats.failed + ' 个失败');
+    meta.textContent = parts.join(' · ');
   }
 
   const STATE_LABEL = {
@@ -199,11 +258,13 @@ export function createQueuePanel(options) {
   /** Track a task that has not been started yet. */
   function track(task) {
     const entry = ensureRow(task);
-    task.on('progress', () => paint(entry));
-    task.on('state', () => { paint(entry); updateSummary(); });
+    // The row is repainted per event; the header is throttled inside
+    // updateSummary(), so a progress tick is cheap even with the whole batch open.
+    task.on('progress', () => { paint(entry); updateSummary(); });
+    task.on('state', () => { paint(entry); updateSummary(true); });
     task.on('done', () => {
       paint(entry);
-      updateSummary();
+      updateSummary(true);
       // Auto-collapse once everything finished, keeping the rows for retry.
       setTimeout(() => {
         const all = Array.from(rows.values());
@@ -212,6 +273,69 @@ export function createQueuePanel(options) {
     });
     updateSummary();
     return entry;
+  }
+
+  /**
+   * A row for an upload that a reload interrupted but that the server can still
+   * finish: the chunks are on disk and the session has not expired.
+   *
+   * This is not a history row. History is a record of something that ended;
+   * this is an unfinished task whose File object is missing. The row therefore
+   * carries one verb — 继续 — and the caller decides how to rebuild the file
+   * (a stored handle, or a picker that must produce matching bytes).
+   */
+  function trackResumable(item) {
+    const session = item.session || {};
+    const key = 'resume-' + (session.id || session.name);
+    if (rows.has(key)) return rows.get(key);
+    const name = h('span', { class: 'qname', attrs: { title: session.name || '' }, text: session.name || '未命名' });
+    const state = h('span', { class: 'qstate' });
+    const bar = h('i', { style: { transform: 'scaleX(0)' } });
+    const progress = h('div', {
+      class: 'qbar',
+      attrs: { role: 'progressbar', 'aria-valuemin': '0', 'aria-valuemax': '100', 'aria-valuenow': '0', 'aria-label': '可继续上传：' + (session.name || '') },
+    }, bar);
+    const resumeBtn = h('button', {
+      class: 'icon-btn', attrs: { type: 'button', 'aria-label': '继续 ' + (session.name || ''), title: '继续' },
+      html: playIcon(11),
+      on: { click: () => { if (typeof item.onResume === 'function') item.onResume(); } },
+    });
+    const discardBtn = h('button', {
+      class: 'icon-btn', attrs: { type: 'button', 'aria-label': '放弃 ' + (session.name || ''), title: '放弃' },
+      html: icon('x', 11),
+      on: { click: () => { if (typeof item.onDiscard === 'function') item.onDiscard(); } },
+    });
+    const row = h('div', { class: 'qitem is-resumable', dataset: { id: key } },
+      name,
+      state,
+      progress,
+      h('span', { class: 'qactions', style: { gridColumn: '1/-1', justifyContent: 'flex-end', marginTop: '2px' } },
+        resumeBtn, discardBtn),
+    );
+    const ratio = Math.max(0, Math.min(1, item.ratio || 0));
+    const pct = Math.round(ratio * 100);
+    bar.style.transform = 'scaleX(' + ratio.toFixed(3) + ')';
+    progress.setAttribute('aria-valuenow', String(pct));
+    state.className = 'qstate is-resumable';
+    state.textContent = item.label || (pct ? '可继续 · 已传 ' + pct + '%' : '可继续');
+    // Not history: a history row is something that ended. This one is pending,
+    // so it must keep the panel open and be counted in the header.
+    const entry = { task: { id: key, name: session.name, size: session.size, state: 'resumable', progress: ratio, uploaded: 0, speed: 0 }, row, state, bar, progress, history: false, resumable: true };
+    rows.set(key, entry);
+    list.appendChild(row);
+    row.classList.add('motion-rise');
+    updateSummary();
+    return entry;
+  }
+
+  /** Removes a resumable row after the user resumed or discarded it. */
+  function dropResumable(sessionId) {
+    const key = 'resume-' + sessionId;
+    const entry = rows.get(key);
+    if (!entry) return;
+    entry.row.remove();
+    rows.delete(key);
+    updateSummary();
   }
 
   /**
@@ -249,6 +373,8 @@ export function createQueuePanel(options) {
     panel,
     track,
     trackHistory,
+    trackResumable,
+    dropResumable,
     show,
     hide,
     rows,

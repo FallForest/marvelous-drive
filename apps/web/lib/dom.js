@@ -166,10 +166,53 @@ export function trapFocus(container) {
     }
   };
   container.addEventListener('keydown', onKey);
-  const first = focusables()[0];
-  if (first) first.focus();
+  // Focus AFTER the panel is in the document and laid out.
+  //
+  // Focusing synchronously — the caller's node is still detached at that moment
+  // — is silently ignored: the element does not exist yet, the browser keeps
+  // focus on <body>, and every key handler the panel installed is then dead.
+  // A real click on a row proved it: the drawer opened and the arrow keys did
+  // nothing, while a synthetic key dispatched straight at the panel worked,
+  // which is exactly how this hid from the tests.
+  //
+  // `previous` is read at RELEASE time, not here: the caller usually opens an
+  // overlay from inside a click handler, so at this point the active element is
+  // still the old one — but by release time the browser may have moved focus
+  // (a row re-render, a toast). What the user expects is "focus goes back where
+  // I left it", and the opener is the honest answer.
+  const opener = previous && previous !== document.body ? previous : null;
+  const focusFirst = () => {
+    if (!container.isConnected) return;
+    const target = focusables()[0];
+    if (target) target.focus();
+    else if (typeof container.focus === 'function') container.focus({ preventScroll: true });
+    // A panel that lost the race (nothing focusable, or focus was moved on
+    // purpose) still needs to be the active element to receive key events.
+    if (document.activeElement === document.body && typeof container.focus === 'function') {
+      container.focus({ preventScroll: true });
+    }
+  };
+  if (typeof requestAnimationFrame === 'function') requestAnimationFrame(focusFirst);
+  else focusFirst();
   return function release() {
     container.removeEventListener('keydown', onKey);
-    if (previous && typeof previous.focus === 'function' && document.contains(previous)) previous.focus();
+    // Restore in a microtask-free frame: the overlay is removed synchronously
+    // after this returns, and focusing a node that is about to be detached is
+    // another silent no-op.
+    const restore = () => {
+      const target = opener && document.contains(opener) ? opener : null;
+      if (target && typeof target.focus === 'function') {
+        target.focus({ preventScroll: true });
+        return;
+      }
+      // Nothing to go back to: at least do not leave the caret on <body>, where
+      // the next Tab restarts from the top of the document.
+      if (document.activeElement === document.body) {
+        const main = document.querySelector('[data-vt-scope="main"], main');
+        if (main && typeof main.focus === 'function') main.focus({ preventScroll: true });
+      }
+    };
+    if (typeof requestAnimationFrame === 'function') requestAnimationFrame(restore);
+    else restore();
   };
 }

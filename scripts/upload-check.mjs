@@ -83,7 +83,40 @@ process.exit(await runBrowserCheck({ title: 'Upload check' }, async (page, check
   check('9 MiB file uploads through a session', resumable.state === 'done' && resumable.size === 9 * 1024 * 1024, JSON.stringify(resumable))
   check('progress events are emitted', resumable.ticks >= 2, String(resumable.ticks))
 
-  // 3. Cancel.
+  // 3. A batch gets one bar for the whole queue, not just per-row bars.
+  const batch = await page.run(async () => {
+    const input = document.querySelector('input[type=file]')
+    return Boolean(input)
+  })
+  check('file input still mounted for the batch', batch)
+  {
+    for (const name of ['a.txt', 'b.txt', 'c.txt']) {
+      writeFileSync(scratch + '/' + name, 'batch member ' + name + '\n')
+    }
+    const tree = await page.send('DOM.getDocument', { depth: -1 })
+    const field = await page.send('DOM.querySelector', { nodeId: tree.root.nodeId, selector: 'input[type=file]' })
+    await page.send('DOM.setFileInputFiles', {
+      nodeId: field.nodeId,
+      files: ['a.txt', 'b.txt', 'c.txt'].map((name) => scratch + '/' + name),
+    })
+  }
+  await sleep(2600)
+  const header = await page.run(() => {
+    const panel = document.querySelector('.queue')
+    const total = document.querySelector('.qbar-total')
+    const meta = document.querySelector('.qmeta')
+    return {
+      visible: Boolean(panel) && !panel.hasAttribute('hidden'),
+      hasTotals: Boolean(total) && !total.parentElement.hasAttribute('hidden'),
+      meta: meta ? meta.innerText.replace(/\s+/g, ' ').trim() : '',
+      valued: total ? Number(total.getAttribute('aria-valuenow')) : -1,
+    }
+  })
+  check('the queue shows a batch bar for the whole drop', header.hasTotals, JSON.stringify(header))
+  check('the batch bar reports transferred bytes', /\d.*\/.*\d/.test(header.meta), header.meta)
+  check('the batch bar reaches 100% when the drop settles', header.valued === 100, String(header.valued))
+
+  // 4. Cancel.
   const cancelled = await page.run(async () => {
     const api = await import('/lib/upload.js')
     const file = new File([new Uint8Array(3 * 1024 * 1024)], 'cancel-me.bin', { type: 'application/octet-stream' })
@@ -100,7 +133,7 @@ process.exit(await runBrowserCheck({ title: 'Upload check' }, async (page, check
     const payload = await fetch('/api/v1/nodes', { headers: { authorization: 'Bearer ' + token } }).then((r) => r.json())
     return payload.nodes.map((node) => node.name + ':' + node.size)
   })
-  check('server holds exactly the two finished files', listed.length === 2, JSON.stringify(listed))
+  check('server holds exactly the five finished files', listed.length === 5, JSON.stringify(listed))
 
   check('no console errors', page.consoleErrors.length === 0, page.consoleErrors.slice(0, 3).join(' | '))
 }))

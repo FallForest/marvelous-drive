@@ -148,6 +148,10 @@ const ICON_BODY = {
   'more-horizontal': '<circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/><circle cx="5" cy="12" r="1"/>',
   'chevron-right': '<path d="m9 18 6-6-6-6"/>',
   'chevron-down': '<path d="m6 9 6 6 6-6"/>',
+  // Reserved space for a menu row that is not the current choice. It exists so
+  // every label in a list of choices starts on the same x: without it the
+  // checked row's tick shifts that one label to the right.
+  blank: '<path d="M0 0"/>',
   'chevron-up': '<path d="m18 15-6-6-6 6"/>',
   x: '<path d="M18 6 6 18"/><path d="m6 6 12 12"/>',
   check: '<path d="M20 6 9 17l-5-5"/>',
@@ -157,6 +161,7 @@ const ICON_BODY = {
   link: '<path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>',
   'external-link': '<path d="M15 3h6v6"/><path d="M10 14 21 3"/><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/>',
   'arrow-left': '<path d="m12 19-7-7 7-7"/><path d="M19 12H5"/>',
+  'arrow-right': '<path d="m12 5 7 7-7 7"/><path d="M5 12h14"/>',
   copy: '<rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>',
   pencil: '<path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/>',
   move: '<path d="M5 9 2 12l3 3"/><path d="m9 5 3-3 3 3"/><path d="m15 19-3 3-3-3"/><path d="m19 9 3 3-3 3"/><path d="M2 12h20"/><path d="M12 2v20"/>',

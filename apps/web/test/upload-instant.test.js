@@ -200,7 +200,9 @@ describe('resumable session, pause and cancel', () => {
   it('uploads 9 MiB through a session and reports progress', async () => {
     const file = fileOf('big9.bin', 9 * MiB)
     const { client, chunksSent } = chunkedClient({ size: file.size })
-    const task = createUploadTask({ file, api: client })
+    // One chunk lane: this test is about the session protocol, not about how
+    // many chunks overlap. The lane count has its own test.
+    const task = createUploadTask({ file, api: client, chunkParallel: 1 })
     const ticks = []
     task.on('progress', (event) => ticks.push(event.progress))
 
@@ -218,7 +220,7 @@ describe('resumable session, pause and cancel', () => {
     const file = fileOf('pause9.bin', 9 * MiB)
     const stalled = new Set()
     const { client, chunksSent } = chunkedClient({ size: file.size, stallIndex: 1, stalled })
-    const task = createUploadTask({ file, api: client })
+    const task = createUploadTask({ file, api: client, chunkParallel: 1 })
 
     const first = task.start()
     // Wait until chunk 1 is being uploaded (chunk 0 already accepted).
@@ -240,7 +242,7 @@ describe('resumable session, pause and cancel', () => {
     const file = fileOf('cancel9.bin', 9 * MiB)
     const stalled = new Set()
     const { client } = chunkedClient({ size: file.size, stallIndex: 1, stalled })
-    const task = createUploadTask({ file, api: client })
+    const task = createUploadTask({ file, api: client, chunkParallel: 1 })
 
     const running = task.start()
     while (!stalled.has(1)) await new Promise((resolve) => setTimeout(resolve, 2))

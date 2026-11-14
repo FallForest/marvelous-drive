@@ -122,6 +122,11 @@ async function runRetention() {
     if (summary.nodes) {
       console.log(`[retention] purged ${summary.nodes} nodes, ${summary.bytes} bytes, ${summary.blobs} blobs`)
     }
+    // Abandoned upload sessions are the other half of housekeeping: their rows
+    // expire after the TTL but nothing used to delete them or their chunk files.
+    if (summary.sessions || summary.orphanSessions) {
+      console.log(`[retention] dropped ${summary.sessions} expired upload sessions, ${summary.orphanSessions} orphan directories`)
+    }
   } catch (error) {
     console.error('[retention] sweep failed:', error)
   }

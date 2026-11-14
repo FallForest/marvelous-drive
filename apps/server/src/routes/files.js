@@ -57,7 +57,18 @@ const SHA256_RE = /^[a-f0-9]{64}$/
  *      addressed, so the hash is already the cache key.
  */
 const THUMBNAIL_MIME = new Set(['image/jpeg', 'image/png', 'image/webp'])
-const THUMBNAIL_CACHE_CONTROL = 'public, max-age=604800, immutable'
+/**
+ * Cacheable for a week — but never `public`.
+ *
+ * The bytes are behind a bearer token, and this server has no per-user URL: the
+ * same `/files/:id/thumbnail` answers whoever holds a session for that account.
+ * A `public` response is shared by every account in the browser profile, so
+ * signing out and back in as someone else would serve the previous account's
+ * picture out of the HTTP cache. `private` keeps the week-long freshness (the
+ * point of the header) while scoping it to one profile's own cache, and
+ * `Vary: Authorization` keeps a shared proxy honest about the same thing.
+ */
+const THUMBNAIL_CACHE_CONTROL = 'private, max-age=604800, immutable'
 const THUMBNAIL_WIDTH_MIN = 16
 const THUMBNAIL_WIDTH_MAX = 1024
 const THUMBNAIL_WIDTH_DEFAULT = 240
@@ -338,6 +349,8 @@ export function registerFileRoutes(router) {
       acceptRanges: false,
       headers: {
         'cache-control': THUMBNAIL_CACHE_CONTROL,
+        // Two accounts, one URL: the response body depends on who asked.
+        vary: 'Authorization',
         'x-thumbnail-width': String(width),
         // Large originals are still handed over whole: the browser downsamples
         // them itself, but a client that cares may want to know.

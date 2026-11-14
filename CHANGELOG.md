@@ -6,110 +6,293 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-Motion as a layer, not a garnish. Plus a structural pass over the whole repository.
+## [0.20.0] - 2026-11-14
+
+A drive you open with one click, and an upload a reload can no longer throw away.
+
+This section also records the work that reached the tree in 0.19.0–0.19.2 without
+an entry of its own — the motion layer, the `app.js` split and the server layer
+move — at the end of *Added* and *Changed*.
 
 ### Added
 
-- **`scripts/lib/browser.mjs`** — the one Chrome/CDP harness. Eleven check
-  scripts used to carry their own copy of the same eighty lines (find Chrome,
-  spawn, poll `/json/version`, open a page, speak the protocol, tally); the copies
-  had drifted apart, and the drift was the bug surface. A check script is now only
-  its seed data, its interactions and its assertions.
+- **`apps/web/lib/row-action.js`** — the click model as a pure module: a plain
+  click runs the row's action, modifier clicks and the checkbox select. The rows,
+  the grid cards and the keyboard all read the same rule, so they cannot drift.
+- **`scripts/click-check.mjs`** — 23 browser assertions for that model: one
+  click enters a folder, one click previews a file, a double click still leaves
+  one drawer, the checkbox never navigates, Ctrl+click selects, the header
+  checkbox selects all and clears, and the trash keeps selecting.
+- **A picture browser in the preview drawer.** `←`/`→` walk the pictures of the
+  current folder in the order they are listed, `Home`/`End` jump to the ends,
+  the header shows `3 / 12`, and each move is announced to screen readers. The
+  ends clamp instead of wrapping, because on a slow connection a wrap looks like
+  a reload.
+- **`apps/web/lib/gallery.js`** — which files a drawer may walk and which
+  neighbours to warm, as two pure functions. `PREFETCH_RADIUS` is two: that is
+  how many times a person presses by habit before deciding to wait, and the window
+  is recomputed from the current index, so holding the arrow never accumulates
+  requests.
+- **`apps/web/lib/image-fit.js`** — the decode-size policy this server needs:
+  contain-fit to the drawer box, a 1600px long-edge cap and a pixel budget chosen
+  from the platform's texture limit. Without a server-side resizer this is the
+  only lever on decoded memory.
+- **`apps/web/lib/image-size.js`** — reads width and height out of a PNG, JPEG,
+  GIF or WebP header before decoding, so a small picture is never upscaled to the
+  drawer width and the decode box is right the first time.
+- **`apps/web/lib/image-cache.js`** — byte-budgeted LRU of *decoded bitmaps*
+  (64 MiB, 24 entries) keyed by `blobHash`, so two nodes with the same bytes share
+  one bitmap, with a disposer per entry so an evicted `ImageBitmap` is `close()`d
+  instead of waiting for GC.
+- **`apps/web/lib/image-loader.js`** — the route choice and the
+  `createImageBitmap` downsample for one picture. A decoder failure falls back to
+  an `<img>` over an object URL, because a picture that only decodes the slow way
+  is still a picture.
+- **`scripts/gallery-check.mjs`** — 34 browser assertions: arrows and the
+  counter, clamped ends, Home/End, the button and the key agreeing, a non-picture
+  keeping its own preview, and — the two that justify the design — every picture
+  coming from the immutable route and a revisit issuing no request at all.
+- **`scripts/lib/png.mjs`** — a real PNG writer for the checks. A hand-copied
+  base64 fixture fails `createImageBitmap` rather than the request, which reads
+  like a bug in the preview code.
+- **`apps/web/lib/upload-resume.js`** — keeps a `FileSystemFileHandle` in
+  IndexedDB, keyed by (name, size, lastModified), so a reloaded page can hand the
+  server back the file it was already half-way through. Where handles do not
+  exist (Safari, Firefox, a drop instead of a pick) it still returns a plan with
+  `handle: null`, and the row offers to match by name, size and sha256 instead.
+  Every IndexedDB call is guarded: a private window degrades to "no resume", never
+  to a broken page.
+- **`apps/web/lib/upload-stats.js`** — the batch readout: bytes, throughput, ETA
+  and a one-line summary over the whole queue, as pure functions, so the
+  arithmetic (deduplicated bytes, failed bytes, files still hashing) is tested
+  directly. Files still hashing are excluded from the ETA on purpose: that
+  throughput is a CPU number, not a network one.
+- **`scripts/resume-check.mjs`** — 7 browser assertions that a reloaded page
+  claims its live session, says how much is already stored, and can discard it.
+- **`apps/web/lib/select.js`** — the two dropdown shapes the app needs:
+  `renderSelect` for a field and `renderMenu` for a button, both built on
+  `openMenu` so the popup is the app's own surface rather than an OS sheet.
+- **`apps/server/test/upload-chunks.test.js`**, **`upload-complete.test.js`** —
+  the interleaved chunk merge and the four completion paths (adopt an existing
+  blob, skip an existing name, assemble, checksum mismatch) as tests rather than
+  as comments.
+- **Eleven web unit tests** — `row-action`, `gallery`, `image-size`,
+  `image-fit`, `image-cache`, `image-loader`, `upload-stats`,
+  `upload-resume`, `upload-resume-match`, `upload-claim`, `focus-trap`.
+
+### Changed
+
+- **A click now opens.** Clicking a folder enters it; clicking a file opens the
+  preview drawer. Double-click-to-open is gone, because selection no longer owns
+  the first click: the row grew a leading checkbox (and the grid card a corner
+  one) for that, plus Ctrl/Cmd-click, Shift-click and Space. The trash keeps
+  select-on-click, since nothing there is meant to be opened. Explorer's model is
+  the one every web-native surface has already dropped: Notion's sidebar opens a
+  page on a single click (the caret alone toggles the branch), and on a touch
+  screen a double tap does not exist at all.
+- **A double click can no longer open twice.** Two clicks both mean "open" now, so
+  the second one is swallowed for 320ms after an open: otherwise a preview opens
+  two stacked drawers and a double-clicked folder pushes its route twice. A
+  double-clicked row on a folder that has just been entered cannot open the row
+  that landed under the pointer.
+- **Pictures are fetched from the route that may be cached.**
+  `/files/:id/content` answers `must-revalidate`, so every visit re-downloads the
+  bytes; `/files/:id/thumbnail` carries `max-age=604800, immutable` and serves the
+  same bytes. The preview now uses it, and one width is used everywhere: `?w=96`
+  and `?w=1024` are different URLs answering identically, which put one 30 MB
+  photo in the HTTP cache twice.
+- **A picture is decoded to the drawer's box, not to its own size.** A 24 MP photo
+  is 96 MB of RGBA against Chromium's 32 MB decoded-image budget, so a folder of
+  them thrashed on every arrow press. Decoding now happens once, at contain-fit
+  size, with the header read first so a 300px screenshot is never blown up.
+- **Chunks of one file go over two lanes.** One at a time leaves the pipe empty
+  for a full round trip after every 8 MiB, which on a 40ms link is a ceiling well
+  below the line rate; more than two starts to compete with the other files the
+  scheduler is already running. A dropped chunk is retried up to four attempts
+  with a 1/3/9s backoff, and only for failures that are transient by definition —
+  408, 429, 5xx, or a request that never reached the server. A progress bar may
+  pause, it may not retreat: a resumed session keeps the bytes it already
+  delivered on screen instead of snapping back to 0%.
+- **A folder upload runs its files concurrently, largest first.** Awaiting each
+  file made a 200-file folder a 200-request relay — one round trip of latency per
+  file, one connection in flight, and a 200 Mbps link that never went above a few
+  MB/s. The default is still `concurrency: 1`, so a caller that wants a strict
+  order is unaffected; the web client passes the whole list and lets its own
+  scheduler decide.
+- **Completion hashes before it writes.** The digest is now known before any byte
+  is copied, which buys three things: a checksum mismatch is rejected without ever
+  producing the temp file; when the digest is already in the blob store the bytes
+  are adopted directly (`201 { node, deduplicated: true }`) and nothing is copied
+  at all; and each chunk is unlinked as soon as it has been copied into the
+  assembly, so peak disk use is about one copy of the file instead of two — a 2 GiB
+  upload no longer needs 4 GiB free to finish.
+- **The hourly sweep now drops upload sessions.** Expiry used to be purely lazy:
+  `requireSession` deleted a row the moment a client touched it, so a session that
+  was abandoned and never resumed kept its row *and* its chunk directory forever.
+  The sweep deletes both, and also reclaims session directories whose row is
+  already gone. An abandoned upload costs its disk for at most one TTL plus one
+  sweep interval.
+- **The queue header owns the batch bar.** A queue of 200 files cannot be read
+  from 200 rows, so the header carries one bar and one line for the whole batch —
+  bytes, speed, ETA, failures. It is throttled to ~4Hz and a settled state forces
+  an immediate pass, so the last number on screen is always the true one, and it
+  stays hidden for a single file, whose row already shows its own percentage.
+- **Every dropdown is the app's own menu.** The native `<select>` cannot be styled
+  where it counts — the popup list and its highlight are painted by the browser,
+  so a themed control still opens a white (or system-blue) sheet over a near-black
+  UI — and it sizes itself from its widest option, which is how one dropdown drags
+  a toolbar row out of alignment. Sorting, share permission and expiry are now
+  `.select` / `.btn-menu` over `openMenu`: same radius, same shadow, same spring,
+  same Escape stack as every other popup. Rows support `checked`
+  (`role="menuitemradio"` plus a tick), so the current value is visible, and the
+  unchecked rows keep an invisible spacer icon so every label starts on the same x.
+- **The sort control is button-shaped** and sits at the height of the 28px buttons
+  beside it. The old one was 26px tall at 11px type, with a CSS triangle drawn at
+  `13px` of a 26px control — 2px below the optical centre. It is now the shared
+  chevron, which rotates and takes the accent colour when open.
+- **The shell is an interface, not a document.** `base.css` makes the chrome
+  unselectable and removes the caret, and content opts back in: clicking a label
+  used to leave the browser a collapsed caret blinking between two words of a
+  heading, and dragging across the sidebar painted a text highlight over it. File
+  names, previews, counts and error text stay selectable; fields reset both
+  properties so typing keeps a real caret.
+- **An overlay takes focus on the next frame and gives it back to its opener.**
+  `trapFocus()` used to focus synchronously, while the panel was still detached:
+  the browser ignored it, focus stayed on `<body>`, and every key handler the panel
+  had installed was dead. Release now restores focus to the opener in the frame
+  after unmounting, and falls back to the main region rather than to `<body>` (where
+  the next Tab restarts from the top of the document).
+- **An unavailable control is `aria-disabled`, not `disabled`.** A disabled button
+  cannot hold focus, so previous/next going `disabled` at the ends of the gallery
+  dropped the keyboard onto `<body>` exactly when the user was still pressing `→`.
+- **A deployment keeps one image tag.** `TAG_KEEP` (default 1) keeps the tag this
+  run landed on plus the newest entries, by creation time rather than version sort:
+  keeping the highest version is wrong on a downgrade, where the highest number is
+  exactly the image being replaced. The updater also stops rebuilding itself on
+  every run — its Dockerfile copies one `.mjs` file, so a build per update only
+  left the previous image dangling.
+- **The account quota is a compose variable.** `DRIVE_QUOTA_BYTES` (bytes, 0 =
+  unlimited) was hard-coded in one deployment's overlay and absent from the
+  repository's compose, so a fresh checkout silently ran unlimited. On a shared
+  disk that lets one upload fill the volume the OS and the other containers live
+  on. `.env.example` spells out the arithmetic: the client divides by 1024 and
+  labels the result GB, so "150 GB" is 161061273600 bytes, not 150000000000 (which
+  renders as "140 GB").
+- **`scripts/lib/browser.mjs`** — the one Chrome/CDP harness. Eleven check scripts
+  used to carry their own copy of the same eighty lines (find Chrome, spawn, poll
+  `/json/version`, open a page, speak the protocol, tally); the copies had drifted
+  apart, and the drift was the bug surface. A check script is now only its seed
+  data, its interactions and its assertions.
 - **`scripts/run-checks.mjs`** — runs every browser check against one server and
   prints one summary. `pnpm browser-checks`.
 - **`apps/web/lib/session.js`**, **`lib/runtime.js`** — the shared mutable state
   and the verb seam. They are what made splitting `app.js` possible without a
   cycle: a module reads `session` and calls `runtime`, and nothing imports
   `app.js`.
-
-### Changed
-
-- **`apps/web/app.js` went from 1532 lines to a shell and a boot sequence.**
-  The four pages moved to `lib/views.js`, the handler table to `lib/context.js`,
-  the row verbs to `lib/actions.js`, the picker and folder plan to
-  `lib/uploads.js`, and the drag gestures to `lib/dnd.js`. No behaviour change:
-  the 134 web tests and all 15 browser shell checks pass unchanged.
+- **`apps/web/app.js` went from 1532 lines to a shell and a boot sequence.** The
+  four pages moved to `lib/views.js`, the handler table to `lib/context.js`, the
+  row verbs to `lib/actions.js`, the picker and folder plan to `lib/uploads.js`,
+  and the drag gestures to `lib/dnd.js`. No behaviour change: the browser shell
+  checks pass unchanged.
 - **`apps/server/src` is grouped by layer.** `storage/` (backend seam, blobs, s3,
   tiered, cluster, node), `text/` (office, pdf, zip), `ops/` (retention, scrub,
   audit, access-log, search-index, locks, quota, rate-limit). The directory *is*
   the rule: `storage/` knows nothing about HTTP, `text/` knows nothing about the
   database, and `routes/` is the only layer that speaks HTTP.
-- **`docs/STRUCTURE.md`**, `docs/ARCHITECTURE.md` and `docs/DEVELOPMENT.md`
+- **`docs/STRUCTURE.md`**, **`docs/ARCHITECTURE.md`** and **`docs/DEVELOPMENT.md`**
   rewritten around that layering; the map is the test, so it cannot silently rot.
 - **`ci.yml`** calls `scripts/check-syntax.mjs` instead of an inline `find | xargs`,
   which also made the Linux and Windows gates agree.
-
-### Removed
-
-- **`apps/web/lib/ids.js`** — exported `uid()`, which nothing imported.
-- **`apps/server/src/routes/_index.js`** — a documentation-only module whose
-  route table duplicated `index.js` and had already gone stale.
-- **277 MB of `.tmp`** (Chrome profiles and screenshots from past runs) and the
-  crash-leftover `.part` chunk files in `data/tmp`. All of it is rebuildable.
-
-### Fixed
-
-- `scripts/upload-check.mjs` created its scratch file into a directory it never
-  made; the check had been passing only because a previous run left the folder
-  behind.
-
-
-- **`styles/motion.css`** — keyframes, utilities (`.motion-rise`, `.motion-sheet`,
-  `.stagger`, `.press`) and the motion contract, between the tokens and every
-  component. Springs are sampled from a damped oscillator and shipped with a
-  `cubic-bezier` fallback, so an engine that cannot parse `linear()` still eases.
-- **`lib/motion.js`** — the same semantics on the JS side: `prefersReducedMotion()`,
-  the stagger cap, `onceOnRoute()`, `withViewTransition()`, `markAnimating()`.
-  No component repeats 28, 10 or 400 any more.
-- **`scripts/motion-lint.mjs`** — the ten-rule static linter, vendored so CI does
-  not need the skill installed. Wired into `ci.yml`.
-- **`scripts/feel-check.mjs`** — 27 runtime checks a linter cannot see: a real
-  pointer press shrinks a row, row 13 waits 280ms and not 364, a star toggle does
-  not replay the row entrance, the view-transition flag is released, no
-  `will-change` is left standing.
-- **`docs/UI-MOTION.md`** — layer model, vocabulary, the ten rules, and how to add
-  motion to a new surface.
-
-### Changed
-
-- **Press feedback everywhere it was missing.** `.btn`, `.icon-btn`, `.side-row`,
-  `.frow`, `.gcard`, `.menu-item`, `.segmented button`, `.crumb` and `.user-row`
-  now shrink on `:active` on the instant token. Hover changes colour; press
-  changes scale.
 - **Durations and curves retuned to an intent scale** — `--duration-instant/fast/
-  base/slow` at 80/140/220/320ms, replacing `--dur-fast`/`--dur`/`--ease`. The
-  old names are gone rather than aliased: an alias keeps a second vocabulary
-  alive, and the whole point is that there is one.
+  base/slow` at 80/140/220/320ms, replacing `--dur-fast`/`--dur`/`--ease`. The old
+  names are gone rather than aliased: an alias keeps a second vocabulary alive, and
+  the whole point is that there is one.
 - **Overlays present and dismiss properly.** Dialogs spring from `scale(.97)`,
   drawers slide from the inline end, menus arrive from the edge they are anchored
-  to, and all three play a 140ms exit before unmounting instead of vanishing.
-  A toast is removed on `animationend`, not on a guessed 200ms.
+  to, and all three play a 140ms exit before unmounting instead of vanishing. A
+  toast is removed on `animationend`, not on a guessed 200ms.
 - **One entrance per navigation.** The `.view` column cross-fades through View
   Transitions when the route token changes; a local re-render paints plainly. On
   first paint the rows stagger, and the root keeps `.motion-enter` until the
   **last** row settles.
-- **The hard-coded hex hover borders** (`#434a56`) are gone; hover uses
-  `--border-strong`.
 
 ### Fixed
 
-- **Staggered rows could flash.** The entrance class used to be removed on the
-  root's own `animationend` at 220ms, while row 10 was still waiting out its
-  280ms delay. Removing the class cancels those rows mid-flight, and a cancelled
-  animation has no fill — they snapped back to `opacity:0`. The class now lives
-  until the last row settles.
+- **A menu opened inside a dialog was painted underneath it.** `--z-menu` was 60
+  and `--z-modal` 70, so any menu a dialog opened was behind the scrim — present
+  in the DOM, invisible on screen. It never showed before because the dialogs only
+  held native selects and never opened an app menu. `--z-menu` is now 75: above
+  the modal, below the toast.
+- **The thumbnail route answered `cache-control: public` and had no `Vary`.**
+  Those bytes are behind a bearer token, and a `public` response is shared by every
+  account in the same browser profile: sign out, sign in as someone else, and the
+  previous account's picture could come straight out of the HTTP cache. It is now
+  `private, max-age=604800, immutable` plus `Vary: Authorization` — the week of
+  freshness is kept, the cross-account read is gone.
+- **The preview drawer opened and the arrow keys did nothing.** `trapFocus()`
+  called `focus()` synchronously, before the panel was in the document; the browser
+  ignored it, focus stayed on `<body>`, and the panel's key listeners heard
+  nothing. The old check dispatched `keydown` straight at the panel element, which
+  is why it stayed green. Focus is deferred to the next frame, and the check now
+  presses real keys over CDP.
+- **The keyboard died at the last picture.** Previous/next used `disabled` at the
+  ends, and a disabled button cannot hold focus: one press at the end dropped focus
+  to `<body>` and every key after that went nowhere — precisely when the user was
+  still pressing `→` to find out whether it wraps.
+- **Closing an overlay left focus on `<body>` instead of the button that opened
+  it.** `release()` captured its restore target at open time without excluding
+  `<body>`; it now excludes it and restores in the frame after release, so focus
+  lands back on the opener (or at worst on the main region, not the top of the
+  document).
+- **The decoded size was computed from the box's long edge, so a landscape photo
+  decoded at twice the pixels it needed.** In a 559px drawer a 6000×4000 photo was
+  decoded to 867px tall (1600px wide) — about 2.4× the memory it could show. It is
+  now a real contain fit (`min(bw·dpr/sw, bh·dpr/sh)`), with the true dimensions
+  read from the file header first, so a small picture is never enlarged.
+- **The preview's picture was not vertically centred.** `flex:1` was attached to a
+  plain block wrapper, where it is inert; `.preview-stage{display:flex;
+  flex-direction:column;flex:1 1 0}` is what actually puts the picture in the middle.
+- **`lib/preview.js` called a function it never imported.** `galleryOf` used
+  `isGalleryImage` while the import list did not have it, so opening any file
+  preview threw a `ReferenceError`. The browser check had been failing for reasons
+  unrelated to this batch; fixed here.
+- **A merge of chunk indexes could silently lose one.** Updating `received` with
+  the set read before the request body was consumed is a read-modify-write on a
+  stale snapshot: when a client sent several chunks at once, or two tabs resumed
+  the same session, the chunk that finished first was dropped from the row — the
+  bytes were on disk, the row forgot them, and `complete` answered
+  `409 UPLOAD_INCOMPLETE` forever. The merge now re-reads the row inside a
+  transaction.
+- **`complete` could adopt bytes that were not there.** A `blobs` row can outlive
+  its file, and adopting from it produced a node that 500s on download. "Already
+  stored" is asked of the backend, not of the database.
+- **Staggered rows could flash.** The entrance class was removed on the root's own
+  `animationend` at 220ms while row 10 was still waiting out its 280ms delay;
+  removing the class cancels those rows mid-flight, and a cancelled animation has
+  no fill, so they snapped back to `opacity:0`. The class now lives until the last
+  row settles.
 - **A loading skeleton consumed the page's entrance.** Recording the route token
   while the skeleton was up made the real content count as "already entered", so
   the first list never animated.
 - **`.skip-link` and the upload progress bar transitioned layout properties**
-  (`top`, `width`). Both are transforms now: the skip link slides in, the bar
+  (`top`, `width`). Both are transforms now: the skip link slides in, and the bar
   scales from the left instead of relayouting a row several times a second.
 - **The reduced-motion block killed every entrance.** A document-wide
   `animation:none !important` cancelled in-flight animations, which have no fill,
   so elements blinked before settling. Durations collapse in `tokens.css` instead,
   and only looping animations are slowed here.
-- **The search field painted two focus rings** — the wrapper's `box-shadow` plus
-  the inner input's outline, the inner one covering the `/` hint.
+- **The search field painted two focus rings** — the wrapper's `box-shadow` plus the
+  inner input's outline, the inner one covering the `/` hint.
+- **`scripts/upload-check.mjs` wrote its scratch file into a directory it never
+  created**, and had been passing only because a previous run left the folder behind.
+
+### Removed
+
+- **`apps/web/lib/ids.js`** — exported `uid()`, which nothing imported.
+- **`apps/server/src/routes/_index.js`** — a documentation-only module whose route
+  table duplicated `index.js` and had already gone stale.
+- **277 MB of `.tmp`** (Chrome profiles and screenshots from past runs) and the
+  crash-leftover `.part` chunk files in `data/tmp`. All of it is rebuildable.
 
 ## [0.19.2] - 2026-11-13
 

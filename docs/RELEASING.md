@@ -6,7 +6,7 @@ How a version reaches a deployment, and when to cut one.
 
 Release in batches, not per commit.
 
-Each release costs a tag, a changelog section, a version bump across three
+Each release costs a tag, a changelog section, a version bump across two
 `package.json` files plus `release/latest.json`, and a deploy with a rollback
 window. Paying that for a one-line fix is noise. Cut a release when:
 
@@ -40,9 +40,11 @@ known-good. What waiting costs is only that the running image lags `main`.
 ## Steps
 
 1. Confirm the batch is coherent: `pnpm test`, `pnpm lint`, `pnpm check` clean.
-2. Bump the version in `package.json`, `apps/server/package.json`,
-   `packages/cli/package.json`, and `release/latest.json` (all four `version`
-   fields plus the three URLs in the manifest).
+2. Bump the version in `package.json`, `apps/server/package.json` and
+   `release/latest.json` (all three `version` fields plus the three URLs in the
+   manifest). `packages/cli/package.json` has its own version line and moves only
+   when the CLI does — the drive reports `apps/server`'s, and the CLI is not in
+   the image.
 3. Write one `CHANGELOG.md` section for the whole batch, grouped by
    Added / Changed / Fixed / Removed. A changelog entry is for someone deciding
    whether to upgrade, not a commit log.
