@@ -58,8 +58,12 @@ queue, or a build step: `node:sqlite` is transactional, `node:http` streams, and
   the copies can be dropped, and image rows show a real thumbnail.
 - **Activity log** — every mutation is recorded and readable from the account
   menu, newest first and grouped by day.
-- **Edit locks** — opening a file takes an advisory lock so a second window learns
-  someone else is editing. It never blocks a write, and it expires on its own.
+- **File browsing and editing** — photo previews support left/right swipes on
+  touchscreens, previous/next buttons and keyboard navigation in list order.
+  Text and Markdown files up to 2 MiB can be explicitly edited, with version-
+  checked saves, history and unsaved-draft protection. Read-only previews leave
+  edit locks alone; entering the editor takes an advisory lock. See
+  [docs/PREVIEW_AND_EDITING.md](docs/PREVIEW_AND_EDITING.md).
 - **Workspaces** — every account owns a drive; add a second account by e-mail and
   the two share a tree. `?workspace=` widens the listing (and `mdrive ls/tree/cat
   --workspace` do the same from a terminal); files you create stay in your own
@@ -160,6 +164,9 @@ node scripts/smoke.mjs            # 20 API checks against a running instance
 node scripts/browser-check.mjs    # 15 checks: login, list, preview, trash, share, mobile
 node scripts/feature-check.mjs    #  9 checks: thumbnails, batch bar, drag, duplicates
 node scripts/dnd-check.mjs        # native mouse drags, thumbnails, groups and destinations
+node scripts/mobile-preview-check.mjs # native phone swipes, touch controls, audio/video
+node scripts/preview-race-check.mjs # late image decodes and GIF previews
+node scripts/editor-check.mjs     # saves, conflicts, encodings and unsaved drafts
 node scripts/interaction-check.mjs # grid fallbacks, nested buttons, multi-select Delete
 node scripts/move-check.mjs       # picker cancellation, root, keyboard, nesting and conflicts
 node scripts/versions-check.mjs   #  7 checks: version drawer, download, v1 has none

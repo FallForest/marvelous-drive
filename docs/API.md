@@ -89,7 +89,7 @@ Uploads and copies therefore auto-suffix ` (1)`, ` (2)` when needed.
 | PUT | `/uploads?parentId=&name=&onConflict=` | Raw body; creates a file or resolves the name collision (`201` created, `200` overwritten/skipped) |
 | POST | `/uploads/instant` | JSON `{ name, sha256, size, parentId?, mime?, onConflict? }`; node for an already stored blob → `201 { node, deduplicated: true }` |
 | GET | `/blobs/:sha256` | `{ exists, sha256, size, refs }` for a stored blob; `404 NOT_FOUND`; `400` unless 64 lowercase hex |
-| PUT | `/files/:id/content` | Raw body, replaces content, appends a version, `X-Checksum-Sha256` optional; `?onConflict=skip` writes nothing |
+| PUT | `/files/:id/content` | Raw body, replaces content, appends a version; optional `?expectedVersion=N` returns `409 VERSION_CONFLICT` for a stale version, checked atomically after receiving the body. `X-Checksum-Sha256` optional; `?onConflict=skip` writes nothing |
 | GET | `/files/:id/content` | Streams the blob; `Range` → `206`; `?download=1` → attachment |
 | GET | `/files/:id/text` | `{ text, truncated, mime }` (first 512 KiB by default, `?limit=`) |
 | GET | `/files/:id/versions` | `{ versions: [{ id, version, size, mime, createdBy, createdAt }], currentVersion }` |
@@ -328,7 +328,7 @@ unique per folder across the workspace.
 | --- | --- | --- |
 | GET | `/nodes/:id/lock` | `{ lock: null \| { nodeId, userId, client, acquiredAt, expiresAt } }` |
 | POST | `/nodes/:id/lock` | `{ client?, ttlMs?, force? }` → `{ lock, tookOver, supersededClient }`; `409 LOCKED` for another user's live lock |
-| DELETE | `/nodes/:id/lock` | `{ released }`; `403` when the caller is not the holder |
+| DELETE | `/nodes/:id/lock` | `{ released }`; optional `?client=ID` releases only that client's lease; `403` when the caller is not the holder |
 
 `409 LOCKED` carries the holder's client in the message (the envelope has no
 other field) and `409` + `force: true` takes over, recorded as

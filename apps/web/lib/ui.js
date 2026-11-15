@@ -21,7 +21,6 @@ function pushLayer(close) {
 export function closeTopLayer() {
   const top = layers[layers.length - 1];
   if (!top) return false;
-  layers.pop();
   try { top.close(); } catch (error) { console.warn('[mdrive] overlay close failed', error); }
   return true;
 }
@@ -248,7 +247,9 @@ export function promptDialog(options) {
 
 /* ── drawer ───────────────────────────────────────────────────── */
 /**
- * drawer({ title, sub, body, footer, width, className, onClose })
+ * drawer({ title, sub, body, footer, width, className, beforeClose, onClose })
+ * beforeClose(handle) may asynchronously veto with false; close resolves to
+ * whether the drawer closed. Body/footer may be factories receiving the handle.
  * Slides from the right, traps focus, Escape closes it.
  */
 export function drawer(options) {
@@ -276,10 +277,6 @@ export function drawer(options) {
     body,
     footer,
   );
-  append(body, [opts.body]);
-  append(footer, [opts.footer]);
-  if (!footer.childElementCount) footer.remove();
-
   const scrim = h('div', {
     class: 'scrim scrim-drawer',
     on: { mousedown: (event) => { if (event.target === scrim) handle.close(); } },
@@ -287,17 +284,32 @@ export function drawer(options) {
   document.body.appendChild(scrim);
   const release = trapFocus(panel);
   const pop = pushLayer(() => handle.close());
+  let pendingClose = null;
+  const finishClose = () => {
+    if (handle.closed) return true;
+    handle.closed = true;
+    release();
+    pop();
+    dismissOverlay(panel, scrim);
+    if (typeof opts.onClose === 'function') opts.onClose();
+    return true;
+  };
   const handle = {
     el: panel, body, footer, scrim, closed: false,
     close() {
-      if (handle.closed) return;
-      handle.closed = true;
-      release();
-      pop();
-      dismissOverlay(panel, scrim);
-      if (typeof opts.onClose === 'function') opts.onClose();
+      if (handle.closed) return Promise.resolve(true);
+      if (pendingClose) return pendingClose;
+      if (typeof opts.beforeClose !== 'function') return Promise.resolve(finishClose());
+      pendingClose = Promise.resolve().then(() => opts.beforeClose(handle))
+        .then((allowed) => allowed === false ? false : finishClose())
+        .catch((error) => { console.warn('[mdrive] drawer close cancelled', error); return false; })
+        .finally(() => { pendingClose = null; });
+      return pendingClose;
     },
   };
+  append(body, [typeof opts.body === 'function' ? opts.body(handle) : opts.body]);
+  append(footer, [typeof opts.footer === 'function' ? opts.footer(handle) : opts.footer]);
+  if (!footer.childElementCount) footer.remove();
   return handle;
 }
 

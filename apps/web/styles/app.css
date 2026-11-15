@@ -305,6 +305,9 @@ body.is-moving .frow,body.is-moving .gcard{cursor:grabbing}
 /* Prev/next live in the header, next to the title, because that is where the
    hand already is: the footer holds download/share/details. */
 .preview-nav{display:flex;align-items:center;gap:2px;flex:0 0 auto}
+.preview-gesture-hint{display:none}
+.preview-body.is-gallery{touch-action:pan-y pinch-zoom;overscroll-behavior-x:contain}
+.preview-body.is-page-zoomed{touch-action:auto}
 /* The control stays focusable at the ends (no `disabled`) so the keyboard never
    loses its place; this is the visual half of that decision. */
 .preview-nav .icon-btn[aria-disabled="true"]{opacity:.35;cursor:default}
@@ -465,6 +468,13 @@ body.is-moving .frow,body.is-moving .gcard{cursor:grabbing}
 
 /* ═══ responsive ══════════════════════════════════════════════ */
 @media (max-width:880px){
+  .preview-drawer .drawer-head{height:auto;min-height:56px;padding-top:env(safe-area-inset-top);padding-right:max(8px,env(safe-area-inset-right));padding-left:max(12px,env(safe-area-inset-left))}
+  .preview-drawer .drawer-head h2{flex:1;flex-direction:column;align-items:flex-start;gap:2px}
+  .preview-drawer .drawer-head .title-text{max-width:100%}
+  .preview-drawer .drawer-head .icon-btn{min-width:44px;min-height:44px}
+  .preview-drawer .drawer-foot{flex-wrap:wrap;padding-bottom:max(10px,env(safe-area-inset-bottom));padding-left:max(12px,env(safe-area-inset-left));padding-right:max(12px,env(safe-area-inset-right))}
+  .preview-drawer .drawer-foot .btn{min-height:44px}
+  .preview-gesture-hint:not([hidden]){display:block;flex:none;text-align:center;padding:8px 12px;margin:0;color:var(--text-muted);font-size:var(--fs-xs)}
   .nav-toggle{display:inline-flex}
   /* two columns on small screens: name + a compact meta line, no star column
      (starring stays available from the row menu and the grid card) */

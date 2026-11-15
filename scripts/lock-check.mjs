@@ -1,8 +1,7 @@
 #!/usr/bin/env node
 /**
- * Edit-lock check: opening a file in the preview drawer claims the advisory
- * edit lock, a second window of the same account is told the lock moved, and
- * closing the drawer releases it.
+ * Read-only preview leaves the advisory lock alone. Entering the text editor
+ * claims it, announces a superseded window and releases it on close.
  *
  * The lock itself is unit-tested in apps/server/test/locks.test.js. What only a
  * browser can prove is the client half: that the drawer claims on open, that the
@@ -45,10 +44,20 @@ process.exit(await runBrowserCheck({ title: 'Edit lock check' }, async (page, ch
 
   await page.reload({ settle: 2000 })
   await openRow(page, node)
-  await sleep(1600)
+  await page.waitFor("document.querySelector('.preview-drawer')")
+  const previewLock = await page.run(async (nodeId) => {
+    const response = await fetch('/api/v1/nodes/' + nodeId + '/lock', {
+      headers: { authorization: 'Bearer ' + localStorage.getItem('mdrive-token') },
+    })
+    return (await response.json()).lock
+  }, node)
+  check('read-only preview leaves the existing edit lock alone', previewLock?.client === 'tab-other-window', JSON.stringify(previewLock))
+  await page.run(() => [...document.querySelectorAll('.preview-drawer button')].find(button => button.textContent.includes('编辑文本')).click())
+  await page.waitFor("document.querySelector('.text-editor-drawer textarea')")
+  await sleep(900)
 
   const banner = await page.evaluate("(document.querySelector('.lock-banner') || {}).innerText || ''")
-  check('the drawer announces the lock it took over', /tab-other-window/.test(banner), JSON.stringify(banner))
+  check('the editor announces the lock it took over', /tab-other-window/.test(banner), JSON.stringify(banner))
 
   const held = await page.run(async (nodeId) => {
     const token = localStorage.getItem('mdrive-token')

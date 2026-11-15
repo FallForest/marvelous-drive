@@ -93,7 +93,7 @@ export function registerNodeRoutes(router) {
   router.delete('/api/v1/nodes/:id/lock', async (ctx) => {
     const user = userFromRequest(ctx.req, ctx.url)
     const row = requireNode(user.id, ctx.params.id)
-    const result = releaseLock(row.id, user.id)
+    const result = releaseLock(row.id, user.id, { client: ctx.url.searchParams.get('client') ?? undefined })
     sendJson(ctx.res, 200, result)
   })
 

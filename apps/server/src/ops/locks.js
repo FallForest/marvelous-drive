@@ -89,7 +89,7 @@ export function acquireLock(nodeId, userId, { client = '', ttlMs = LOCK_TTL_MS, 
 }
 
 /** Releases a lock the caller owns; releasing someone else's is a no-op error. */
-export function releaseLock(nodeId, userId) {
+export function releaseLock(nodeId, userId, { client } = {}) {
   const existing = activeLock(nodeId)
   if (!existing) return { released: false, reason: 'no-lock' }
   if (existing.userId !== userId) {
@@ -97,6 +97,8 @@ export function releaseLock(nodeId, userId) {
     error.lock = existing
     throw error
   }
-  db.prepare('DELETE FROM node_locks WHERE node_id=?').run(nodeId)
-  return { released: true }
+  const result = client === undefined
+    ? db.prepare('DELETE FROM node_locks WHERE node_id=? AND user_id=?').run(nodeId, userId)
+    : db.prepare('DELETE FROM node_locks WHERE node_id=? AND user_id=? AND client=?').run(nodeId, userId, client)
+  return result.changes ? { released: true } : { released: false, reason: 'different-client' }
 }

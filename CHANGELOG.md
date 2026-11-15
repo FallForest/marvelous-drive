@@ -6,6 +6,70 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.24.0] - 2026-11-15
+
+Browsing photos with a thumb, and editing a text file on purpose.
+
+### Added
+
+- **`apps/web/lib/gallery-gesture.js`** — single-finger horizontal navigation for
+  the photo drawer. The thresholds are project choices, not borrowed numbers:
+  44–96px of travel (15% of the stage), horizontal movement at least 1.5× the
+  vertical, under 1.2s, and a 24px edge exclusion so the OS back gesture still
+  works. `touch-action: pan-y pinch-zoom` leaves vertical scrolling and pinch
+  zoom native, and a gesture that commits to vertical never turns back into a
+  photo change.
+- **`apps/web/lib/text-editor.js`** — explicit text and Markdown editing for
+  files up to 2 MiB. It reads metadata before content, preserves the UTF-8 BOM
+  and the file's own newline style, and saves with `expectedVersion`.
+- **`apps/server/test/content-edit.test.js`** — the version precondition, the
+  atomic write, and the conflict path, as tests.
+- **`scripts/mobile-preview-check.mjs`** — native touch swipes, the 44px
+  controls, safe-area padding, and audio/video playback stops on close.
+- **`scripts/preview-race-check.mjs`** — a late image decode cannot paint over a
+  newer photo, and an animated picture is not frozen to its first frame.
+- **`scripts/editor-check.mjs`** — saves, conflicts, encodings and unsaved-draft
+  protection.
+- **`docs/PREVIEW_AND_EDITING.md`** — the research table behind these decisions
+  (Apple Photos, Pointer Events, WCAG 2.5.1 / 2.5.5 / 2.5.8, WAI carousel), what
+  is deliberately out of scope (a zoom/pan engine, offline autosave), and the
+  one case only a physical device can settle.
+
+### Changed
+
+- **A read-only preview no longer takes an edit lock.** Merely looking at a file
+  used to claim the advisory lock, so a second window was told someone was
+  editing when nobody was. The lock now begins when the editor opens, and it is
+  still advisory — it never blocks a write.
+- **Saving is a conditional write.** `PUT /files/:id/content` accepts
+  `expectedVersion`; the version check, the history row, the quota delta and the
+  replacement all happen inside one transaction, after the body has been spooled.
+  A concurrent writer now gets `409 VERSION_CONFLICT` instead of silently
+  overwriting, and the earlier read-modify-write on a stale row is gone.
+- **Releasing a lock is scoped to the client that took it.** `DELETE
+  /nodes/:id/lock` accepts `?client=`, and a release from a different window
+  reports `different-client` instead of dropping someone else's lock.
+- **The drawer can veto its own close.** `drawer({ beforeClose })` may answer
+  asynchronously, and `close()` resolves to whether it actually closed — which is
+  what lets a dirty draft ask **继续编辑 / 放弃更改 / 保存并关闭** instead of
+  discarding silently. `closeTopLayer()` no longer pops the layer stack before
+  the overlay has agreed to close.
+- **Image responses carry a render revision**, so a download that finishes late
+  is dropped rather than painted over the photo the user is now looking at.
+
+### Fixed
+
+- **`closeTopLayer()` removed the layer before the overlay closed.** A drawer
+  that declined to close (or an editor that was about to ask a question) was
+  already off the Escape stack, so the next Escape did nothing. The layer is now
+  popped only once the close completes.
+- **Two files ended without a trailing newline** (`ops/locks.js`,
+  `routes/nodes.js`, `routes/files.js`), which shows up as a spurious final-line
+  diff on every later change to them.
+- **`docs/STRUCTURE.md` had drifted again** — `gallery-gesture.js`,
+  `text-editor.js`, the three new checks and `PREVIEW_AND_EDITING.md` were
+  missing.
+
 ## [0.23.0] - 2026-11-15
 
 One move operation, reachable by drag, menu and keyboard — and the same

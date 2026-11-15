@@ -1,4 +1,4 @@
-import { db, nowIso } from '../db.js'
+import { db, nowIso, transaction } from '../db.js'
 import { userFromRequest } from '../auth.js'
 import { config } from '../config.js'
 import { fail, sendBlob, sendJson, spoolBody } from '../http.js'
@@ -254,6 +254,14 @@ export function registerFileRoutes(router) {
   router.put('/api/v1/files/:id/content', async (ctx) => {
     const user = userFromRequest(ctx.req, ctx.url)
     const row = requireFile(user.id, ctx.params.id)
+    const expectedRaw = ctx.url.searchParams.get('expectedVersion')
+    let expectedVersion
+    if (expectedRaw !== null) {
+      expectedVersion = Number(expectedRaw)
+      if (!/^[1-9]\d*$/.test(expectedRaw) || !Number.isSafeInteger(expectedVersion)) {
+        ctx.fail(400, 'INVALID_INPUT', 'expectedVersion must be a positive integer.')
+      }
+    }
     const onConflict = normalizeConflictStrategy(ctx.url.searchParams.get('onConflict'))
     if (onConflict === 'rename') {
       await discardBody(ctx.req)
@@ -275,17 +283,27 @@ export function registerFileRoutes(router) {
       await releaseBlob(blob.hash)
       ctx.fail(409, 'CHECKSUM_MISMATCH', 'The uploaded bytes do not match X-Checksum-Sha256.')
     }
+    let previous
+    let updated
     try {
-      assertWithinQuota(user.id, blob.size, row.size)
+      // Body spooling yields to other writers. Check the live version only
+      // after those awaits, together with history and replacement atomically.
+      transaction(() => {
+        previous = requireFile(user.id, row.id)
+        if (expectedVersion !== undefined && previous.version !== expectedVersion) {
+          ctx.fail(409, 'VERSION_CONFLICT', 'This file has changed. Reload it before saving again.')
+        }
+        assertWithinQuota(user.id, blob.size, previous.size)
+        recordVersion(previous, user.id)
+        db.prepare('UPDATE nodes SET size=?, mime=?, blob_hash=?, version=version+1, updated_at=? WHERE id=?')
+          .run(blob.size, mime, blob.hash, nowIso(), row.id)
+        updated = requireFile(user.id, row.id)
+      })
     } catch (error) {
       await releaseBlob(blob.hash)
       throw error
     }
-    recordVersion(row, user.id)
-    db.prepare('UPDATE nodes SET size=?, mime=?, blob_hash=?, version=version+1, updated_at=? WHERE id=?')
-      .run(blob.size, mime, blob.hash, nowIso(), row.id)
-    if (row.blob_hash) await releaseBlob(row.blob_hash)
-    const updated = requireFile(user.id, row.id)
+    if (previous.blob_hash) await releaseBlob(previous.blob_hash)
     await indexNode({ ...updated, user_id: user.id })
     sendJson(ctx.res, 200, { node: nodeJson(updated) })
   })

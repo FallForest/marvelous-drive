@@ -133,12 +133,14 @@ lib/
   format.js       Bytes, dates, icons, markdown rendering
   files.js        File rows, breadcrumbs, drag & drop, context actions
   gallery.js      Which files a picture drawer can walk, and which to prefetch
+  gallery-gesture.js Swipe thresholds and pointer handling for photo navigation
   image-cache.js  Byte-budgeted LRU of decoded bitmaps (disposes on eviction)
   image-fit.js    How big to decode: contain-fit, long-edge cap, pixel budget
   image-loader.js Route choice + createImageBitmap downsampling for one picture
   image-size.js   Reads width/height from a PNG/JPEG/GIF/WebP header
   row-action.js   What a click means: action vs. selection (see the rules below)
-  preview.js      Preview drawer: image, PDF, text, markdown, edit lock
+  preview.js      Preview drawer: image, PDF, text, markdown, media, edit lock
+  text-editor.js  Explicit text editing: version check, encodings, dirty drafts
   upload.js       Simple + resumable upload, sha256, chunk lanes, retry, progress
   upload-queue.js Scheduler singleton: concurrency 3, pause/resume, history, claims
   upload-resume.js  FileSystemFileHandle store (IndexedDB) + session matching
@@ -259,6 +261,9 @@ office-check.mjs     extracts and renders real pptx/docx/xlsx samples
 team-check.mjs       the team panel lists and labels roles
 feel-check.mjs       runtime motion: press, stagger cap, VT flag, replay
 motion-lint.mjs      static: the ten motion rules (CI gate)
+mobile-preview-check.mjs native phone swipes, touch controls, audio/video
+preview-race-check.mjs late image decodes and animated picture rendering
+editor-check.mjs     explicit editing, version conflicts, unsaved drafts
 check-syntax.mjs     node --check over the whole repo
 dead-code.mjs        static: unreachable modules, exports nothing imports (npm run dead-code)
 s3-fixture.mjs       S3 server that verifies SigV4 (no Docker needed)
@@ -282,4 +287,5 @@ test/                node --test suites for the shared script helpers
 | `SECURITY.md` | Threat model, auth, blob integrity, operational hygiene |
 | `DEPLOYMENT.md` | Running it in production |
 | `INTERACTIONS.md` | Click, move and keyboard model, and the pointer-free alternative to dragging |
+| `PREVIEW_AND_EDITING.md` | Photo browsing, swipe thresholds, and the explicit text editor |
 | `ROADMAP-STORAGE.md` | Storage roadmap and what is deliberately out of scope |

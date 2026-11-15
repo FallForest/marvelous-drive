@@ -19,7 +19,9 @@ import {
   positionLabel, prefetchWindow, stepIndex,
 } from './gallery.js';
 import { createImageCache } from './image-cache.js';
-import { loadPicture } from './image-loader.js';
+import { imageRequestUrl, loadPicture } from './image-loader.js';
+import { attachGallerySwipe } from './gallery-gesture.js';
+import { canEditText, openTextEditor } from './text-editor.js';
 
 const TEXT_PREVIEW_LIMIT = 2 * 1024 * 1024; // 2 MiB of text is plenty for a peek
 const IMAGE_PREVIEW_LIMIT = 40 * 1024 * 1024;
@@ -81,10 +83,10 @@ export function openPreview(node, options) {
   const counted = list.length > 1;
 
   const body = h('div', { class: 'preview-body centered' });
-  const bannerHost = h('div', { class: 'lock-host' });
   const objectUrls = [];
   let disposed = false;
-  let lock = null;
+  let paintRevision = 0;
+  let swipe = null;
   /** Pending picture requests: { controller, targetIndex }. See cancelPrefetch(). */
   const inflight = new Set();
   const track = (controller, targetIndex) => {
@@ -119,8 +121,13 @@ export function openPreview(node, options) {
   const nav = h('div', { class: 'preview-nav' }, prevBtn, nextBtn);
   const historyBtn = h('button', {
     class: 'btn', attrs: { type: 'button', hidden: 'hidden' },
-    on: { click: () => openVersionHistory(current, opts) },
+    on: { click: () => openVersionHistory(current, { ...opts, onChanged: onFileChanged }) },
   }, raw(icon('clock', 14)), '历史版本');
+  const editBtn = h('button', {
+    class: 'btn', attrs: { type: 'button', hidden: !canEditText(current) },
+    on: { click: () => openTextEditor(current, { onSaved: onFileChanged }) },
+  }, raw(icon('pencil', 14)), '编辑文本');
+  const gestureHint = h('p', { class: 'preview-gesture-hint', text: '左右滑动切换照片，也可点按上方箭头' });
 
   const handle = drawer({
     title: current.name,
@@ -131,14 +138,15 @@ export function openPreview(node, options) {
     // plain block, `flex:1` on .preview-body is inert and a short picture sits
     // at the top of the drawer instead of in the middle of it.
     body: h('div', { class: 'preview-stage' },
-      bannerHost,
       // Announced on every move: "第 3 张，共 12 张：海边.jpg". A screen reader
       // cannot see that the picture changed, and the counter in the header is
       // aria-hidden decoration next to it.
       h('div', { class: 'visually-hidden preview-announce', attrs: { role: 'status', 'aria-live': 'polite' } }),
       body,
+      gestureHint,
     ),
     footer: [
+      editBtn,
       h('button', {
         class: 'btn', attrs: { type: 'button' },
         on: { click: () => { if (opts.onDownload) opts.onDownload(current); } },
@@ -158,7 +166,10 @@ export function openPreview(node, options) {
       disposed = true;
       for (const { controller } of inflight) controller.abort();
       inflight.clear();
-      if (lock) lock.release();
+      swipe?.destroy();
+      // Removing media nodes stops playback before their object URLs go away.
+      for (const media of body.querySelectorAll('video,audio')) media.pause();
+      body.replaceChildren();
       for (const url of objectUrls) URL.revokeObjectURL(url);
       objectUrls.length = 0;
       // The module cache outlives the drawer on purpose: reopening the same
@@ -169,11 +180,21 @@ export function openPreview(node, options) {
   // Arrow keys belong to the picture, not to the scroll container. The listener
   // lives on the panel because the focus trap keeps focus inside it.
   handle.el.addEventListener('keydown', (event) => {
+    if (!counted || !isGalleryImage(current) || event.defaultPrevented || event.altKey || event.ctrlKey || event.metaKey
+      || event.target.closest?.('input,textarea,select,video,audio,[contenteditable="true"]')) return;
     const delta = arrowDelta(event.key) || jumpDelta(event.key, index, list.length);
     if (!delta) return;
     event.preventDefault();
     step(delta);
   });
+  swipe = attachGallerySwipe(body, { enabled: () => !disposed && counted && isGalleryImage(current), onStep: step });
+
+  function onFileChanged(updated) {
+    if (disposed) return;
+    if (updated) Object.assign(current, updated);
+    paint();
+    if (opts.onChanged) opts.onChanged(updated);
+  }
 
   /** Moves the drawer to another picture; the chrome and the body follow. */
   function step(delta) {
@@ -232,21 +253,24 @@ export function openPreview(node, options) {
       // A live region, not the title: the drawer is a layer over the page, and
       // the page's <title> still describes the folder.
       const spoken = handle.el.querySelector('.preview-announce');
-      if (spoken) spoken.textContent = '第 ' + (index + 1) + ' 张，共 ' + list.length + ' 张：' + current.name;
+      if (spoken) spoken.textContent = isGalleryImage(current)
+        ? '第 ' + (index + 1) + ' 张，共 ' + list.length + ' 张：' + current.name
+        : '预览：' + current.name;
       const hasHistory = current.kind === 'file' && (current.version || 1) > 1;
       if (hasHistory) historyBtn.removeAttribute('hidden');
       else historyBtn.setAttribute('hidden', 'hidden');
+      editBtn.hidden = !canEditText(current);
+      const gallery = counted && isGalleryImage(current);
+      body.classList.toggle('is-gallery', gallery);
+      gestureHint.hidden = !gallery;
     }
-    if (lock) lock.release();
-    // A picture is not a document: there is nothing to lock, and one POST per
-    // arrow press would be pure noise.
-    lock = pictureKind(current) ? NO_LOCK : createEditLock(current);
-    if (lock.banner) mount(bannerHost, lock.banner);
-    else bannerHost.replaceChildren();
     paintBody();
   }
 
   function paintBody() {
+    const revision = ++paintRevision;
+    const gone = () => disposed || revision !== paintRevision;
+    swipe?.cancel();
     body.classList.remove('centered');
     body.style.padding = '';
     const kind = current.kind === 'folder' ? 'folder' : fileKind(current.mime, current.name);
@@ -262,27 +286,27 @@ export function openPreview(node, options) {
       return;
     }
     if (kind === 'image') {
-      loadImage(current, body, { disposed: () => disposed, objectUrls, track, untrack });
+      loadImage(current, body, { disposed: gone, objectUrls, track, untrack });
       prefetchNeighbours();
       return;
     }
     if (kind === 'audio' || kind === 'video') {
-      loadMedia(current, kind, body, objectUrl, () => disposed);
+      loadMedia(current, kind, body, objectUrl, gone);
       return;
     }
     if (kind === 'pdf') {
       body.style.padding = '0';
-      loadPdf(current, body, objectUrl);
+      loadPdf(current, body, objectUrl, gone);
       return;
     }
     if (isTextLike(current.mime, current.name)) {
-      loadText(current, body, kind === 'markdown' || isMarkdown(current.mime, current.name));
+      loadText(current, body, kind === 'markdown' || isMarkdown(current.mime, current.name), gone);
       return;
     }
     body.classList.add('centered');
     if (isOfficeKind(kind)) {
       body.classList.remove('centered');
-      loadOfficePreview({ host: body, node: current, request, disposed: () => disposed });
+      loadOfficePreview({ host: body, node: current, request, disposed: gone });
       return;
     }
     mount(body, notice('此格式暂不支持在线预览。', '下载后使用本地应用打开。', kindIcon(kind, current.name)));
@@ -344,57 +368,6 @@ function galleryOf(node, gallery) {
   return [node].concat(list);
 }
 
-
-/**
- * Acquires (and releases) the advisory edit lock for a file.
- *
- * Two states are worth showing: "another tab is editing this" when the claim is
- * refused, and nothing at all in the normal case. The banner is the whole UI — a
- * lock that takes over a toolbar would be more intrusive than the problem it
- * solves.
- */
-function createEditLock(node) {
-  const banner = h('div', { class: 'lock-banner', attrs: { hidden: 'hidden', role: 'status', 'aria-live': 'polite' } });
-  if (!node || node.kind !== 'file') return { banner, release() {} };
-
-  const client = 'tab-' + Math.random().toString(36).slice(2, 10);
-  let held = false;
-  const show = (text, tone) => {
-    banner.textContent = text;
-    banner.className = 'lock-banner' + (tone ? ' is-' + tone : '');
-    banner.removeAttribute('hidden');
-  };
-
-  request('/nodes/' + node.id + '/lock', { method: 'POST', body: { client } })
-    .then((payload) => {
-      held = true
-      // A second window of the same user is never blocked, but it is worth a
-      // sentence: two tabs editing one file is the case this lock exists for.
-      if (payload && payload.supersededClient) {
-        show('此文件的编辑锁刚从「' + payload.supersededClient + '」转到这里，那个窗口若继续保存会覆盖。', 'warn')
-      }
-    })
-    .catch((error) => {
-      // 409 carries the holder; 401/404 mean there is nothing to say.
-      if (error && error.status === 409) {
-        // The server puts the holder's client id in the message.
-        const who = String((error && error.message) || '').replace(/ is editing this file\.$/, '');
-        show((who || '另一个窗口') + ' 正在编辑此文件，保存可能互相覆盖。', 'warn');
-        return;
-      }
-      if (error && error.status === 404) return;
-    });
-
-  return {
-    banner,
-    release() {
-      if (!held) return;
-      // Fire and forget: the TTL is the safety net if this never arrives.
-      request('/nodes/' + node.id + '/lock', { method: 'DELETE' }).catch(() => {});
-      held = false;
-    },
-  };
-}
 
 function notice(title, hint, iconName) {
   return h('div', { class: 'empty' },
@@ -494,14 +467,6 @@ async function loadImage(node, body, context) {
   }
 }
 
-/** True when the node renders as a picture in this drawer. */
-function pictureKind(node) {
-  return !!node && fileKind(node.mime, node.name) === 'image';
-}
-
-/** A picture is not a document: there is nothing to edit, so nothing to lock. */
-const NO_LOCK = Object.freeze({ banner: null, release() {} });
-
 /** The frame a bitmap is painted into; the canvas keeps the aspect ratio. */
 function pictureFrame(node, bitmap) {
   const width = bitmap.width || 1;
@@ -556,17 +521,19 @@ function legacyImage(node, blob, objectUrls) {
   );
 }
 
-async function loadPdf(node, body, objectUrl) {
+async function loadPdf(node, body, objectUrl, disposed) {
   const status = h('div', { class: 'empty', style: { padding: '32px' } }, h('span', { class: 'spinner' }), h('p', { text: '正在载入 PDF…' }));
   body.replaceChildren(status);
   try {
     const blob = await fetchBlob(contentUrl(node.id));
+    if (disposed()) return;
     const frame = h('iframe', {
       class: 'preview-frame',
       attrs: { src: objectUrl(new Blob([blob], { type: 'application/pdf' })), title: 'PDF 预览：' + node.name },
     });
     body.replaceChildren(frame);
   } catch (error) {
+    if (disposed()) return;
     body.replaceChildren(notice('无法载入 PDF。', (error && error.message) || '请重试。', 'file-pdf'));
   }
 }
@@ -576,7 +543,7 @@ async function loadMedia(node, kind, body, objectUrl, disposed) {
   body.replaceChildren(status);
   try {
     const blob = await fetchBlob(contentUrl(node.id));
-    if (disposed) return;
+    if (disposed()) return;
     if (kind === 'video') {
       body.replaceChildren(h('video', { class: 'preview-media', attrs: { controls: 'controls', src: objectUrl(blob), playsinline: 'playsinline' } }));
     } else {
@@ -586,6 +553,7 @@ async function loadMedia(node, kind, body, objectUrl, disposed) {
       ));
     }
   } catch (error) {
+    if (disposed()) return;
     body.replaceChildren(notice('无法载入媒体。', (error && error.message) || '请重试。', 'file-audio'));
   }
 }
@@ -598,7 +566,7 @@ function escapeSuffix(value) {
     .replace(/>/g, '&gt;');
 }
 
-async function loadText(node, body, markdown) {
+async function loadText(node, body, markdown, disposed) {
   body.classList.remove('centered');
   const status = h('div', { class: 'empty', style: { padding: '32px' } }, h('span', { class: 'spinner' }), h('p', { text: '正在载入文本…' }));
   body.replaceChildren(status);
@@ -607,6 +575,7 @@ async function loadText(node, body, markdown) {
     const truncated = blob.size > TEXT_PREVIEW_LIMIT;
     const slice = truncated ? blob.slice(0, TEXT_PREVIEW_LIMIT) : blob;
     const text = await slice.text();
+    if (disposed()) return;
     if (markdown) {
       const article = h('article', { class: 'preview-md' });
       article.innerHTML = renderMarkdown(text);
@@ -631,6 +600,7 @@ async function loadText(node, body, markdown) {
       }
     }
   } catch (error) {
+    if (disposed()) return;
     body.replaceChildren(notice('无法载入文本。', (error && error.message) || '请重试。', 'file-text'));
   }
 }
@@ -729,12 +699,12 @@ async function restoreVersion(node, entry, drawerHandle, opts) {
   });
   if (!yes) return;
   try {
-    await request('/files/' + node.id + '/versions/' + entry.id + '/restore', {
+    const restored = await request('/files/' + node.id + '/versions/' + entry.id + '/restore', {
       method: 'POST', body: { expectedVersion: node.version },
     });
     toast('已恢复到 v' + entry.version, { type: 'success' });
     drawerHandle.close();
-    if (opts && opts.onChanged) opts.onChanged();
+    if (opts && opts.onChanged) opts.onChanged(restored.node);
   } catch (error) {
     toast((error && error.message) || '恢复失败。', { type: 'error' });
   }

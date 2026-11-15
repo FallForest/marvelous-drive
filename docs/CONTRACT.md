@@ -286,7 +286,12 @@ A lock says "someone is editing this"; it is **not** a write barrier.
   is `403`.
 - The same user in a second window is never blocked: the lock moves to the newest
   client and `supersededClient` names the window that lost it, which is what the
-  preview drawer shows.
+  text editor shows. Read-only previews do not acquire a lock.
+- `DELETE /api/v1/nodes/:id/lock?client=ID` releases only a matching client lease;
+  a superseded window leaves the newer client's lease intact.
+- `PUT /api/v1/files/:id/content?expectedVersion=N` checks the live version
+  atomically after reading the body. A stale version returns `409 VERSION_CONFLICT`
+  without changing content or history. Omitting it preserves the legacy API.
 - A lock **expires** so a crashed client cannot hold a file, and a write is
   **never** refused because of a lock â€?`expectedVersion` is the mechanism that
   prevents lost updates.
