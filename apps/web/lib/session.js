@@ -37,6 +37,10 @@ export const session = {
   lastRefreshAt: 0,
   /** The handle returned by renderAuth(), destroyed when the shell mounts. */
   authHandle: null,
+  /** True when the next renderShell() is a navigation and should place focus. */
+  pendingRouteFocus: false,
+  /** True while the user is driving the page with the keyboard (see app.js). */
+  keyboardNav: false,
   /** True once the upload history has been restored from storage. */
   uploadsRestored: false,
   /** Node ids in the current drag, if any. */

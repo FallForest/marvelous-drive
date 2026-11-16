@@ -158,6 +158,8 @@ lib/
   sidebar.js      Sidebar tree, breadcrumbs, toolbar
   motion.js       Motion semantics on the JS side: timings, stagger cap, VT guard
   select.js       Dropdowns built from the app's own menu (no native <select>)
+  shortcuts.js    The single-character shortcut switch (WCAG 2.1.4), persisted
+  focus.js        Popup registry + focusRouteContent(): where focus goes after a close
   updates.js      The update banner: manifest read, apply, progress polling
 styles/
   index.css       Entry: imports the layers below in cascade order
@@ -264,6 +266,7 @@ motion-lint.mjs      static: the ten motion rules (CI gate)
 mobile-preview-check.mjs native phone swipes, touch controls, audio/video
 preview-race-check.mjs late image decodes and animated picture rendering
 editor-check.mjs     explicit editing, version conflicts, unsaved drafts
+ui-regression-check.mjs 38 assertions across the 2026-11-15 audit's 21 cases
 check-syntax.mjs     node --check over the whole repo
 dead-code.mjs        static: unreachable modules, exports nothing imports (npm run dead-code)
 s3-fixture.mjs       S3 server that verifies SigV4 (no Docker needed)
@@ -288,4 +291,5 @@ test/                node --test suites for the shared script helpers
 | `DEPLOYMENT.md` | Running it in production |
 | `INTERACTIONS.md` | Click, move and keyboard model, and the pointer-free alternative to dragging |
 | `PREVIEW_AND_EDITING.md` | Photo browsing, swipe thresholds, and the explicit text editor |
+| `audits/2026-11-15-ui/` | The interaction audit as written, and the fix for each finding |
 | `ROADMAP-STORAGE.md` | Storage roadmap and what is deliberately out of scope |

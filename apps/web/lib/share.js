@@ -8,7 +8,7 @@
  */
 
 import { h, raw, mount } from './dom.js';
-import { icon, fileKind, bytes, expiryLabel, kindIcon } from './format.js';
+import { icon, fileKind, bytes, expiryLabel, kindIcon, formatDate } from './format.js';
 import { dialog, toast, copyText, withBusy, confirmDialog } from './ui.js';
 import { renderSelect } from './select.js';
 import { api, request, fetchBlob, saveBlob, sharedInfoUrl } from './api.js';
@@ -27,6 +27,84 @@ function shareStateLabel(share) {
   if (share.maxDownloads) bits.push('限 ' + share.downloads + '/' + share.maxDownloads + ' 次');
   else bits.push('已下载 ' + (share.downloads || 0) + ' 次');
   return bits.join(' · ');
+}
+
+/* ── public URLs and capability model ─────────────────────────── */
+/*
+ * Every public route is a function of (token, password): the password is what
+ * unlocks the link, so it has to ride along on each follow-up request. Building
+ * the URLs in one place keeps a viewer from silently losing the password when
+ * it opens the second file of a folder.
+ */
+function publicQuery(password, extra) {
+  const query = new URLSearchParams();
+  if (password) query.set('password', password);
+  const fields = extra || {};
+  for (const key of Object.keys(fields)) {
+    const value = fields[key];
+    if (value === undefined || value === null) continue;
+    query.set(key, String(value));
+  }
+  const text = query.toString();
+  return text ? '?' + text : '';
+}
+
+/** Inline bytes of the shared file itself; both permissions may read it. */
+export function sharePreviewUrl(token, password) {
+  return '/shared/' + encodeURIComponent(token) + '/preview' + publicQuery(password);
+}
+
+/** Attachment of the shared file; the server rejects a viewer link. */
+export function shareContentUrl(token, password) {
+  return '/shared/' + encodeURIComponent(token) + '/content' + publicQuery(password);
+}
+
+/** Direct children of a folder share; parentId defaults to the shared folder. */
+export function shareChildrenUrl(token, password, parentId) {
+  return '/shared/' + encodeURIComponent(token) + '/children' + publicQuery(password, parentId ? { parentId } : null);
+}
+
+/** One file inside a folder share, inline (preview) or as an attachment. */
+export function shareFileUrl(token, nodeId, password, download) {
+  const path = '/shared/' + encodeURIComponent(token) + '/file/' + encodeURIComponent(nodeId);
+  return path + publicQuery(password, download ? null : { inline: 1 });
+}
+
+/** The folder share as one ZIP; downloader only. */
+export function shareArchiveUrl(token, password) {
+  return '/shared/' + encodeURIComponent(token) + '/archive' + publicQuery(password);
+}
+
+/**
+ * What a link may offer, derived from its permission.
+ *
+ * The server is the authority (it 403s /content and /archive for a viewer); this
+ * copy exists so the page does not paint a button that can only fail.
+ */
+export function shareCapabilities(permission) {
+  const downloader = permission === 'downloader';
+  return { download: downloader, downloadAll: downloader };
+}
+
+/** Second line of a folder row: a folder is a folder, a file is size + date. */
+export function shareEntryMeta(entry) {
+  if (!entry) return '';
+  if (entry.kind === 'folder') return '文件夹';
+  const when = formatDate(entry.updatedAt);
+  return when ? bytes(entry.size) + ' · ' + when : bytes(entry.size);
+}
+
+/**
+ * File kinds the public page can render without a download.
+ *
+ * Anything else (an archive, a video, a .docx) gets an honest "download to open"
+ * note instead of a broken frame, and the download button is the only action.
+ */
+const PREVIEWABLE = new Set(['image', 'pdf', 'markdown', 'text', 'code']);
+
+/** True when the public page has a renderer for this file. */
+export function canPreviewShared(mime, name) {
+  return PREVIEWABLE.has(fileKind(mime, name));
 }
 
 /** Open the share dialog for one node. options: { onChanged } */
@@ -281,66 +359,90 @@ export function renderShared(root, token, ctx) {
     requestAnimationFrame(() => input.focus());
   };
 
-  const ready = (share) => {
-    if (!share || !share.node) { missing(); return; }
-    const node = share.node;
-    const kind = fileKind(node.mime, node.name);
-    const canDownload = share.permission === 'downloader';
-    const passwordSuffix = state.password ? '?password=' + encodeURIComponent(state.password) : '';
+  const copyLinkButton = () => h('button', {
+    class: 'btn',
+    attrs: { type: 'button' },
+    on: {
+      click: async () => {
+        const ok = await copyText(window.location.href);
+        toast(ok ? '链接已复制。' : '复制失败，请手动复制地址栏。', { type: ok ? 'success' : 'error' });
+      },
+    },
+  }, raw(icon('link', 14)), '复制本页链接');
 
-    const downloadBtn = h('button', {
-      class: 'btn btn-primary',
+  /**
+   * One fetch-and-save button.
+   *
+   * A viewer is never handed one of these (the server answers 403), so the
+   * failure copy below only has to explain the states a real downloader meets:
+   * an expired link, an exhausted budget, or a transport problem.
+   */
+  const downloadButton = ({ label, url, filename, primary, iconName }) => {
+    const button = h('button', {
+      class: primary ? 'btn btn-primary' : 'btn btn-ghost',
       attrs: { type: 'button' },
       on: {
         click: async () => {
-          withBusy(downloadBtn, true);
+          withBusy(button, true);
           try {
-            const blob = await fetchBlob('/shared/' + encodeURIComponent(token) + '/content' + passwordSuffix);
-            saveBlob(blob, node.name);
+            const blob = await fetchBlob(url);
+            saveBlob(blob, filename);
           } catch (err) {
             const message = err && err.code === 'SHARE_NOT_FOUND'
               ? '链接已失效或达到下载上限。'
-              : (err && err.message) || '下载失败。';
+              : err && err.code === 'FORBIDDEN'
+                ? '该链接只允许在线查看。'
+                : (err && err.message) || '下载失败。';
             toast(message, { type: 'error' });
           } finally {
-            withBusy(downloadBtn, false);
+            withBusy(button, false);
           }
         },
       },
-    }, raw(icon('download', 14)), canDownload ? '下载文件' : '下载 / 查看');
+    }, raw(icon(iconName || 'download', 14)), label);
+    return button;
+  };
 
-    const copyBtn = h('button', {
-      class: 'btn',
-      attrs: { type: 'button' },
-      on: {
-        click: async () => {
-          const ok = await copyText(window.location.href);
-          toast(ok ? '链接已复制。' : '复制失败，请手动复制地址栏。', { type: ok ? 'success' : 'error' });
-        },
-      },
-    }, raw(icon('link', 14)), '复制本页链接');
-
+  /**
+   * The page for a link that points at a single file.
+   *
+   * Viewer: preview is the only action. Downloader: the attachment comes first,
+   * because that is the thing they were given access to.
+   */
+  const readyFile = (share, node) => {
+    const kind = fileKind(node.mime, node.name);
+    const caps = shareCapabilities(share.permission);
     const previewHost = h('div', { class: 'stack', attrs: { style: 'gap:10px;margin-top:14px' } });
+    const previewable = canPreviewShared(node.mime, node.name);
+
     let previewOpen = false;
-    const togglePreview = h('button', {
-      class: 'btn btn-ghost',
+    const previewBtn = h('button', {
+      class: caps.download ? 'btn btn-ghost' : 'btn btn-primary',
       attrs: { type: 'button', 'aria-expanded': 'false' },
-      text: '在线预览',
       on: {
         click: async () => {
           previewOpen = !previewOpen;
-          togglePreview.textContent = previewOpen ? '收起预览' : '在线预览';
-          togglePreview.setAttribute('aria-expanded', previewOpen ? 'true' : 'false');
+          mount(previewBtn, raw(icon('eye', 14)), previewOpen ? '收起预览' : '在线预览');
+          previewBtn.setAttribute('aria-expanded', previewOpen ? 'true' : 'false');
           if (!previewOpen) { previewHost.replaceChildren(); return; }
-          await renderSharedPreview(previewHost, node, token, state.password, kind);
+          await renderSharedPreview(previewHost, node, token, state.password, kind, sharePreviewUrl(token, state.password));
         },
       },
-    });
+    }, raw(icon('eye', 14)), '在线预览');
 
-    const meta = node.kind === 'folder'
-      ? '文件夹'
-      : bytes(node.size) + ' · ' + (canDownload ? '可下载' : '仅在线查看');
+    const actions = h('div', { class: 'public-actions' });
+    if (caps.download) {
+      actions.appendChild(downloadButton({
+        label: '下载文件',
+        url: shareContentUrl(token, state.password),
+        filename: node.name,
+        primary: true,
+      }));
+    }
+    if (previewable) actions.appendChild(previewBtn);
+    actions.appendChild(copyLinkButton());
 
+    const meta = bytes(node.size) + (caps.download ? ' · 可下载' : ' · 仅在线查看');
     mount(card,
       header(),
       h('div', { class: 'public-file' },
@@ -350,7 +452,153 @@ export function renderShared(root, token, ctx) {
           h('small', { text: meta }),
         ),
       ),
-      h('div', { class: 'public-actions' }, downloadBtn, copyBtn, togglePreview),
+      actions,
+      previewHost,
+      previewable ? null : h('p', {
+        class: 'public-note',
+        text: caps.download ? '该格式不支持在线预览，请下载后查看。' : '该格式不支持在线预览。',
+      }),
+      h('p', {
+        class: 'public-note',
+        text: share.expiresAt
+          ? '此链接' + expiryLabel(share.expiresAt) + '，由分享者设置。'
+          : '此链接长期有效，分享者可随时撤销。',
+      }),
+    );
+    document.title = node.name + ' · Marvelous Drive';
+  };
+
+  /**
+   * The page for a link that points at a folder.
+   *
+   * The browser walks one level at a time through /children (the server only
+   * answers for ids inside the shared subtree) and keeps the trail in memory:
+   * a recipient's history entry is the link, not every folder they clicked, so
+   * the Back button leaves the share instead of un-nesting it.
+   */
+  const readyFolder = (share, node) => {
+    const caps = shareCapabilities(share.permission);
+    const trail = [{ id: node.id, name: node.name, kind: 'folder' }];
+    const listHost = h('div', { class: 'stack', attrs: { style: 'gap:8px;margin-top:12px' } });
+    const crumbHost = h('div', { class: 'crumbs', attrs: { 'aria-label': '所在位置' } });
+    const previewHost = h('div', { class: 'stack', attrs: { style: 'gap:10px;margin-top:12px' } });
+    let openToken = 0;
+
+    const renderCrumbs = () => {
+      const children = [];
+      trail.forEach((item, index) => {
+        if (index) children.push(h('span', { class: 'crumb-sep', html: icon('chevron-right', 13) }));
+        const last = index === trail.length - 1;
+        if (last) children.push(h('span', { class: 'crumb', attrs: { 'aria-current': 'page' }, text: item.name }));
+        else {
+          children.push(h('button', {
+            class: 'crumb',
+            attrs: { type: 'button', title: item.name },
+            text: item.name,
+            on: { click: () => { trail.length = index + 1; renderCrumbs(); void openFolder(item.id); } },
+          }));
+        }
+      });
+      mount(crumbHost, children);
+    };
+
+    const rowFor = (entry) => {
+      const kind = entry.kind === 'folder' ? 'folder' : fileKind(entry.mime, entry.name);
+      const row = h('button', {
+        class: 'public-file',
+        attrs: { type: 'button', style: 'width:100%;text-align:left;margin-bottom:0' },
+        on: {
+          click: () => {
+            if (entry.kind === 'folder') {
+              trail.push({ id: entry.id, name: entry.name, kind: 'folder' });
+              renderCrumbs();
+              void openFolder(entry.id);
+              return;
+            }
+            void openEntry(entry);
+          },
+        },
+      },
+        h('span', { class: 'picon', html: icon(kindIcon(kind, entry.name), 18) }),
+        h('div', { class: 'stack', attrs: { style: 'gap:2px;min-width:0;flex:1' } },
+          h('b', { text: entry.name }),
+          h('small', { text: shareEntryMeta(entry) }),
+        ),
+      );
+      // The row is a button, so a nested button would be invalid markup: the
+      // per-item download rides beside it in the same flex box instead.
+      if (caps.download && entry.kind !== 'folder') {
+        return h('div', { class: 'row', attrs: { style: 'gap:6px;align-items:stretch' } },
+          row,
+          downloadButton({
+            label: '下载',
+            url: shareFileUrl(token, entry.id, state.password, true),
+            filename: entry.name,
+            iconName: 'download',
+          }),
+        );
+      }
+      return row;
+    };
+
+    /** Opens one file of the folder: preview for a viewer, preview + download for a downloader. */
+    const openEntry = async (entry) => {
+      const kind = fileKind(entry.mime, entry.name);
+      if (!canPreviewShared(entry.mime, entry.name)) {
+        mount(previewHost, h('p', {
+          class: 'public-note',
+          text: caps.download ? entry.name + '：该格式不支持在线预览，请下载后查看。' : entry.name + '：该格式不支持在线预览。',
+        }));
+        return;
+      }
+      await renderSharedPreview(previewHost, entry, token, state.password, kind, shareFileUrl(token, entry.id, state.password, false));
+    };
+
+    const openFolder = async (parentId) => {
+      const requestId = ++openToken;
+      previewHost.replaceChildren();
+      mount(listHost, h('div', { class: 'empty' }, h('span', { class: 'spinner' }), h('p', { text: '正在读取文件夹…' })));
+      try {
+        const payload = await request(shareChildrenUrl(token, state.password, parentId), { auth: false });
+        // A slower answer for a folder the visitor has already left must not
+        // overwrite the one they are looking at.
+        if (requestId !== openToken) return;
+        const entries = payload && Array.isArray(payload.entries) ? payload.entries : [];
+        if (!entries.length) {
+          mount(listHost, h('div', { class: 'empty' }, h('b', { text: '这个文件夹是空的' }), h('p', { text: '分享者还没有放东西进来。' })));
+          return;
+        }
+        mount(listHost, entries.map(rowFor));
+      } catch (error) {
+        if (requestId !== openToken) return;
+        mount(listHost, h('p', { class: 'public-note', text: (error && error.message) || '读取文件夹失败。' }));
+      }
+    };
+
+    const actions = h('div', { class: 'public-actions' });
+    if (caps.downloadAll) {
+      actions.appendChild(downloadButton({
+        label: '下载全部(ZIP)',
+        url: shareArchiveUrl(token, state.password),
+        filename: node.name + '.zip',
+        primary: true,
+        iconName: 'file-archive',
+      }));
+    }
+    actions.appendChild(copyLinkButton());
+
+    mount(card,
+      header(),
+      h('div', { class: 'public-file' },
+        h('span', { class: 'picon', html: icon('folder', 18) }),
+        h('div', { class: 'stack', attrs: { style: 'gap:2px;min-width:0;flex:1' } },
+          h('b', { text: node.name }),
+          h('small', { text: caps.download ? '文件夹 · 可下载' : '文件夹 · 仅在线查看' }),
+        ),
+      ),
+      actions,
+      crumbHost,
+      listHost,
       previewHost,
       h('p', {
         class: 'public-note',
@@ -360,6 +608,14 @@ export function renderShared(root, token, ctx) {
       }),
     );
     document.title = node.name + ' · Marvelous Drive';
+    renderCrumbs();
+    void openFolder(node.id);
+  };
+
+  const ready = (share) => {
+    if (!share || !share.node) { missing(); return; }
+    if (share.node.kind === 'folder') readyFolder(share, share.node);
+    else readyFile(share, share.node);
   };
 
   async function load() {
@@ -380,32 +636,49 @@ export function renderShared(root, token, ctx) {
 
   load();
   return {
-    destroy() { root.replaceChildren(); },
+    destroy() {
+      // Object URLs are per-document and live until revoked: a folder the visitor
+      // browsed through would otherwise keep every previewed file in memory.
+      for (const element of root.querySelectorAll('[data-object-url]')) URL.revokeObjectURL(element.dataset.objectUrl);
+      root.replaceChildren();
+    },
   };
 }
 
-async function renderSharedPreview(host, node, token, password, kind) {
+/**
+ * Loads inline bytes for one public file and renders them.
+ *
+ * `url` is built by the caller because the two surfaces need different routes:
+ * the shared file itself goes through /preview, a file inside a folder share
+ * through /file/:nodeId (which the server answers inline for a viewer).
+ */
+async function renderSharedPreview(host, node, token, password, kind, url) {
+  // A folder share re-uses the same host for one preview after another: an
+  // object URL that is never revoked pins the whole previous file in memory.
+  if (host.dataset.objectUrl) {
+    URL.revokeObjectURL(host.dataset.objectUrl);
+    delete host.dataset.objectUrl;
+  }
   mount(host, h('div', { class: 'empty' }, h('span', { class: 'spinner' }), h('p', { text: '正在载入预览…' })));
-  const suffix = password ? '?password=' + encodeURIComponent(password) : '';
-  let objectUrl = null;
+  const source = url || sharePreviewUrl(token, password);
   try {
-    const blob = await fetchBlob('/shared/' + encodeURIComponent(token) + '/content' + suffix);
-    objectUrl = URL.createObjectURL(blob);
-    if (kind === 'image') {
-      mount(host, h('img', { class: 'preview-media', attrs: { alt: node.name, src: objectUrl } }));
-      return;
-    }
-    if (kind === 'pdf') {
-      mount(host, h('iframe', { class: 'preview-frame', attrs: { src: objectUrl, title: node.name } }));
+    const blob = await fetchBlob(source);
+    if (kind === 'image' || kind === 'pdf') {
+      const objectUrl = URL.createObjectURL(blob);
+      host.dataset.objectUrl = objectUrl;
+      if (kind === 'image') mount(host, h('img', { class: 'preview-media', attrs: { alt: node.name, src: objectUrl } }));
+      // The public card is a block, not a flex column, so a frame that relies on
+      // `flex:1` would fall back to the 150px default and show one page corner.
+      else mount(host, h('iframe', { class: 'preview-frame', attrs: { src: objectUrl, title: node.name, style: 'height:min(60vh,520px)' } }));
       return;
     }
     if (kind === 'markdown' || kind === 'text' || kind === 'code') {
-      const text = await blob.text();
-      mount(host, h('pre', { class: 'preview-text', text }));
+      const body = await blob.text();
+      mount(host, h('pre', { class: 'preview-text', text: body }));
       return;
     }
     mount(host, h('p', { class: 'public-note', text: '该格式不支持在线预览，请下载后查看。' }));
   } catch (error) {
-    mount(host, h('p', { class: 'public-note', text: (error && error.message) || '无法载入预览。' }));
+    mount(host, h('p', { class: 'public-note', text: (error && error.message) || '预览载入失败。' }));
   }
 }

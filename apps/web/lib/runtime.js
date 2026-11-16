@@ -32,6 +32,8 @@ export const runtime = {
   uploadFiles() {},
   /** The folder a drop should land in, or undefined when the route cannot take one. */
   currentParentId() { return undefined; },
+  /** Appends the next page of search results (the search view's 继续加载). */
+  loadMoreSearch() {},
 };
 
 /** Called once by app.js, after every module has defined its functions. */

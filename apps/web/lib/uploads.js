@@ -9,7 +9,7 @@
 
 import { h } from './dom.js';
 import { request } from './api.js';
-import { toast, openMenu } from './ui.js';
+import { toast, openMenu, dialog } from './ui.js';
 import { createFolder } from './files.js';
 import { pickDirectoryPlan, uploadPlan } from './folder-upload.js';
 import { store, session } from './session.js';
@@ -153,6 +153,100 @@ export async function uploadFolderPlan(uploader, plan, parentId) {
   }
 }
 
+/**
+ * Names already taken in one folder, as a Set.
+ *
+ * Only live files are compared: a same-named FOLDER is a different thing the
+ * server will happily coexist with, and a trashed file is not in the way. The
+ * index answers this synchronously — no request, so the conflict check cannot
+ * delay the drop or the picker.
+ */
+export function existingFileNames(index, parentId) {
+  const names = new Set();
+  for (const name of existingFilesIn(index, parentId).keys()) names.add(name);
+  return names;
+}
+
+/** name -> node for the live files of one folder (last one wins, as a Set would). */
+export function existingFilesIn(index, parentId) {
+  const files = new Map();
+  const children = (index && index.children && index.children.get(parentId || 'root')) || [];
+  for (const node of children) {
+    if (node && node.kind === 'file' && typeof node.name === 'string') files.set(node.name, node);
+  }
+  return files;
+}
+
+/** The names of the picked files that collide with something already there. */
+export function conflictingNames(existing, files) {
+  const taken = new Set();
+  for (const file of Array.from(files || [])) {
+    if (file && existing.has(file.name)) taken.add(file.name);
+  }
+  return taken;
+}
+
+const CONFLICT_CHOICES = [
+  { value: 'overwrite', label: '替换（保留历史版本）', hint: '新文件成为当前版本，旧内容仍可在「历史版本」中恢复。' },
+  { value: 'rename', label: '保留两者（自动重命名）', hint: '新文件改名为「名称 (1)」这样的形式，两份都留下。' },
+  { value: 'skip', label: '跳过同名', hint: '同名文件保持原样，不写入这次上传。' },
+];
+
+/**
+ * Asks what should happen to same-named files, and resolves to the strategy.
+ *
+ * A single choice for the whole batch is the default because the alternative —
+ * one decision per file — makes dropping ten photos an interrogation. The
+ * checkbox is there for the batch that is genuinely mixed.
+ * Resolves null when the dialog is dismissed, which cancels the upload rather
+ * than silently picking overwrite.
+ */
+export function askConflictStrategy(count) {
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (value) => { if (!settled) { settled = true; resolve(value); } };
+    const name = 'mdrive-upload-conflict';
+    const radios = CONFLICT_CHOICES.map((choice, index) => h('input', {
+      attrs: { type: 'radio', name, value: choice.value, id: name + '-' + choice.value },
+      checked: index === 0,
+    }));
+    const body = h('div', { class: 'field' },
+      h('p', { class: 'muted', text: '当前文件夹里已有 ' + count + ' 个同名的文件，请选择这次上传的处理方式。' }),
+      ...CONFLICT_CHOICES.map((choice, index) => h('label', { attrs: { for: name + '-' + choice.value, style: 'display:flex;gap:8px;align-items:flex-start;padding:4px 0' } },
+        radios[index],
+        h('span', {},
+          h('b', { text: choice.label }),
+          h('span', { class: 'muted', attrs: { style: 'display:block;font-size:11px' }, text: choice.hint })),
+      )),
+    );
+    const forAll = h('input', { attrs: { type: 'checkbox' }, checked: true });
+    body.appendChild(h('label', { attrs: { style: 'display:flex;gap:8px;align-items:center;margin-top:6px' } },
+      forAll,
+      h('span', { text: '对本批全部 ' + count + ' 个文件使用此选择' }),
+    ));
+    const chosen = () => {
+      const hit = radios.find((radio) => radio.checked);
+      return hit ? hit.value : 'overwrite';
+    };
+    // The footer is a factory: dialog() drops an empty footer, so buttons added
+    // after it returns would land in a detached node.
+    dialog({
+      title: '有同名文件',
+      description: '这一批里有文件和当前文件夹重名。',
+      body,
+      onClose: () => finish(null),
+      footer: (dlg) => [
+        h('button', { class: 'btn', attrs: { type: 'button' }, text: '取消上传', on: { click: () => dlg.close() } }),
+        h('span', { class: 'push' }),
+        h('button', {
+          class: 'btn btn-primary', attrs: { type: 'button' }, text: '继续上传',
+          on: { click: () => { finish(chosen()); dlg.close(); } },
+        }),
+      ],
+    });
+  });
+}
+
 export function uploadFiles(uploader, files) {
   const route = store.state.route;
   if (route.name !== 'drive') {
@@ -162,11 +256,30 @@ export function uploadFiles(uploader, files) {
   const parentId = route.folderId || null;
   const list = Array.from(files || []).filter(Boolean);
   if (!list.length) return;
+  const existing = existingFilesIn(session.index, parentId);
+  const conflicts = conflictingNames(new Set(existing.keys()), list);
+  if (!conflicts.size) { startUpload(uploader, list, parentId, null, existing); return; }
+  // The dialog owns the ordering: the files are not queued until it answers, so
+  // a cancel leaves nothing running and no strategy half-applied.
+  askConflictStrategy(conflicts.size).then((strategy) => {
+    if (!strategy) { toast('已取消这次上传。', { type: 'info', timeout: 2400 }); return; }
+    startUpload(uploader, list, parentId, strategy, existing);
+  });
+}
 
+/** How many names in the batch were already taken before the upload started. */
+function wasTakenCount(list, existing) {
+  let count = 0;
+  for (const file of list) if (file && existing.has(file.name)) count += 1;
+  return count;
+}
+
+/** Queues the batch, watches it, and reports what the conflict strategy did. */
+function startUpload(uploader, list, parentId, strategy, existing) {
   // Hand the whole list to the scheduler: it keeps UPLOAD_CONCURRENCY transfers
   // in flight and refills a slot as soon as one settles, so dropping 200 files
   // no longer means 200 parallel requests.
-  const tasks = uploader.enqueueAll(list, parentId);
+  const tasks = uploader.enqueueAll(list, parentId, strategy);
   // A finished upload has no reason to keep a filesystem handle alive: the
   // entry is what the next page would offer to resume.
   for (const task of tasks) {
@@ -179,11 +292,32 @@ export function uploadFiles(uploader, files) {
     });
   }
   uploader.whenIdle().then(async () => {
-    const done = tasks.filter((task) => task.state === 'done').length;
-    const failed = tasks.length - done;
-    toast(failed
-      ? done + ' 个上传完成，' + failed + ' 个未完成（可在队列中重试）'
-      : '已上传 ' + done + ' 个文件', { type: failed ? 'warning' : 'success' });
+    const settled = tasks.filter((task) => task.state === 'done');
+    const failed = tasks.length - settled.length;
+    // A skipped completion comes back as the node that was already there, so
+    // "done, same name, same id" is a skip and "done, other name" is a rename —
+    // both read off the response instead of being assumed from the strategy.
+    const wasTaken = (task) => existing.has(task.name);
+    const skipped = strategy === 'skip'
+      ? settled.filter((task) => wasTaken(task) && task.node && task.node.id === existing.get(task.name).id).length
+      : 0;
+    const renamed = settled.filter((task) => wasTaken(task) && task.node && task.node.name && task.node.name !== task.name).length;
+    let detail;
+    if (strategy === 'overwrite' && wasTakenCount(list, existing)) {
+      detail = '同名文件已更新为新版本，旧版本可在「历史版本」中恢复。';
+    } else if (strategy === 'rename' && renamed) {
+      detail = renamed + ' 个同名文件已自动重命名，两份都保留在列表中。';
+    } else if (strategy === 'skip' && skipped) {
+      detail = skipped + ' 个同名文件已跳过，原文件保持不动。';
+    }
+    const uploaded = settled.length - skipped;
+    if (failed) {
+      toast(uploaded + ' 个上传完成，' + failed + ' 个未完成（可在队列中重试）', { type: 'warning', detail });
+    } else if (skipped) {
+      toast('已上传 ' + uploaded + ' 个文件，' + skipped + ' 个同名文件已跳过', { type: 'success', detail });
+    } else {
+      toast('已上传 ' + uploaded + ' 个文件', { type: 'success', detail });
+    }
     await runtime.refreshData();
   });
   toast('开始上传 ' + list.length + ' 个文件', { type: 'info', timeout: 1800 });

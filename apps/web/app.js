@@ -35,6 +35,8 @@ import {
   openPreviewFor, lookupNode, startRename, startDelete, startPurge, deleteSelection, moveSelection,
   downloadSelection, downloadSelectionArchive, downloadFolderArchive,
 } from './lib/actions.js';
+import { focusRouteContent } from './lib/focus.js';
+import { shortcutsEnabled } from './lib/shortcuts.js';
 import { attachDropZone } from './lib/dnd.js';
 import { pickFiles, pickUploadKind, uploadFiles, uploadFolderPlan, restoreUploads, currentParentId } from './lib/uploads.js';
 
@@ -96,7 +98,27 @@ async function bootstrapSession() {
 }
 
 /* ═══ data ═════════════════════════════════════════════════════ */
-async function loadRoute(route) {
+/**
+ * Sequence number of the load that owns the store.
+ *
+ * Every loadRoute() call takes the next ticket and may only commit while it is
+ * still the newest. Without it, two searches that finish out of order leave the
+ * URL and the input on one query and the results on another: the loser of the
+ * race was simply the slower request, and it painted last. The ticket is a
+ * counter rather than an AbortController because three requests run in parallel
+ * per load and their responses are still useful as long as the route has not
+ * moved on.
+ */
+let routeLoadSeq = 0;
+
+async function loadRoute(route, options) {
+  const opts = options || {};
+  // A refresh after a batch action is not a navigation: the rows that are still
+  // there keep their ticks (a failed delete must stay selected for a retry), and
+  // only ids that no longer exist are dropped. A route change still starts clean.
+  const carried = opts.keepSelection ? new Set(store.state.selection) : null;
+  const ticket = ++routeLoadSeq;
+  const current = () => ticket === routeLoadSeq;
   store.state.loading = true;
   store.state.loadError = null;
   // The skeleton is a loading state, not a navigation: paint it plainly and
@@ -114,6 +136,7 @@ async function loadRoute(route) {
         api.get('/storage/stats').catch(() => ({ stats: store.state.stats })),
         api.get('/nodes'),
       ]);
+      if (!current()) return;
       // A direct search URL still needs the tree: it supplies sidebar targets,
       // source parents and the move picker's destinations.
       store.state.nodes = live && Array.isArray(live.nodes) ? live.nodes : [];
@@ -121,8 +144,11 @@ async function loadRoute(route) {
       store.state.searchResults = payload && Array.isArray(payload.results) ? payload.results : [];
       store.state.searchQuery = q;
       if (stats && stats.stats) store.state.stats = stats.stats;
-      store.state.selection = new Set();
+      store.state.selection = carried ? keepLiveIds(carried, session.index) : new Set();
       store.state.anchorId = null;
+      store.state.searchMore = payload && payload.hasMore
+        ? { hasMore: true, limit: Number(payload.limit) || 50, offset: Number(payload.offset) || 0, loading: false }
+        : null;
       store.state.loading = false;
       paintRoute(route);
       return;
@@ -133,12 +159,14 @@ async function loadRoute(route) {
       api.get('/nodes?trash=1').catch(() => ({ nodes: [] })),
       api.get('/storage/stats').catch(() => ({ stats: null })),
     ]);
+    if (!current()) return;
+    store.state.searchMore = null;
     session.index = buildIndex(live && Array.isArray(live.nodes) ? live.nodes : []);
     store.state.nodes = live && Array.isArray(live.nodes) ? live.nodes : [];
     store.state.trash = trashed && Array.isArray(trashed.nodes) ? trashed.nodes : [];
     store.state.stats = stats ? stats.stats : null;
     store.state.loading = false;
-    store.state.selection = new Set();
+    store.state.selection = carried ? keepLiveIds(carried, session.index) : new Set();
     store.state.anchorId = null;
 
     if (route.name === 'drive' && route.folderId && !session.index.byId.has(route.folderId)) {
@@ -148,11 +176,45 @@ async function loadRoute(route) {
     }
     paintRoute(route);
   } catch (error) {
+    // A failed request from a route the user already left must not paint an
+    // error over the page they are looking at now.
+    if (!current()) return;
     store.state.loading = false;
     store.state.loadError = error && error.status === 0
       ? '无法连接服务器，请确认 Drive 服务正在运行。'
       : (error && error.message) || '加载失败。';
     paintRoute(route);
+  }
+}
+
+/**
+ * Fetches the next page of search results.
+ *
+ * Append, never replace: the first page stays on screen while the second
+ * arrives, and a failed page leaves the list exactly as it was.
+ */
+async function loadMoreSearch() {
+  const more = store.state.searchMore;
+  if (!more || !more.hasMore || more.loading) return;
+  if (store.state.route.name !== 'search') return;
+  const query = store.state.route.query || '';
+  more.loading = true;
+  runtime.renderShell();
+  try {
+    const payload = await api.get('/search?q=' + encodeURIComponent(query)
+      + '&limit=' + encodeURIComponent(String(more.limit))
+      + '&offset=' + encodeURIComponent(String(more.offset + more.limit)));
+    const page = payload && Array.isArray(payload.results) ? payload.results : [];
+    const known = new Set((store.state.searchResults || []).map((node) => node.id));
+    store.state.searchResults = (store.state.searchResults || []).concat(page.filter((node) => !known.has(node.id)));
+    more.offset = Number(payload && payload.offset) || (more.offset + more.limit);
+    more.hasMore = Boolean(payload && payload.hasMore);
+    toast(page.length ? '已加载更多结果。' : '没有更多结果了。', { type: 'info', timeout: 1800 });
+  } catch (error) {
+    toast((error && error.message) || '加载更多结果失败。', { type: 'error' });
+  } finally {
+    more.loading = false;
+    runtime.renderShell();
   }
 }
 
@@ -167,6 +229,12 @@ function paintRoute(route) {
   const token = routeToken(route);
   const changed = session.paintedToken !== null && session.paintedToken !== token;
   session.paintedToken = token;
+  // A real navigation re-mounts the view, which detaches whatever row had focus
+  // and drops the caret on <body>. Flag it so the repaint can put the caret back
+  // on the new page's heading (UI13) — but only when the navigation came from the
+  // keyboard: a mouse user who clicks a folder should not be teleported to the
+  // heading and lose the scroll position they were aiming at.
+  if (changed) session.pendingRouteFocus = session.keyboardNav === true;
   if (!changed) { renderShell(); return; }
   withViewTransition(() => renderShell(), { reduced: prefersReducedMotion() });
 }
@@ -175,7 +243,14 @@ function refreshData() {
   const now = Date.now();
   if (now - session.lastRefreshAt < 120) return Promise.resolve();
   session.lastRefreshAt = now;
-  return loadRoute(store.state.route);
+  return loadRoute(store.state.route, { keepSelection: true });
+}
+
+/** Selected ids that still exist in the refreshed tree. */
+function keepLiveIds(ids, index) {
+  const live = new Set();
+  for (const id of ids) if (index.byId.has(id)) live.add(id);
+  return live;
 }
 
 /* ═══ auth ═════════════════════════════════════════════════════ */
@@ -245,13 +320,27 @@ function renderShell() {
   const ctx = buildContext(ancestors, session.selectionSlot);
 
   mount(session.shellEls.sidebarHost, renderSidebar(ctx));
+  // renderSidebar() replaces the element, so the attribute has to be re-applied
+  // on every render rather than only when the drawer is toggled.
+  syncNavInert();
   mount(session.shellEls.topbar, topbarContent(ctx));
   session.shellEls.toolbar.hidden = route.name === 'search';
   mount(session.shellEls.toolbar, renderToolbar(ctx));
   mount(session.shellEls.viewEl, viewContent(ctx));
   mount(session.shellEls.statusbar, statusContent());
+  // The view is only in the document at this point. A paint that ran while it was
+  // being built found the selection slot detached and skipped the bar, which is
+  // how a refresh after a partly failed delete lost the visible retry affordance
+  // even though the selection itself survived. Re-assert it on a whole shell.
+  if (store.state.selection.size) paintSelection();
   document.title = titleFor(route);
   restoreSearchFocus();
+  // restoreSearchFocus() wins when the user was typing: the caret belongs in the
+  // field they were using, not on the heading of the page it landed on.
+  if (session.pendingRouteFocus) {
+    session.pendingRouteFocus = false;
+    focusRouteContent(session.shellEls.viewEl);
+  }
   playViewEntrance(route);
 }
 
@@ -310,6 +399,28 @@ function playViewEntrance(route) {
 
 /** Route changes get ONE entrance: either the cross-fade or the row stagger. */
 
+/**
+ * Keep the off-canvas sidebar out of the tab order while it is closed.
+ *
+ * The drawer is moved off-screen with a transform, which hides it from the eye
+ * and from nothing else: Tab still walked into its search field at x=-238 and
+ * the caret vanished off the left edge (UI12). `inert` removes the subtree from
+ * hit-testing, the tab order and the accessibility tree in one attribute, and it
+ * is only applied at the width where the sidebar really is a drawer — on a wide
+ * window the same element is the permanent column and must stay reachable.
+ */
+const narrowLayout = typeof window.matchMedia === 'function' ? window.matchMedia('(max-width:880px)') : null;
+
+function syncNavInert() {
+  const shell = session.shellEls ? session.shellEls.shell : document.getElementById('shell');
+  if (!shell) return;
+  const sidebar = shell.querySelector('.sidebar');
+  if (!sidebar) return;
+  const closed = Boolean(narrowLayout && narrowLayout.matches) && !shell.classList.contains('nav-open');
+  if (closed) sidebar.setAttribute('inert', '');
+  else sidebar.removeAttribute('inert');
+}
+
 /** Open/close the small-screen drawer, keeping focus and aria in step. */
 function setNavOpen(open) {
   const shell = session.shellEls ? session.shellEls.shell : document.getElementById('shell');
@@ -317,10 +428,24 @@ function setNavOpen(open) {
   shell.classList.toggle('nav-open', !!open);
   const toggle = shell.querySelector('.nav-toggle');
   if (toggle) toggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+  syncNavInert();
   if (open) {
     const first = shell.querySelector('.side-scroll .side-row');
     if (first) first.focus();
   }
+}
+
+if (narrowLayout) {
+  const onLayoutChange = () => {
+    syncNavInert();
+    // Rotating a phone into a wide layout must not leave the drawer class (and
+    // its scrim) behind on a window that now shows the sidebar permanently.
+    if (!narrowLayout.matches && session.shellEls && session.shellEls.shell.classList.contains('nav-open')) {
+      setNavOpen(false);
+    }
+  };
+  if (typeof narrowLayout.addEventListener === 'function') narrowLayout.addEventListener('change', onLayoutChange);
+  else if (typeof narrowLayout.addListener === 'function') narrowLayout.addListener(onLayoutChange);
 }
 
 function routeToken(route) {
@@ -413,6 +538,16 @@ function selectionBar() {
 }
 
 /* ═══ global keyboard ══════════════════════════════════════════ */
+/* Which input modality produced the navigation. Set here, read by paintRoute();
+   pointerdown fires before the click that navigates, so the flag is never stale. */
+document.addEventListener('pointerdown', () => { session.keyboardNav = false; }, true);
+document.addEventListener('keydown', (event) => {
+  if (event.key === 'Tab' || event.key === 'Enter' || event.key === ' ' || event.key.startsWith('Arrow')
+    || event.key === 'Home' || event.key === 'End') {
+    session.keyboardNav = true;
+  }
+}, true);
+
 document.addEventListener('keydown', (event) => {
   if (event.defaultPrevented) return;
   const target = event.target;
@@ -443,7 +578,18 @@ document.addEventListener('keydown', (event) => {
   // dialog's Move/Cancel button must not open the selected file behind it.
   if (target && target.closest('button, a[href], [role="dialog"], [role="menu"], .drawer')) return;
 
+  // Ctrl/Cmd+K is the modified equivalent of "/" and stays available when the
+  // single-character shortcuts are switched off (WCAG 2.1.4: a character key
+  // shortcut needs an off switch or a non-character alternative — this is the
+  // alternative, and lib/shortcuts.js owns the switch).
+  if ((event.key === 'k' || event.key === 'K') && (event.ctrlKey || event.metaKey) && !event.shiftKey) {
+    const input = document.querySelector('.side-search input');
+    if (input) { event.preventDefault(); input.focus(); input.select(); }
+    return;
+  }
+
   if (event.key === '/') {
+    if (!shortcutsEnabled()) return;
     const input = document.querySelector('.side-search input');
     if (input) { event.preventDefault(); input.focus(); input.select(); }
     return;
@@ -484,6 +630,7 @@ document.addEventListener('keydown', (event) => {
     return;
   }
   if ((event.key === 'r' || event.key === 'R') && !event.metaKey && !event.ctrlKey && !event.altKey) {
+    if (!shortcutsEnabled()) return;
     event.preventDefault();
     refreshData();
   }
@@ -503,6 +650,7 @@ wire({
   pickUploadKind: (anchor) => pickUploadKind(uploader, anchor),
   uploadFolderPlan: (plan, parentId) => uploadFolderPlan(uploader, plan, parentId),
   uploadFiles: (files) => uploadFiles(uploader, files),
+  loadMoreSearch,
   currentParentId,
 });
 

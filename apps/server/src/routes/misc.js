@@ -12,6 +12,8 @@ import { addMember, workspaceFor, workspacesFor } from '../workspaces.js'
 /** Search, storage statistics, the duplicate report and the health probe. */
 
 const SEARCH_LIMIT_MAX = 100
+/** Beyond this many skipped hits nobody is reading the list any more. */
+const SEARCH_OFFSET_MAX = 1000
 /** A report longer than this stops being a report and becomes a chore. */
 const DUPLICATE_GROUP_LIMIT = 100
 
@@ -32,16 +34,26 @@ export function registerMiscRoutes(router, { version }) {
    * `content` is the FTS5 index, `all` (default) unions them and marks which
    * half matched. Name hits come first because a file called "invoice.pdf" is a
    * better answer to "invoice" than a log line that mentions it.
+   *
+   * Paging is a window, not a cursor: `offset` + `limit` slice the merged list
+   * and `hasMore` says whether anything fell off the end. There is deliberately
+   * no `total` — the two halves are fetched with their own budgets, so a count
+   * here would be a number the server did not actually compute.
    */
   router.get('/api/v1/search', async (ctx) => {
     const user = userFromRequest(ctx.req, ctx.url)
     const term = String(ctx.url.searchParams.get('q') || '').trim()
     const limit = Math.min(Math.max(Number(ctx.url.searchParams.get('limit') || 20), 1), SEARCH_LIMIT_MAX)
+    const requestedOffset = Math.trunc(Number(ctx.url.searchParams.get('offset') || 0)) || 0
+    const offset = Math.min(Math.max(requestedOffset, 0), SEARCH_OFFSET_MAX)
     const scope = ['all', 'name', 'content'].includes(String(ctx.url.searchParams.get('scope')))
       ? String(ctx.url.searchParams.get('scope'))
       : 'all'
-    if (!term) { sendJson(ctx.res, 200, { results: [] }); return }
+    if (!term) { sendJson(ctx.res, 200, { results: [], limit, offset, hasMore: false, scope }); return }
 
+    // One row beyond the window is fetched on purpose: its existence is the only
+    // honest "there is more" signal, and it costs exactly one row.
+    const window = offset + limit + 1
     const results = []
     const seen = new Set()
     const push = (nodeLike, extra) => {
@@ -53,7 +65,7 @@ export function registerMiscRoutes(router, { version }) {
     if (scope !== 'content') {
       const pattern = `%${term.replace(/[%_\\]/g, (char) => `\\${char}`)}%`
       const rows = db.prepare(`SELECT * FROM nodes WHERE user_id=? AND deleted_at IS NULL AND name LIKE ? ESCAPE '\\'
-          ORDER BY (kind='file') DESC, length(name), lower(name) LIMIT ?`).all(user.id, pattern, limit)
+          ORDER BY (kind='file') DESC, length(name), lower(name) LIMIT ?`).all(user.id, pattern, window)
       for (const row of rows) {
         push({
           id: row.id, name: row.name, kind: row.kind, parentId: row.parent_id ?? null,
@@ -63,8 +75,10 @@ export function registerMiscRoutes(router, { version }) {
       }
     }
 
-    if (scope !== 'name' && results.length < limit) {
-      for (const hit of searchContents(user.id, term, limit)) {
+    if (scope !== 'name' && results.length < window) {
+      // The index caps its own fetch at 50 per mechanism, so a deep page simply
+      // has fewer content hits to merge into it — never fewer pages of names.
+      for (const hit of searchContents(user.id, term, window)) {
         if (seen.has(hit.nodeId)) continue
         // Same visibility rule as a direct read: owned by the caller, or in a
         // workspace they belong to. Filtering by owner here would throw away the
@@ -82,11 +96,19 @@ export function registerMiscRoutes(router, { version }) {
           // client turns them into <mark> so no markup travels in JSON.
           snippet: String(hit.snippet || '').replace(/\u0001/g, '').replace(/\u0002/g, ''),
         })
-        if (results.length >= limit) break
+        if (results.length >= window) break
       }
     }
 
-    sendJson(ctx.res, 200, { results: results.slice(0, limit), scope })
+    // hasMore is "the fetch budget overflowed the window", not a total: the
+    // extra row proves there is at least one more hit and nothing else.
+    sendJson(ctx.res, 200, {
+      results: results.slice(offset, offset + limit),
+      limit,
+      offset,
+      hasMore: results.length > offset + limit,
+      scope,
+    })
   })
 
   router.get('/api/v1/storage/stats', async (ctx) => {

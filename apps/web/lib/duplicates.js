@@ -10,7 +10,9 @@
 import { h, raw } from './dom.js';
 import { bytes, formatDate, icon } from './format.js';
 import { api } from './api.js';
+import { store } from './session.js';
 import { drawer, toast, confirmDialog } from './ui.js';
+import { trashRetentionClause } from './files.js';
 
 /** Path label for one file: "报告 / 2026 / c.txt", or just the name at root. */
 function pathLabel(node) {
@@ -89,9 +91,12 @@ export async function openDuplicatesDrawer(options) {
 
     const list = h('div', { attrs: { style: 'display:flex;flex-direction:column;gap:10px' } });
     for (const group of groups) list.appendChild(groupCard(group, report));
+    // Same sentence as the trash view: the retention window is read from the
+    // deployment, not assumed to be 30 days.
+    const retention = trashRetentionClause(store.state.stats);
     handle.body.replaceChildren(
       h('p', { class: 'muted', attrs: { style: 'font-size:11px;line-height:1.6;margin:0 0 2px' },
-        text: '按浪费空间从大到小排列。「只保留第一个」会把其余副本移到回收站，30 天内可以还原。' }),
+        text: '按浪费空间从大到小排列。「只保留第一个」会把其余副本移到回收站，' + retention }),
       list,
     );
   }

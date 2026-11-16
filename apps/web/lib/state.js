@@ -46,6 +46,8 @@ export function createStore(initial) {
       trash: [],
       searchResults: [],
       searchQuery: '',
+      /** { hasMore, limit, offset, loading } while a search page has more hits. */
+      searchMore: null,
       loading: false,
       loadError: null,
       view: 'list',        // list | grid

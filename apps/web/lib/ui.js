@@ -4,7 +4,8 @@
  * One overlay stack makes Escape close exactly one layer at a time.
  */
 
-import { h, append, raw, trapFocus } from './dom.js';
+import { h, append, raw, trapFocus, focusMain } from './dom.js';
+import { FOCUSABLE_SELECTOR, registerPopup, tabCycle, unregisterPopup } from './focus.js';
 import { icon } from './format.js';
 import { DURATION, markAnimating, prefersReducedMotion } from './motion.js';
 
@@ -152,7 +153,14 @@ export function dialog(options) {
 
   const releaseFocus = trapFocus(panel);
   const releaseLayer = pushLayer(() => handle.close());
+  // Place the caret once the panel is laid out — but only if it is still
+  // unclaimed. The frame is not guaranteed to run before the user's next
+  // interaction: a dialog opened by a keyboard shortcut can be met with a Tab
+  // (or an autofocusing caller) in between, and stealing focus back reads as
+  // "this dialog ignores my keys".
   requestAnimationFrame(() => {
+    const active = document.activeElement;
+    if (active && active !== document.body && panel.contains(active)) return;
     const focusTarget = panel.querySelector('[autofocus]') || panel.querySelector('input:not([type=hidden]):not([disabled]), textarea:not([disabled]), select:not([disabled])');
     (focusTarget || panel).focus();
   });
@@ -341,28 +349,77 @@ function dismissOverlay(panel, scrim) {
 
 /* ── anchored menu ────────────────────────────────────────────── */
 /**
- * openMenu({ anchor, items, align }) — items:
- *   { label, icon, kbd, danger, disabled, onSelect }
+ * openMenu({ anchor, items, align, label, role, trap }) — items:
+ *   { label, icon, kbd, danger, disabled, checked, onSelect }
  *   { separator: true } | { heading: '分组名' }
+ * `label` names the menu itself; `trap` overrides which container the Tab cycle
+ * belongs to (it defaults to the open dialog).
  * Returns { close }.
+ *
+ * The focused menu is part of the modal's tab cycle while it is open: it is
+ * appended to <body>, so without registering it the dialog's trap could not see
+ * it and Tab walked straight out of both (see lib/focus.js).
  */
 export function openMenu(options) {
   const opts = options || {};
   const anchor = opts.anchor;
+  const role = opts.role || 'menu';
   const menu = h('div', {
     class: 'menu',
-    attrs: { role: opts.role || 'menu', 'aria-label': opts.label || null },
+    attrs: {
+      role,
+      'aria-label': opts.label || null,
+      // A menu that replaced a <select> keeps the field's own label as its
+      // accessible name, so the popup announces *what* it chooses.
+      'aria-orientation': role === 'menu' ? 'vertical' : null,
+    },
   });
 
   const onOutside = (event) => {
-    if (!menu.contains(event.target) && !(anchor && anchor.contains(event.target))) close();
+    if (menu.contains(event.target) || (anchor && anchor.contains(event.target))) return;
+    // A click elsewhere is the user choosing a new target: the browser is about
+    // to focus it, so do not pull the caret back to the anchor first.
+    close({ restore: false });
   };
   const onKeyDown = (event) => {
     if (event.key === 'Escape') {
       event.preventDefault();
       event.stopPropagation();
       close();
-      if (anchor) anchor.focus();
+      return;
+    }
+    if (event.key === 'Tab') {
+      const step = event.shiftKey ? -1 : 1;
+      const container = opts.trap || activeDialog();
+      if (!container) {
+        // A toolbar or row menu has no modal to return into: Tab closes it and
+        // continues the page's own tab order from the anchor, which is where the
+        // user was before the menu existed.
+        event.preventDefault();
+        event.stopPropagation();
+        close({ restore: false });
+        moveOnFrom(anchor, step);
+        return;
+      }
+      // Inside a dialog the cycle is the dialog's controls plus this popup, so
+      // the neighbour of the last item is the dialog's first control. Focus has
+      // to move while the menu is still registered, then the menu closes — the
+      // order matters, because closing first would make the menu's own items
+      // disappear from the list being stepped through.
+      const cycle = tabCycle(container, FOCUSABLE_SELECTOR);
+      const items = cycle.length ? cycle : Array.from(menu.querySelectorAll('.menu-item:not([disabled])'));
+      const index = items.indexOf(document.activeElement);
+      if (index < 0) return;
+      const next = items[(index + step + items.length) % items.length];
+      if (!next) return;
+      // Handled here means the dialog's trap must not handle it too: it would
+      // read the caret's new position as "the user Tabbed past the end" and wrap
+      // the focus straight back to the first control.
+      event.preventDefault();
+      event.stopPropagation();
+      if (menu.contains(next)) { next.focus({ preventScroll: true }); return; }
+      close({ restore: false });
+      next.focus({ preventScroll: true });
       return;
     }
     if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp' && event.key !== 'Home' && event.key !== 'End') return;
@@ -374,17 +431,30 @@ export function openMenu(options) {
     if (event.key === 'ArrowDown') next = (index + 1) % items.length;
     else if (event.key === 'ArrowUp') next = (index - 1 + items.length) % items.length;
     else if (event.key === 'End') next = items.length - 1;
-    items[next].focus();
+    items[next].focus({ preventScroll: true });
   };
-  const close = () => {
-    if (!menu.isConnected) return;
+  let closed = false;
+  const close = (closeOptions) => {
+    if (closed) return;
+    closed = true;
+    // Where the caret is at the moment of closing decides where it goes back to.
+    // A chosen item, Escape or Tab all remove the element the caret is standing
+    // on, so the anchor takes it back; an outside click leaves the caret to the
+    // control the user actually aimed at.
+    const active = document.activeElement;
+    const allowed = !closeOptions || closeOptions.restore !== false;
+    const restore = allowed && Boolean(anchor) && (!active || active === document.body || menu.contains(active));
     menu.remove();
+    // Unregister before the removal is observable to anyone else: the trap's
+    // cycle must not still contain the items that are about to be detached.
+    unregisterPopup(menu);
     document.removeEventListener('mousedown', onOutside, true);
     document.removeEventListener('keydown', onKeyDown, true);
     window.removeEventListener('resize', close);
-    window.removeEventListener('scroll', close, true);
+    window.removeEventListener('scroll', onScroll, true);
     releaseLayer();
     if (anchor) anchor.setAttribute('aria-expanded', 'false');
+    if (restore) focusAnchor(anchor);
   };
 
   for (const item of opts.items || []) {
@@ -392,15 +462,17 @@ export function openMenu(options) {
     if (item.separator) { menu.appendChild(h('div', { class: 'menu-sep', attrs: { role: 'separator' } })); continue; }
     if (item.heading) { menu.appendChild(h('div', { class: 'menu-label', text: item.heading })); continue; }
     // A checked row is a choice, not a command: it gets the tick and the
-    // aria state, so a select built on this menu is readable to a screen reader
-    // as a listbox rather than as a pile of buttons.
+    // aria state, so a select built on this menu is a radio group of menu items
+    // rather than a pile of buttons whose current value is invisible.
     menu.appendChild(h('button', {
       class: 'menu-item'
         + (item.danger ? ' is-danger' : '')
         + (item.checked ? ' is-checked' : ''),
       attrs: {
         type: 'button',
-        role: opts.role || (item.checked !== undefined ? 'menuitemradio' : 'menuitem'),
+        // The item role follows the item, not the container: passing a container
+        // role must not turn every row into a nested menu.
+        role: item.role || (item.checked !== undefined ? 'menuitemradio' : 'menuitem'),
         'aria-checked': item.checked === undefined ? null : (item.checked ? 'true' : 'false'),
         disabled: item.disabled || undefined,
       },
@@ -412,32 +484,102 @@ export function openMenu(options) {
   }
 
   document.body.appendChild(menu);
-  const rect = anchor ? anchor.getBoundingClientRect() : { left: 12, top: 12, bottom: 12, right: 12, width: 0 };
-  const menuRect = menu.getBoundingClientRect();
   const align = opts.align || 'end';
   if (align === 'start') menu.classList.add('is-start');
-  let left = align === 'end' ? rect.right - menuRect.width : rect.left;
-  left = Math.max(8, Math.min(left, window.innerWidth - menuRect.width - 8));
-  let top = rect.bottom + 4;
-  if (top + menuRect.height > window.innerHeight - 8) {
+  place(align);
+  markAnimating(menu);
+  if (anchor) anchor.setAttribute('aria-expanded', 'true');
+
+  /**
+   * Put the popup next to the anchor, now.
+   *
+   * Runs again on every scroll: the menu is positioned in viewport coordinates
+   * and is appended to <body>, so it does not travel with the control it belongs
+   * to. Re-measuring is what keeps it attached instead of closing on the first
+   * wheel tick.
+   */
+  function place(currentAlign) {
+    const rect = anchor ? anchor.getBoundingClientRect() : { left: 12, top: 12, bottom: 12, right: 12, width: 0 };
+    const menuRect = menu.getBoundingClientRect();
+    let left = currentAlign === 'end' ? rect.right - menuRect.width : rect.left;
+    left = Math.max(8, Math.min(left, window.innerWidth - menuRect.width - 8));
+    let top = rect.bottom + 4;
+    const up = top + menuRect.height > window.innerHeight - 8;
+    if (up) {
+      top = Math.max(8, rect.top - menuRect.height - 4);
+    }
     // Opening upward: the menu has to arrive from the bottom edge, or it looks
     // detached from the anchor it is attached to. The class flips the keyframe
     // and the transform-origin together.
-    top = Math.max(8, rect.top - menuRect.height - 4);
-    menu.classList.add('is-up');
+    menu.classList.toggle('is-up', up);
+    menu.style.left = Math.round(left) + 'px';
+    menu.style.top = Math.round(top) + 'px';
   }
-  menu.style.left = Math.round(left) + 'px';
-  menu.style.top = Math.round(top) + 'px';
-  markAnimating(menu);
-  if (anchor) anchor.setAttribute('aria-expanded', 'true');
+
+  /**
+   * Scrolling follows the anchor; only losing it entirely closes the menu.
+   *
+   * Closing on every scroll event was wrong twice: the menu's own opening
+   * focus() scrolls the item into view (so a menu closed itself the instant it
+   * opened), and a two-pixel wheel tick in a long page threw away a menu the
+   * user was still looking at.
+   */
+  const onScroll = () => {
+    if (!anchor) { close({ restore: false }); return; }
+    const rect = anchor.getBoundingClientRect();
+    const gone = rect.bottom <= 0 || rect.top >= window.innerHeight || rect.right <= 0 || rect.left >= window.innerWidth;
+    if (gone) { close({ restore: false }); return; }
+    place(align);
+  };
 
   document.addEventListener('mousedown', onOutside, true);
   document.addEventListener('keydown', onKeyDown, true);
   window.addEventListener('resize', close);
-  window.addEventListener('scroll', close, true);
+  window.addEventListener('scroll', onScroll, true);
   const releaseLayer = pushLayer(close);
-  requestAnimationFrame(() => { const first = menu.querySelector('.menu-item'); if (first) first.focus(); });
-  return { close };
+  registerPopup(menu);
+  // preventScroll on every focus inside a popup: focusing an item must not move
+  // the page out from under the control the popup is attached to.
+  requestAnimationFrame(() => { const first = menu.querySelector('.menu-item'); if (first) first.focus({ preventScroll: true }); });
+  // `el` lets a caller move the caret inside the popup on open (Down/Up on a
+  // menu button starts on the first/last row, per APG).
+  return { close, el: menu };
+}
+
+/**
+ * Where focus goes when a menu closes while the caret is inside it (Escape, a
+ * chosen item, Tab out): the anchor is the honest answer — "you are back on the
+ * control you opened". If the anchor was re-rendered away underneath the menu,
+ * the page column is the fallback, because leaving the caret on <body> restarts
+ * the next Tab at the top of the document.
+ */
+function focusAnchor(anchor) {
+  if (anchor && anchor.isConnected !== false && typeof anchor.focus === 'function') {
+    anchor.focus({ preventScroll: true });
+    return;
+  }
+  focusMain();
+}
+
+/** Steps the caret one tab stop away from `from` in document order. */
+function moveOnFrom(from, step) {
+  const all = Array.from(document.querySelectorAll(FOCUSABLE_SELECTOR))
+    .filter((element) => !element.hasAttribute('hidden') && element.offsetParent !== null);
+  const index = all.indexOf(from);
+  if (index < 0) { focusMain(); return; }
+  const next = all[(index + step + all.length) % all.length];
+  if (next) next.focus({ preventScroll: true });
+  else focusMain();
+}
+
+/** The modal a popup conceptually belongs to: the topmost open dialog/drawer. */
+function activeDialog() {
+  const dialogs = document.querySelectorAll('[role="dialog"]');
+  for (let index = dialogs.length - 1; index >= 0; index -= 1) {
+    const dialogEl = dialogs[index];
+    if (!dialogEl.classList || !dialogEl.classList.contains('is-closing')) return dialogEl;
+  }
+  return null;
 }
 
 /* ── clipboard ────────────────────────────────────────────────── */

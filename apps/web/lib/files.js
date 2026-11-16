@@ -347,6 +347,28 @@ function renderGrid(ctx, nodes) {
   return grid;
 }
 
+/**
+ * What the trash will actually do with a deleted file, in one sentence.
+ *
+ * The retention window is a deployment setting (0 = never auto-purge), so a
+ * hard-coded "30 天" is a promise the server may not keep. The distinction that
+ * has to survive is 0 vs "unknown": `0` means the sweep is off and says so, a
+ * missing `stats.trash` means the client has not loaded it yet and falls back
+ * to the wording that is true in both cases.
+ */
+export function trashRetentionClause(stats) {
+  const trash = stats && stats.trash ? stats.trash : null;
+  const days = trash ? trash.retentionDays : undefined;
+  if (days === 0) return '本部署未开启自动清理。';
+  if (typeof days === 'number' && Number.isFinite(days) && days > 0) return days + ' 天内可以还原。';
+  return '可随时还原。';
+}
+
+/** The whole sentence, for the empty trash view. */
+export function trashRetentionNote(stats) {
+  return '删除的文件会先进入回收站，' + trashRetentionClause(stats);
+}
+
 function emptyFolder(ctx) {
   const route = ctx.state.route;
   const isTrash = route.name === 'trash';
@@ -356,7 +378,7 @@ function emptyFolder(ctx) {
     h('b', { text: isTrash ? '回收站是空的' : isStarred ? '还没有星标文件' : '这个文件夹还是空的' }),
     h('p', {
       text: isTrash
-        ? '删除的文件会先进入回收站，30 天内可以还原。'
+        ? trashRetentionNote(ctx.state.stats)
         : isStarred
           ? '在文件行左侧点击星标，常用文件会出现在这里。'
           : '把文件拖到这里，或使用上方的上传按钮。',
@@ -385,8 +407,10 @@ function openRowMenu(ctx, node, anchor) {
     items.push({ separator: true });
     items.push({ label: '重命名', icon: 'pencil', kbd: 'F2', onSelect: () => ctx.onRename(node) });
     items.push({ label: '移动到…', icon: 'move', onSelect: () => ctx.onMove(node) });
+    // The label states the consequence: this entry creates a public download
+    // link when none exists, it does not merely copy something.
     items.push(!isFolder
-      ? { label: '复制链接', icon: 'link', onSelect: () => ctx.onCopyLink(node) }
+      ? { label: '创建并复制链接', icon: 'link', onSelect: () => ctx.onCopyLink(node) }
       : { label: '复制文件夹名', icon: 'copy', onSelect: () => ctx.onCopyLink(node) });
     items.push({ separator: true });
     items.push({ label: '删除', icon: 'trash', danger: true, kbd: 'Del', onSelect: () => ctx.onDelete(node) });

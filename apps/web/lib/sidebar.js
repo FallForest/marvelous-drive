@@ -74,8 +74,17 @@ export function renderSidebar(ctx) {
   if (!roots.length) {
     treeHost.appendChild(h('p', { class: 'tree-empty', text: '还没有文件夹' }));
   } else {
-    const tree = h('div', { class: 'tree', attrs: { role: 'tree', 'aria-label': '文件夹树' } });
-    for (const folder of roots) tree.appendChild(treeRow(folder, 0, ctx, route));
+    // Roving tabindex: one stop for the whole tree, on the row the user last
+    // stood on. The tree is re-rendered on every expand, so the memory lives in
+    // rovingFolderId rather than in the DOM.
+    const visible = visibleFolderIds(roots, index.children, state.expanded);
+    const tabbableId = visible.indexOf(rovingFolderId) >= 0 ? rovingFolderId : (visible[0] || null);
+    const tree = h('div', {
+      class: 'tree',
+      attrs: { role: 'tree', 'aria-label': '文件夹树' },
+      on: { keydown: (event) => treeKeydown(event, ctx) },
+    });
+    for (const folder of roots) tree.appendChild(treeRow(folder, 0, ctx, route, tabbableId));
     treeHost.appendChild(tree);
   }
 
@@ -130,7 +139,7 @@ export function renderSidebar(ctx) {
   );
 }
 
-function treeRow(folder, depth, ctx, route) {
+function treeRow(folder, depth, ctx, route, tabbableId) {
   const state = ctx.state;
   const index = ctx.index;
   const children = (index.children.get(folder.id) || []).filter((node) => node.kind === 'folder');
@@ -143,6 +152,11 @@ function treeRow(folder, depth, ctx, route) {
     attrs: {
       type: 'button', role: 'treeitem', 'aria-current': active ? 'page' : null,
       'aria-expanded': hasChildren ? (expanded ? 'true' : 'false') : null,
+      'aria-level': String(depth + 1),
+      'data-folder-id': folder.id,
+      // Roving tabindex: exactly one row is in the tab order, so Tab steps past
+      // the tree instead of through every folder in it.
+      tabindex: folder.id === tabbableId ? '0' : '-1',
       style: 'padding-left:' + (8 + depth * 12) + 'px',
       title: folder.name,
     },
@@ -155,6 +169,7 @@ function treeRow(folder, depth, ctx, route) {
         }
         ctx.navigate('/folder/' + encodeURIComponent(folder.id));
       },
+      focus: () => { rememberTreeFocus(row, folder.id); },
       // Drop target for a dragged row: the shell installs the handlers because
       // it owns the drop bookkeeping (Files vs. our payload, hover state).
       dragenter: (event) => { if (ctx.onFolderDragOver) ctx.onFolderDragOver(folder.id, event); },
@@ -175,10 +190,152 @@ function treeRow(folder, depth, ctx, route) {
   const group = h('div', { class: 'stack', attrs: { style: 'gap:1px' } }, row);
   if (hasChildren && expanded) {
     const childTree = h('div', { class: 'tree', attrs: { role: 'group' } });
-    for (const child of children) childTree.appendChild(treeRow(child, depth + 1, ctx, route));
+    for (const child of children) childTree.appendChild(treeRow(child, depth + 1, ctx, route, tabbableId));
     group.appendChild(childTree);
   }
   return group;
+}
+
+/**
+ * The row the tree's single tab stop sits on.
+ *
+ * state.expanded lives in the store and the tree is re-rendered wholesale, so
+ * the row cannot remember this for us; the module remembers instead. Module
+ * scope, not ctx: ctx is rebuilt on every render as well.
+ */
+let rovingFolderId = null;
+
+/**
+ * Moves the tab stop with the caret.
+ *
+ * Both attributes matter for different reasons: tabindex is what the next Tab
+ * press sees, and the *current* row is also the one that has to re-find itself
+ * after a re-render — reading it off the DOM at that moment is impossible,
+ * because the node it would be read from is the one being replaced.
+ */
+function rememberTreeFocus(row, folderId) {
+  rovingFolderId = folderId;
+  const root = row.closest ? row.closest('[role="tree"]') : null;
+  if (!root) return;
+  for (const item of treeItems(root)) item.setAttribute('tabindex', item === row ? '0' : '-1');
+}
+
+/** Ids of the treeitems that are actually rendered, in visible (top-to-bottom) order. */
+function visibleFolderIds(rows, children, expanded) {
+  const out = [];
+  const walk = (nodes) => {
+    for (const node of nodes) {
+      out.push(node.id);
+      if (expanded.has(node.id)) walk((children.get(node.id) || []).filter((child) => child.kind === 'folder'));
+    }
+  };
+  walk(rows);
+  return out;
+}
+
+/** All focusable treeitem rows of one .tree, in document order. */
+function treeItems(root) {
+  return Array.from(root.querySelectorAll('[role="treeitem"]'));
+}
+
+/** Focus one folder row by id; returns the row it landed on, or null. */
+function focusFolderRow(folderId) {
+  const row = document.querySelector('.tree [data-folder-id="' + cssEscape(folderId) + '"]');
+  return activateRow(row);
+}
+
+/**
+ * Focus a row and move the tree's tab stop with it.
+ *
+ * The focus handler on the row does the same thing for a mouse or a Tab press;
+ * doing it here as well keeps the two independent: a handler moved by code does
+ * not depend on a focus event having been delivered, and repeating it is
+ * idempotent.
+ */
+function activateRow(row) {
+  if (!row || typeof row.focus !== 'function') return null;
+  rememberTreeFocus(row, row.dataset ? row.dataset.folderId : null);
+  row.focus({ preventScroll: true });
+  return row;
+}
+
+/** Attribute-selector-safe id: folder ids are opaque, so quotes and backslashes must survive. */
+function cssEscape(value) {
+  return String(value).replace(/["\\]/g, '\\$&');
+}
+
+/**
+ * Tree keyboard model (APG tree view), on the container:
+ *  - ArrowDown / ArrowUp / Home / End walk the visible rows;
+ *  - ArrowRight expands a collapsed folder, then steps into its first child;
+ *  - ArrowLeft collapses an open folder, otherwise steps up to the parent row;
+ *  - Enter / Space activate the row, i.e. open the folder (what a click does).
+ *
+ * Expanding re-renders the entire tree (ctx.onToggleFolder → runtime.renderShell),
+ * which detaches the node that had focus. Every branch that survives a re-render
+ * therefore re-finds its row by data-folder-id instead of trusting the old node.
+ */
+function treeKeydown(event, ctx) {
+  const row = event.target && event.target.closest ? event.target.closest('[role="treeitem"]') : null;
+  if (!row) return;
+  // The *outermost* tree, not the nearest `.tree`: a child group is a .tree too,
+  // and stopping there would make ArrowDown dead-end at the last row of a branch.
+  const root = row.closest('[role="tree"]');
+  if (!root) return;
+  const folderId = row.dataset ? row.dataset.folderId : null;
+  const items = treeItems(root);
+  const index = items.indexOf(row);
+  if (index < 0) return;
+  const expanded = row.getAttribute('aria-expanded');
+  const key = event.key;
+
+  if (key === 'ArrowDown' || key === 'ArrowUp' || key === 'Home' || key === 'End') {
+    event.preventDefault();
+    let next = index;
+    if (key === 'ArrowDown') next = Math.min(items.length - 1, index + 1);
+    else if (key === 'ArrowUp') next = Math.max(0, index - 1);
+    else if (key === 'Home') next = 0;
+    else next = items.length - 1;
+    activateRow(items[next]);
+    return;
+  }
+
+  if (key === 'ArrowRight') {
+    if (expanded === null) return;
+    event.preventDefault();
+    if (expanded === 'false') {
+      ctx.onToggleFolder(folderId);
+      focusFolderRow(folderId);
+      return;
+    }
+    // Already open: step into the first child. The children follow this row, so
+    // the next treeitem in document order is exactly that child.
+    activateRow(items[index + 1]);
+    return;
+  }
+
+  if (key === 'ArrowLeft') {
+    event.preventDefault();
+    if (expanded === 'true') {
+      ctx.onToggleFolder(folderId);
+      focusFolderRow(folderId);
+      return;
+    }
+    // A folder sits inside its parent's role="group"; the parent row is the last
+    // treeitem before this subtree starts.
+    const group = row.parentElement ? row.parentElement.parentElement : null;
+    const parentGroup = group && group.getAttribute && group.getAttribute('role') === 'group' ? group : null;
+    const parentRow = parentGroup && parentGroup.parentElement
+      ? parentGroup.parentElement.querySelector('[role="treeitem"]')
+      : null;
+    activateRow(parentRow);
+    return;
+  }
+
+  if (key === 'Enter' || key === ' ' || key === 'Spacebar') {
+    event.preventDefault();
+    ctx.navigate('/folder/' + encodeURIComponent(folderId));
+  }
 }
 
 /* ── breadcrumb ───────────────────────────────────────────────── */

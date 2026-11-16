@@ -31,6 +31,16 @@
   --border:#23262d;
   --border-soft:#1c1f25;
   --border-strong:#363c47;
+  /* The edge of a CONTROL, not of a decoration.
+     WCAG 1.4.11 asks 3:1 from the thing that tells you where a control's hit
+     area begins and ends; --border-strong measures 1.65:1 on --surface and
+     1.75:1 on --bg, so an unchecked checkbox was invisible until hovered.
+     --border-strong keeps its job as the decorative line; only controls move.
+     This step keeps every ratio above 3:1 against --bg (4.14), --surface
+     (3.89), --surface-2 (3.74), --surface-3 (3.55), --hover (3.39) and even the
+     pressed --active (3.06), so one token covers a control on any surface it is
+     placed on. Computed with the WCAG relative-luminance formula, not by eye. */
+  --control-border:#6e747f;
 
   /* ── text ───────────────────────────────────────────────────── */
   --text:#e8e9ec;

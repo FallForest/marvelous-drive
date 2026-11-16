@@ -30,6 +30,7 @@ const CHECKS = [
   ['heic-check', 'a HEIC upload becomes a preview a browser can show'],
   ['dnd-check', 'native file, thumbnail and group drags to list, grid, sidebar and breadcrumbs'],
   ['interaction-check', 'grid image fallbacks, keyboard controls and selected-item deletion'],
+  ['ui-regression-check', 'the 2026-11-15 audit: share capabilities, races, focus and layout'],
   ['move-check', 'move picker cancellation, root destination, keyboard, nesting and conflicts'],
   ['feature-check', 'thumbnails, batch bar, draggable rows, duplicates'],
   ['versions-check', 'the history drawer, absent on a v1 file'],

@@ -178,13 +178,24 @@ type Share = {
 }
 ```
 
-Public endpoints (no token):
+Public endpoints (no token). Every one of them runs the same gate — the token
+first, then the password from `?password=` or `X-Share-Password` — so a locked
+link answers `401 SHARE_LOCKED` everywhere rather than on the routes somebody
+remembered:
 
-- `GET /shared/:token[?password=]` → `{ share: { token, permission, expiresAt, node: { id, name, size, mime, kind } }, protected, locked }`;
-  `401 SHARE_LOCKED` while the password is missing or wrong.
-- `GET /shared/:token/content[?password=]` → bytes, always
-  `Content-Disposition: attachment`, counts one download.
-- `GET /shared/:token/file/:nodeId[?password=]` → one file inside a shared folder.
+| Route | Who | Body | Counts a download |
+| --- | --- | --- | --- |
+| `GET /shared/:token[?password=]` | both | `{ share: { token, permission, expiresAt, node: { id, name, size, mime, kind } }, protected, locked }` | no |
+| `GET /shared/:token/preview[?password=]` | both | the file's bytes, inline, `nosniff` + `Content-Security-Policy: sandbox` | no |
+| `GET /shared/:token/content[?password=]` | downloader | the file's bytes, `Content-Disposition: attachment` | **yes** |
+| `GET /shared/:token/children[?password=][&parentId=]` | both | `{ rootId, parentId, permission, entries: [{ id, name, kind, size, mime, updatedAt }] }` | no |
+| `GET /shared/:token/archive[?password=]` | downloader | the shared folder as one ZIP, `attachment` | **yes**, once |
+| `GET /shared/:token/file/:nodeId[?password=][&inline=1]` | both | one file inside the shared subtree: inline for a viewer or with `inline=1`, `attachment` for a downloader | only the attachment |
+
+`permission` is the whole capability model: a viewer link reads bytes and nothing
+else, and a downloader link reads them plus every attachment form. `parentId`
+outside the shared subtree is `404`, never an empty list — the recipient learns
+nothing about ids the share does not contain.
 
 ## Office preview (OOXML)
 

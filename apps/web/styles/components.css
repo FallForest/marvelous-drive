@@ -75,16 +75,19 @@
 .field{display:flex;flex-direction:column;gap:6px}
 .field > label,.field-label{font-size:var(--fs-xs);font-weight:600;color:var(--text-secondary);letter-spacing:.02em}
 .field-hint{font-size:var(--fs-xs);color:var(--text-muted);line-height:1.5}
+/* --control-border, not --border-strong: a field sits on --surface-2, where
+   --border-strong measures 1.59:1 and the box outline stops being an outline.
+   The control border token is 3.74:1 there and 3.89:1 on --surface. */
 .input,.textarea{
   width:100%;height:30px;padding:0 9px;
   background:var(--surface-2);color:var(--text);
-  border:1px solid var(--border-strong);border-radius:var(--radius-sm);
+  border:1px solid var(--control-border);border-radius:var(--radius-sm);
   font-size:var(--fs-sm);
   transition:var(--transition-colors),box-shadow var(--duration-fast) var(--ease-standard);
 }
 .textarea{height:auto;min-height:64px;padding:8px 9px;resize:vertical;line-height:1.55}
 .input::placeholder,.textarea::placeholder{color:var(--text-faint)}
-.input:hover,.textarea:hover{border-color:var(--border-strong)}
+.input:hover,.textarea:hover{border-color:var(--control-border)}
 .input:focus,.textarea:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft);background:var(--surface)}
 .input[aria-invalid="true"]{border-color:var(--danger);box-shadow:0 0 0 3px var(--danger-soft)}
 .input[disabled]{color:var(--text-faint);background:var(--surface);cursor:not-allowed}
@@ -99,7 +102,7 @@
   display:flex;width:100%;align-items:center;gap:6px;
   height:30px;padding:0 9px;min-width:0;
   background:var(--surface-2);color:var(--text);
-  border:1px solid var(--border-strong);border-radius:var(--radius-sm);
+  border:1px solid var(--control-border);border-radius:var(--radius-sm);
   font-size:var(--fs-sm);text-align:left;
   transition:var(--transition-surface);
   transform-origin:center;

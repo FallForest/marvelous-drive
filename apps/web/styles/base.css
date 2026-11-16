@@ -18,7 +18,9 @@ body{
   -moz-osx-font-smoothing:grayscale;
   text-rendering:optimizeLegibility;
   font-synthesis:none;
-  min-width:360px;
+  /* No min-width: forcing a 360px canvas made a 320px viewport scroll the page
+     sideways and cut the end of every row off. Narrow viewports are handled by
+     reflow (see the 360px block in app.css), not by pretending they are wider. */
   overflow:hidden;
 }
 #app{height:100%}
@@ -137,17 +139,34 @@ input,textarea,select,[contenteditable="true"]{
 }
 
 /* ── auth screens ─────────────────────────────────────────────── */
+/* Centred, but scrollable when the card is taller than the viewport.
+   `place-items:center` on a grid centres by overflow in both directions, so at
+   390x280 the top of the card sat above the scroll origin and neither the
+   sign-in button nor the "register instead" toggle could be reached. Flex with
+   an auto margin on the card centres while there is free space and collapses to
+   0 when there is none, which is the behaviour a short viewport needs;
+   align-items:flex-start is what the collapsed margin resolves to, so the card
+   starts at the top of the scroller instead of overflowing it. */
 .auth-shell{
   height:100dvh;
-  display:grid;
-  place-items:center;
+  display:flex;
+  align-items:flex-start;
+  justify-content:center;
+  overflow-y:auto;
+  overscroll-behavior:contain;
   padding:24px;
   background:
     radial-gradient(900px 480px at 50% -10%,rgba(226,104,76,.07),transparent 70%),
     var(--bg);
 }
 .auth-card{
+  /* margin:auto is the centring: it absorbs the free space when the viewport is
+     tall and resolves to 0 when it is not, which leaves the card reachable at
+     the top of the scroller. min-width:0 keeps the flex line from refusing to
+     shrink the card below its content width on a narrow phone. */
   width:min(100%,382px);
+  min-width:0;
+  margin:auto;
   padding:26px 26px 22px;
   background:var(--surface);
   border:1px solid var(--border);

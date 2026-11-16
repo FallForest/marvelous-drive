@@ -6,6 +6,82 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.25.0] - 2026-11-16
+
+Closing the gaps between what the interface promises and what it does.
+
+The starting point was an interaction audit of the 0.24.0 snapshot: 21 findings,
+4 of them P1, each with a reproduction. This release fixes all 21. The audit is
+kept in `docs/audits/2026-11-15-ui` and every case it describes now has a
+regression check (`npm run ui-regression-check`).
+
+### Added
+
+- **A public link now has a capability model that matches its own buttons.**
+  `/shared/:token/preview` streams bytes inline for both permissions;
+  `/shared/:token/children?parentId=` lists one level of a folder share;
+  `/shared/:token/archive` zips it for a downloader. The viewer link keeps its
+  promise — "仅查看（在线预览）" previews — and a downloader's budget is spent by
+  downloads, never by opening the page.
+- **A folder share is browsable.** The public page walks the shared subtree one
+  level at a time with a breadcrumb trail kept in memory, previews an entry in
+  place, and offers each item plus the whole folder as a download when the link
+  allows it.
+- **Same-name uploads ask what to do.** 替换 / 保留两者 / 跳过, with a
+  "this batch" checkbox, wired to the `onConflict` strategy the server already
+  understood. The completion notice says which version of what happened.
+- **Search pages past the first 50.** `/search` answers `{ results, limit,
+  offset, hasMore }` and the client appends the next page on demand; it still
+  never invents a total.
+- **`apps/web/lib/shortcuts.js`** — the single-character shortcut switch
+  (WCAG 2.1.4), persisted, reachable from the account menu, with Ctrl/Cmd+K as
+  the modified alternative that always works.
+- **`apps/web/lib/focus.js`** — the popup registry that puts a floating menu back
+  inside its dialog's tab cycle, plus `focusRouteContent()` for the caret a
+  navigation used to drop on `<body>`.
+- **`scripts/ui-regression-check.mjs`** — 38 browser assertions across the 21 audit
+  cases (several findings need more than one). It runs as part of
+  `npm run browser-checks`, and on its own it needs a disposable server like
+  every other browser check.
+
+### Changed
+
+- **The folder tree is a tree.** Arrow keys expand, collapse and walk it, Enter
+  opens, and the whole tree is a single tab stop with roving tabindex.
+- **The share menu entry says "创建并复制链接".** An existing live link is reused
+  without a request; otherwise the dialog states the scope (no password, no
+  expiry, anyone with the URL) before anything is created, and every created
+  link is shown next to its own 撤销 button. A failed clipboard copy no longer
+  leaves an unlisted public link behind.
+- **Batch outcomes are counted, not assumed.** A partly failed delete keeps the
+  failed rows selected and names them; a partly failed batch download reports
+  the split; a ZIP only reports success once its fetch resolved, and its carrier
+  node survives a failure so the download can be retried.
+- **The off-canvas sidebar is `inert` while closed.** It was only translated
+  off-screen, so Tab walked into a search field at x=-238.
+- **Select controls declare `aria-haspopup="menu"`** and carry their current
+  value as their accessible name, matching the menu they actually open.
+- **The trash retention sentence comes from the deployment.** `stats.trash`
+  already carried `retentionDays`; the copy no longer claims 30 days on a
+  server configured for 1 or for none.
+- **The layout reflows at 320 CSS pixels.** `body` no longer forces a 360px
+  canvas; a ≤360px breakpoint tightens the toolbar, row grid and queue instead.
+  The login card scrolls on a short viewport.
+
+### Fixed
+
+- **A stale search can no longer overwrite a newer one.** Loads carry a ticket
+  and only the newest may commit, so the input, URL, title and results agree.
+- **A row's ⋯ button is visible while it has focus**, and the star, checkbox and
+  queue actions are painted on a device without hover.
+- **Control boundaries reach 3:1.** A `--control-border` token replaces the
+  decorative `--border-strong` on checkboxes, inputs and selects (3.06–4.14:1
+  against every surface a control can sit on).
+- **Queue action buttons are 24×24 with a 4px gap**, and no longer shrink to
+  23.3px in a narrow panel.
+- **Opening a menu no longer closes it on its own entrance**, and a dialog's
+  deferred autofocus no longer steals a control the user just focused.
+
 ## [0.24.0] - 2026-11-15
 
 Browsing photos with a thumb, and editing a text file on purpose.

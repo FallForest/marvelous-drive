@@ -88,6 +88,9 @@ export function buildContext(ancestors, selectionSlot) {
       runtime.navigate(q ? routePath({ name: 'search', query: q }) : '/');
     },
     onSearchClear: () => { if (store.state.route.name === 'search') runtime.navigate('/'); },
+    // The search page's "继续加载": the shell owns the request and the append,
+    // the view only renders the button and its busy state.
+    onSearchMore: () => runtime.loadMoreSearch(),
 
     onToggleFolder: (folderId) => {
       const state = store.state;

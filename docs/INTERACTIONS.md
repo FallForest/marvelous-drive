@@ -46,10 +46,28 @@ the trash; the confirmation lists how many items will be affected.
   during hover. Browser-generated image payloads need testing with native mouse
   input; synthetic `DataTransfer` events alone cannot reproduce them.
 
+## Public links
+
+A viewer link previews and nothing else: `/shared/:token/preview` streams bytes
+inline, the folder share lists one level at a time, and no button offers a
+download the server would refuse. A downloader link adds attachments — the file,
+one entry, or the whole folder as a ZIP — and those are what spend a link's
+download budget; opening the page never does.
+
+## Batch outcomes
+
+A batch that partly fails says so and keeps the failed items selected, so the
+same key or the same button retries exactly those. A ZIP reports success only
+after its fetch resolved, and its carrier node is deleted only then — a failed
+download leaves the archive in the list to be clicked again.
+
 ## Regression checks
 
-Run `npm run dnd-check`, `npm run interaction-check` and `npm run move-check`
-against a disposable server, or include them via `npm run browser-checks`.
+Run `npm run dnd-check`, `npm run interaction-check`, `npm run move-check` and
+`npm run ui-regression-check` against a disposable server, or include them via
+`npm run browser-checks`. `ui-regression-check` is the browser half of
+`docs/audits/2026-11-15-ui`: one case per audit id, including the public link, the
+search race, the modal menu, the tree keys and the 320px layout.
 Use `-- --server http://127.0.0.1:PORT` for a specific instance. The drag check
 uses native Chromium mouse input and verifies the resulting parent IDs through
 the API; it also checks prohibited targets and drag cleanup. The interaction

@@ -3,6 +3,8 @@
  * created directly and re-created only where re-rendering is cheap.
  */
 
+import { FOCUSABLE_SELECTOR, tabCycle } from './focus.js';
+
 /** Create an element. props: class, attrs, style, dataset, html, on, value/checked. */
 export function h(tag, props, ...children) {
   const el = document.createElement(tag);
@@ -118,26 +120,30 @@ export function debounce(fn, wait) {
   return wrapped;
 }
 
-const FOCUSABLE = 'a[href],button:not([disabled]),input:not([disabled]),select:not([disabled]),textarea:not([disabled]),[tabindex]:not([tabindex="-1"])';
-
 /**
  * Keep Tab / Shift-Tab inside a container. Returns a release function.
  * The caller owns Escape handling so it can decide between "close" and "back".
+ *
+ * "Inside" is the container *plus its open popups*. A menu is appended to <body>
+ * so it can float over the page, which made it invisible to this trap: at the
+ * last menu item Tab walked out of the dialog and landed on <body>. The cycle is
+ * therefore built from focus.js tabCycle(), which appends the registered popups
+ * after the container's own controls.
  */
 export function trapFocus(container) {
   const previous = document.activeElement;
-  const focusables = () => Array.from(container.querySelectorAll(FOCUSABLE))
-    .filter((el) => !el.hasAttribute('hidden') && el.offsetParent !== null);
+  const focusables = () => tabCycle(container, FOCUSABLE_SELECTOR);
   const onKey = (event) => {
     if (event.key !== 'Tab') return;
     const items = focusables();
     if (!items.length) { event.preventDefault(); container.focus(); return; }
     const first = items[0];
     const last = items[items.length - 1];
-    if (event.shiftKey && (document.activeElement === first || !container.contains(document.activeElement))) {
+    const active = document.activeElement;
+    if (event.shiftKey && (active === first || !items.includes(active))) {
       event.preventDefault();
       last.focus();
-    } else if (!event.shiftKey && document.activeElement === last) {
+    } else if (!event.shiftKey && active === last) {
       event.preventDefault();
       first.focus();
     }
@@ -184,12 +190,22 @@ export function trapFocus(container) {
       }
       // Nothing to go back to: at least do not leave the caret on <body>, where
       // the next Tab restarts from the top of the document.
-      if (document.activeElement === document.body) {
-        const main = document.querySelector('[data-vt-scope="main"], main');
-        if (main && typeof main.focus === 'function') main.focus({ preventScroll: true });
-      }
+      if (document.activeElement === document.body) focusMain();
     };
     if (typeof requestAnimationFrame === 'function') requestAnimationFrame(restore);
     else restore();
   };
+}
+
+/**
+ * The fallback target when an overlay closes with nothing to go back to: the
+ * page column, which is already a tab stop (tabindex="-1" in the shell).
+ */
+export function focusMain() {
+  const main = document.querySelector('[data-vt-scope="main"], main');
+  if (main && typeof main.focus === 'function') {
+    main.focus({ preventScroll: true });
+    return true;
+  }
+  return false;
 }

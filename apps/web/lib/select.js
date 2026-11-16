@@ -14,10 +14,24 @@
  * Both are buttons that open the app's own menu (lib/ui.js openMenu), which is
  * already the pattern every other popup in this app uses — same radius, same
  * shadow, same spring, same keyboard handling, same Escape stack.
+ *
+ * What they are NOT is a listbox: openMenu builds role="menu" with
+ * role="menuitemradio" rows carrying aria-checked, so the trigger advertises
+ * aria-haspopup="menu". Claiming "listbox" made a screen reader describe a
+ * widget that never appears and hide the checked state that does.
  */
 import { h, raw } from './dom.js';
 import { icon } from './format.js';
 import { openMenu } from './ui.js';
+
+// Ids for the two text nodes a trigger needs to point its ARIA at. A counter
+// rather than config options: the caller should not have to invent ids for
+// "this button's own value".
+let sequence = 0;
+function localId(kind) {
+  sequence += 1;
+  return 'sel-' + kind + '-' + sequence;
+}
 
 /**
  * A field-shaped select.
@@ -36,38 +50,62 @@ export function renderSelect(options) {
 
   let value = opts.value === undefined || opts.value === null ? '' : String(opts.value);
 
-  const text = h('span', { class: 'select-value truncate' });
+  const valueId = localId('value');
+  const text = h('span', { class: 'select-value truncate', attrs: { id: valueId } });
+  // The name of a menu button should be the answer it currently shows, not the
+  // question it answers: "仅查看" is what a user needs to hear, "权限" is already
+  // on screen next to it. aria-label used to overwrite the value with the field
+  // name; the field name now rides along as a description instead, and the
+  // visible value stays the accessible name.
+  const hintId = opts.label ? localId('hint') : null;
   const control = h('button', {
     class: 'select' + (opts.className ? ' ' + opts.className : ''),
     attrs: {
       type: 'button',
-      'aria-haspopup': 'listbox',
+      'aria-haspopup': 'menu',
       'aria-expanded': 'false',
-      'aria-label': opts.label || null,
+      'aria-labelledby': valueId,
+      'aria-describedby': hintId,
       id: opts.id || null,
       disabled: opts.disabled || undefined,
     },
     on: {
-      click: () => {
-        openMenu({
-          anchor: control,
-          align: opts.align || 'start',
-          items: items.map((item) => ({
-            label: String(item.label),
-            icon: null,
-            kbd: opts.kbdFor ? opts.kbdFor(item.value) : null,
-            // A tick on the active row: a menu without state reads as a command
-            // list, and the user cannot tell what is currently chosen.
-            checked: String(item.value) === value,
-            onSelect: () => {
-              setValue(item.value);
-              if (typeof opts.onChange === 'function') opts.onChange(String(item.value));
-            },
-          })),
-        });
+      click: () => open({}),
+      // APG menu button: Down/Up open the popup with the first/last item in
+      // focus. Enter and Space already open it through the native click.
+      keydown: (event) => {
+        if (event.key === 'ArrowDown') { event.preventDefault(); open({ last: false }); }
+        else if (event.key === 'ArrowUp') { event.preventDefault(); open({ last: true }); }
       },
     },
-  }, text, raw(icon('chevron-down', 13)));
+  }, text, raw(icon('chevron-down', 13)),
+  hintId ? h('span', { class: 'visually-hidden', attrs: { id: hintId }, text: opts.label || '' }) : null);
+
+  function open(openOptions) {
+    const menu = openMenu({
+      anchor: control,
+      label: opts.label || null,
+      align: opts.align || 'start',
+      items: items.map((item) => ({
+        label: String(item.label),
+        icon: null,
+        kbd: opts.kbdFor ? opts.kbdFor(item.value) : null,
+        // A tick on the active row: a menu without state reads as a command
+        // list, and the user cannot tell what is currently chosen.
+        checked: String(item.value) === value,
+        onSelect: () => {
+          setValue(item.value);
+          if (typeof opts.onChange === 'function') opts.onChange(String(item.value));
+        },
+      })),
+    });
+    if (openOptions && openOptions.last && menu.el) {
+      const rows = menu.el.querySelectorAll('.menu-item:not([disabled])');
+      const last = rows[rows.length - 1];
+      if (last) last.focus();
+    }
+    return menu;
+  }
 
   function setValue(next) {
     value = next === undefined || next === null ? '' : String(next);
@@ -106,34 +144,51 @@ export function renderMenu(options) {
     return found ? String(found.label) : '';
   };
 
-  const text = h('span', { text: labelFor(value) });
+  const valueId = localId('value');
+  const text = h('span', { attrs: { id: valueId }, text: labelFor(value) });
+  const hintId = opts.label ? localId('hint') : null;
   const control = h('button', {
     class: 'btn btn-menu' + (opts.className ? ' ' + opts.className : ''),
     attrs: {
       type: 'button',
-      'aria-haspopup': 'listbox',
+      'aria-haspopup': 'menu',
       'aria-expanded': 'false',
-      'aria-label': opts.label || null,
+      'aria-labelledby': valueId,
+      'aria-describedby': hintId,
       disabled: opts.disabled || undefined,
     },
     on: {
-      click: () => {
-        openMenu({
-          anchor: control,
-          align: opts.align || 'end',
-          items: items.map((item) => ({
-            label: String(item.label),
-            checked: String(item.value) === value,
-            onSelect: () => {
-              value = String(item.value);
-              text.textContent = labelFor(value);
-              if (typeof opts.onChange === 'function') opts.onChange(value);
-            },
-          })),
-        });
+      click: () => open({}),
+      keydown: (event) => {
+        if (event.key === 'ArrowDown') { event.preventDefault(); open({ last: false }); }
+        else if (event.key === 'ArrowUp') { event.preventDefault(); open({ last: true }); }
       },
     },
-  }, text, raw(icon('chevron-down', 12)));
+  }, text, raw(icon('chevron-down', 12)),
+  hintId ? h('span', { class: 'visually-hidden', attrs: { id: hintId }, text: opts.label || '' }) : null);
+
+  function open(openOptions) {
+    const menu = openMenu({
+      anchor: control,
+      label: opts.label || null,
+      align: opts.align || 'end',
+      items: items.map((item) => ({
+        label: String(item.label),
+        checked: String(item.value) === value,
+        onSelect: () => {
+          value = String(item.value);
+          text.textContent = labelFor(value);
+          if (typeof opts.onChange === 'function') opts.onChange(value);
+        },
+      })),
+    });
+    if (openOptions && openOptions.last && menu.el) {
+      const rows = menu.el.querySelectorAll('.menu-item:not([disabled])');
+      const last = rows[rows.length - 1];
+      if (last) last.focus();
+    }
+    return menu;
+  }
 
   // Same contract as renderSelect: `.value` reads like a form control.
   Object.defineProperty(control, 'value', {

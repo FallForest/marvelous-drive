@@ -118,13 +118,57 @@ function matchNotes(results) {
   );
 }
 
+/**
+ * The "there is more" strip under a search page.
+ *
+ * The server reports `hasMore` because its fetch window overflowed; the client
+ * has no total and must not invent one, so the text talks about what is on
+ * screen instead of how much exists. The button disables itself while a page is
+ * in flight — `searchMore.loading` is owned by the caller, the render just
+ * reflects it, so a double click cannot append the same page twice.
+ */
+function searchMoreBar(ctx) {
+  const more = store.state.searchMore;
+  if (!more || !more.hasMore) return null;
+  const shown = (store.state.searchResults || []).length;
+  const loading = Boolean(more.loading);
+  const button = h('button', {
+    class: 'btn btn-sm' + (loading ? ' is-busy' : ''),
+    attrs: { type: 'button', 'aria-busy': loading ? 'true' : 'false' },
+    text: loading ? '正在加载…' : '继续加载',
+    on: {
+      click: () => {
+        if (loading) return;
+        if (typeof ctx.onSearchMore !== 'function') return;
+        ctx.onSearchMore();
+      },
+    },
+  });
+  button.disabled = loading;
+  // The class is the token for a future .search-more rule; the inline layout is
+  // what keeps the strip from collapsing into two stacked lines today.
+  return h('div', {
+    class: 'search-more',
+    attrs: { role: 'status' },
+    style: {
+      display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap',
+      padding: '10px 12px', marginTop: '8px',
+      border: '1px solid var(--border-soft)', borderRadius: 'var(--radius-sm)',
+      background: 'var(--surface-2)', fontSize: 'var(--fs-sm)',
+    },
+  },
+    h('span', { class: 'muted', text: '当前显示前 ' + shown + ' 项，还有更多匹配。' }),
+    h('span', { style: { marginLeft: 'auto' } }, button),
+  );
+}
+
 /** The search page. */
 function searchView(ctx) {
   const state = store.state;
   const query = state.searchQuery || '';
   const results = state.searchResults || [];
   const header = h('div', { class: 'section-head' },
-    h('h1', { text: '搜索' }),
+    h('h1', { attrs: { 'data-route-heading': '' }, text: '搜索' }),
     h('span', { class: 'sub', text: query ? describeResults(query, results) : '在侧边栏输入关键字' }),
   );
   if (!query) {
@@ -146,7 +190,13 @@ function searchView(ctx) {
       behind ? h('p', { class: 'muted', text: '另有 ' + coverage.missing + ' 个文件还没有建立索引，结果可能不完整。' }) : null,
     ));
   }
-  const wrap = h('div', {}, header, ctx.selectionSlot, renderFileList(listContext(ctx, results)), matchNotes(results));
+  const wrap = h('div', {},
+    header,
+    ctx.selectionSlot,
+    renderFileList(listContext(ctx, results)),
+    matchNotes(results),
+    searchMoreBar(ctx),
+  );
   runtime.paintSelection();
   return wrap;
 }
@@ -163,7 +213,9 @@ function listView(ctx) {
 
   const wrap = h('div', {},
     h('div', { class: 'section-head' },
-      h('h1', { text: heading }),
+      // data-route-heading is the anchor the shell focuses after a navigation
+      // (a route change must move focus somewhere predictable for the keyboard).
+      h('h1', { attrs: { 'data-route-heading': '' }, text: heading }),
       h('span', { class: 'sub', text: nodes.length + ' 项' }),
     ),
     ctx.selectionSlot,

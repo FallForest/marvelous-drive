@@ -217,14 +217,23 @@ body.is-moving .frow,body.is-moving .gcard{cursor:grabbing}
 .frow .star svg{width:13px;height:13px}
 .frow:hover .star,.frow[data-selected="true"] .star,.frow .star:focus-visible{opacity:1}
 .frow .more{width:22px;height:22px;justify-self:end;color:var(--text-faint);opacity:0;transition:opacity var(--duration-fast) var(--ease-standard),color var(--duration-fast) var(--ease-standard)}
-.frow:hover .more,.frow[data-selected="true"] .more,.frow .more[aria-expanded="true"]{opacity:1}
+/* Hover is not the only way to reach a control. A keyboard user tabs into the
+   row and then into its star / more buttons: the button has to be painted
+   before it can be seen, so :focus-visible and :focus-within reveal it too.
+   (The star already had this; the "more" button did not, so the one control
+   that opens every per-file action was invisible while focused.) */
+.frow:hover .more,.frow[data-selected="true"] .more,.frow .more:focus-visible,.frow .more[aria-expanded="true"]{opacity:1}
+.frow:focus-within .star,.frow:focus-within .more,.frow:focus-within .open-hint{opacity:1}
+.frow:focus-within .open-hint{transform:none}
 .frow .more svg{width:14px;height:14px}
 .frow .badge{margin-left:2px;height:16px;font-size:10px}
 /* Checkbox: quiet until the row is hovered or chosen, but never a hit target the
    user has to guess at — it keeps its 14px box and its own focus ring. */
 .pick{
   width:14px;height:14px;margin:0;appearance:none;flex:0 0 14px;
-  border:1.5px solid var(--border-strong);border-radius:4px;background:var(--surface);
+  /* --control-border, not --border-strong: the unchecked box has to be findable
+     before the pointer is on it (3.89:1 on --surface, 1.65:1 before). */
+  border:1.5px solid var(--control-border);border-radius:4px;background:var(--surface);
   cursor:pointer;display:grid;place-items:center;
   transition:background var(--duration-instant) var(--ease-standard),border-color var(--duration-instant) var(--ease-standard);
 }
@@ -267,7 +276,18 @@ body.is-moving .frow,body.is-moving .gcard{cursor:grabbing}
 .gcard .gname span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .gcard .gmeta{font-size:10.5px;color:var(--text-faint)}
 .gcard .gactions{display:flex;align-items:center;gap:2px;opacity:0}
-.gcard:hover .gactions,.gcard:focus-within .gactions{opacity:1}
+.gcard:hover .gactions,.gcard:focus-within .gactions,.gcard .gactions:focus-within{opacity:1}
+
+/* No hover: the row and card actions are permanent.
+   A touch device never fires :hover, so "reveal on hover" means "never" there —
+   the star and the overflow button existed but nothing could reveal them. The
+   checkbox rule above stays exactly as it was: this block only decides what is
+   PRE-PAINTED, it does not change the "a tap may select first" gesture. */
+@media (hover:none){
+  .frow .star,.frow .more{opacity:1}
+  .frow .open-hint{opacity:1;transform:none}
+  .gcard .gactions{opacity:1}
+}
 .gcard .gactions .icon-btn{width:22px;height:22px}
 .gcard .gactions .icon-btn svg{width:13px;height:13px}
 
@@ -394,7 +414,7 @@ body.is-moving .frow,body.is-moving .gcard{cursor:grabbing}
    only element that answers "how far along is the whole drop". */
 .qbar.qbar-total{grid-column:auto;height:3px;margin-top:0}
 .queue-list{max-height:min(38vh,290px);overflow:auto;padding:4px;display:flex;flex-direction:column;gap:2px}
-.qitem{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:2px 8px;padding:6px 7px;border-radius:var(--radius-xs);transition:var(--transition-colors)}
+.qitem{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:4px 8px;padding:6px 7px;border-radius:var(--radius-xs);transition:var(--transition-colors)}
 .qitem:hover{background:var(--hover)}
 .qitem .qname{font-size:var(--fs-xs);color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .qitem .qstate{font-size:10px;color:var(--text-faint);font-variant-numeric:tabular-nums;white-space:nowrap}
@@ -409,9 +429,19 @@ body.is-moving .frow,body.is-moving .gcard{cursor:grabbing}
 .qitem.is-done .qbar i{background:var(--success)}
 .qitem.is-resumable .qbar i{background:var(--warning);opacity:.7}
 .qitem .qstate.is-resumable{color:var(--warning)}
-.qitem .icon-btn{width:18px;height:18px}
-.qitem .icon-btn svg{width:11px;height:11px}
-.qactions{display:flex;align-items:center;gap:1px}
+/* 24px, not 18: the queue row carries three or four actions side by side and
+   at 18px with a 1px gap the pointer landed on the wrong one. 24x24 with a
+   4px gap keeps 28px between centres, and the glyph goes to 13px so the
+   target grew without the icon turning into a blob. */
+/* flex:0 0 auto keeps the 24px honest: the actions row is a flex line inside a
+   narrow panel, and a shrinkable 24px button measures 23.3px in a 390px queue
+   — enough to fail the minimum target size the rule exists to guarantee. */
+.qitem .icon-btn{width:24px;height:24px;min-width:24px;min-height:24px;flex:0 0 auto}
+.qitem .icon-btn svg{width:13px;height:13px}
+/* gap:4px is the floor that keeps centre-to-centre at 24+4, not the old 18+1;
+   the ring stays visible because the extra padding is real, not clipped. */
+.qactions{display:flex;align-items:center;gap:4px;flex-wrap:wrap;justify-content:flex-end;row-gap:4px}
+.qitem .qactions .icon-btn:focus-visible{outline:2px solid var(--focus-ring);outline-offset:1px}
 
 /* ═══ move picker ═════════════════════════════════════════════ */
 .move-list{display:flex;flex-direction:column;gap:1px;max-height:min(44vh,340px);overflow:auto;padding:4px;border:1px solid var(--border);border-radius:var(--radius-sm);background:var(--surface-2)}
@@ -506,6 +536,48 @@ body.is-moving .frow,body.is-moving .gcard{cursor:grabbing}
   .statusbar span:last-child{display:none}
   .hint-card{display:none}
   .queue{left:10px;right:10px;width:auto}
+}
+/* ── 320px phones (and anything narrower than 360) ──────────────
+ * The old stylesheet pinned the page to 360px, so a 320px viewport scrolled
+ * sideways and the end of every row — including the "more" button — sat off
+ * screen. Nothing is pinned now; each surface reflows instead. The drawer
+ * sidebar and its scrim from the 880px block are untouched: they are position:
+ * fixed and already fit any width.
+ *
+ * The list drops its size column rather than its actions: at 18px + name + 26px
+ * the name keeps ~180px, and the overflow button that owns every per-file
+ * action stays inside the row instead of being clipped away. */
+@media (max-width:360px){
+  .topbar{padding:0 8px;gap:6px}
+  .top-actions{gap:2px}
+  .crumb{max-width:96px}
+  .toolbar{padding:6px 8px;gap:6px}
+  .segmented{padding:1px;gap:1px}
+  .segmented button{padding:0 4px}
+  .statusbar{padding:0 8px;gap:8px;overflow:hidden}
+  .statusbar span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .list{padding:0 2px 20px}
+  .list-head,.frow{grid-template-columns:18px minmax(0,1fr) 26px;gap:6px}
+  /* the row box carries a 1px transparent border, so a header without one had a
+     2px wider track and the column labels drifted off their rows; matching the
+     border keeps the two grids identical */
+  .list-head{height:24px;padding:0 6px;border:1px solid transparent}
+  .list-head .col-size,.frow .meta.num{display:none}
+  .frow{height:36px;padding:0 6px}
+  /* the trailing column is the overflow button: it gets the full 26px track on
+     touch widths so the target is not a 22px square inside a 26px cell */
+  .frow .more{width:26px;height:26px}
+  .frow .more svg{width:15px;height:15px}
+  .grid{padding:8px 8px 24px;grid-template-columns:repeat(auto-fill,minmax(112px,1fr));gap:8px}
+  .section-head{padding:12px 10px 4px}
+  .queue{left:6px;right:6px}
+  .toast-stack{left:6px;right:6px;max-width:none;align-items:stretch}
+  .toast{min-width:0}
+  .auth-shell{padding:16px}
+  .auth-card{padding:20px 18px 18px}
+  .dialog-body{padding:12px 12px}
+  .dialog-head{padding:12px 12px 0}
+  .dialog-foot{padding:10px 12px}
 }
 
 /* ── office preview (ppt / docx / xlsx) ───────────────────────── */
