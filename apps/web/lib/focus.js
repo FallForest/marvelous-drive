@@ -131,6 +131,85 @@ export function focusRouteContent(viewEl) {
   return document.activeElement === target;
 }
 
+/**
+ * Describes where the caret is, in terms a re-render can find again.
+ *
+ * A refresh replaces the node the user is standing on, so the element itself is
+ * useless after it. What survives is the semantic address: which row it belonged
+ * to, and which control inside that row. Both are stable across a re-render of
+ * the same list, which is exactly the case a star toggle or a rename needs.
+ *
+ * Returns null when the caret is not somewhere worth restoring: on <body>, in a
+ * text field (the shell has its own rule for those), or inside a live overlay
+ * whose own lifetime outlasts the refresh.
+ */
+export function captureFocusAddress(root) {
+  if (typeof document === 'undefined' || !root) return null;
+  const active = document.activeElement;
+  if (!active || active === document.body) return null;
+  if (!root.contains || !root.contains(active)) return null;
+  if (active.closest && active.closest('[role="dialog"], .drawer, .menu, .scrim')) return null;
+  const tag = String(active.tagName || '').toLowerCase();
+  if (tag === 'input' || tag === 'textarea' || tag === 'select' || active.isContentEditable) return null;
+
+  const row = active.closest('[data-id]');
+  const rowId = row ? row.getAttribute('data-id') : null;
+  // Within the row, identify the control by the attributes that describe it, in
+  // the order that survives a re-render: an aria-label is stable, a class can be
+  // rewritten by state, and a position in a list is not stable at all.
+  const describe = (element) => {
+    if (!element) return null;
+    const label = element.getAttribute && element.getAttribute('aria-label');
+    if (label) return { kind: 'label', value: label };
+    const action = element.getAttribute && element.getAttribute('data-action');
+    if (action) return { kind: 'action', value: action };
+    return { kind: 'tag', value: String(element.tagName || '').toLowerCase() };
+  };
+  const control = row && row !== active ? describe(active) : null;
+  return { rowId, control };
+}
+
+/**
+ * Puts the caret back after the list was re-rendered.
+ *
+ * Returns true when it found the same control again. A control that no longer
+ * exists (the star became "取消星标", a row disappeared) falls back to the row
+ * itself, which keeps the user's place even when the exact button changed. What
+ * it never does is guess a different row: a refresh that drops the item leaves
+ * the caret alone rather than moving it somewhere the user did not choose.
+ */
+export function restoreFocusAddress(root, address) {
+  if (!address || !root || typeof root.querySelector !== 'function') return false;
+  if (!address.rowId) return false;
+  const escape = (value) => String(value).replace(/["\\]/g, '\\$&');
+  const row = root.querySelector('[data-id="' + escape(address.rowId) + '"]');
+  if (!row) return false;
+
+  const control = address.control;
+  if (control) {
+    let candidate = null;
+    if (control.kind === 'label') candidate = row.querySelector('[aria-label="' + escape(control.value) + '"]');
+    else if (control.kind === 'action') candidate = row.querySelector('[data-action="' + escape(control.value) + '"]');
+    else if (control.kind === 'tag') candidate = row.querySelector(control.value);
+    if (candidate && typeof candidate.focus === 'function') {
+      candidate.focus({ preventScroll: true });
+      if (document.activeElement === candidate) return true;
+    }
+    // The control changed identity (加星标 became 取消星标): stay on the equivalent
+    // one inside the same row rather than dropping the caret to <body>.
+    const sameSlot = row.querySelector('.gactions button, .row-actions button');
+    if (sameSlot && typeof sameSlot.focus === 'function') {
+      sameSlot.focus({ preventScroll: true });
+      if (document.activeElement === sameSlot) return true;
+    }
+  }
+  if (typeof row.focus === 'function') {
+    row.focus({ preventScroll: true });
+    return document.activeElement === row;
+  }
+  return false;
+}
+
 /** True when the active element is <body>, missing, or no longer in the document. */
 function focusWasLost() {
   if (typeof document === 'undefined') return false;

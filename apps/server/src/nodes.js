@@ -80,9 +80,10 @@ export function requireFile(userId, id) {
 }
 
 function assertNameFree(userId, parentId, name, exceptId) {
-  const clash = db.prepare(`SELECT id FROM nodes
-    WHERE user_id=? AND IFNULL(parent_id,'')=IFNULL(?,'') AND name=? AND deleted_at IS NULL AND id<>?`)
-    .get(userId, parentId, name, exceptId || '')
+  const clash = db.prepare(`SELECT id FROM nodes n
+    WHERE IFNULL(parent_id,'')=IFNULL(?,'') AND name=? AND deleted_at IS NULL AND id<>?
+      AND (user_id=? OR (? IS NOT NULL AND EXISTS (SELECT 1 FROM memberships m WHERE m.user_id=? AND m.workspace_id=n.workspace_id)))`)
+    .get(parentId, name, exceptId || '', userId, parentId, userId)
   if (clash) throw fail(409, 'CONFLICT', `"${name}" already exists in this folder.`)
 }
 
@@ -146,8 +147,19 @@ export function normalizeConflictStrategy(value) {
 export function findFileByName(userId, parentId, name) {
   return db.prepare(`SELECT n.* FROM nodes n
     WHERE IFNULL(n.parent_id,'')=IFNULL(?,'') AND n.name=? AND n.kind='file' AND n.deleted_at IS NULL
-      AND (n.user_id=? OR EXISTS (SELECT 1 FROM memberships m WHERE m.user_id=? AND m.workspace_id=n.workspace_id))`)
-    .get(parentId ?? null, name, userId, userId) || null
+      AND (n.user_id=? OR (? IS NOT NULL AND EXISTS (SELECT 1 FROM memberships m WHERE m.user_id=? AND m.workspace_id=n.workspace_id)))`)
+    .get(parentId ?? null, name, userId, parentId ?? null, userId) || null
+}
+
+/** Optional optimistic guard; version zero means the target did not exist. */
+export function uploadConditions(input) {
+  const raw = input.expectedVersion
+  const expectedVersion = raw === null || raw === undefined ? undefined : Number(raw)
+  if (expectedVersion !== undefined && (String(raw).trim() === '' || !Number.isSafeInteger(expectedVersion) || expectedVersion < 0)) {
+    throw fail(400, 'INVALID_INPUT', 'expectedVersion must be a non-negative integer.')
+  }
+  const expectedNodeId = input.expectedNodeId == null ? undefined : String(input.expectedNodeId)
+  return { expectedVersion, expectedNodeId }
 }
 
 /**
@@ -163,11 +175,16 @@ export function findFileByName(userId, parentId, name) {
  * A `skip` result carries no `previousBlob`: the caller still owns whatever
  * blob it prepared for this request and has to release it itself.
  */
-export function upsertFile(userId, { name, parentId = null, mime, size, blobHash, onConflict = 'overwrite' }) {
+export function upsertFile(userId, { name, parentId = null, mime, size, blobHash, onConflict = 'overwrite', expectedVersion, expectedNodeId }) {
   const strategy = normalizeConflictStrategy(onConflict)
   const cleanName = normalizeName(name)
   if (parentId) requireFolder(userId, parentId)
   const existing = findFileByName(userId, parentId ?? null, cleanName)
+  if (strategy === 'overwrite' && expectedVersion !== undefined && (
+    (existing ? existing.version : 0) !== expectedVersion || (expectedNodeId && existing?.id !== expectedNodeId)
+  )) {
+    throw fail(409, 'VERSION_CONFLICT', 'This file has changed since the upload was checked. Reload before uploading again.')
+  }
   if (!existing) {
     const row = createNode(userId, { name: cleanName, kind: 'file', parentId, mime, size, blobHash })
     return { node: row, created: true, onConflict: strategy }
@@ -179,6 +196,10 @@ export function upsertFile(userId, { name, parentId = null, mime, size, blobHash
     const renamedName = uniqueName(userId, parentId ?? null, cleanName, { keepExtension: true })
     const row = createNode(userId, { name: renamedName, kind: 'file', parentId, mime, size, blobHash })
     return { node: row, created: true, renamedFrom: cleanName, onConflict: strategy }
+  }
+  // Re-sending identical content is a no-op, not another history version.
+  if (existing.blob_hash === blobHash && existing.size === size) {
+    return { node: existing, created: false, skipped: true, unchanged: true, onConflict: strategy }
   }
   const timestamp = nowIso()
   recordVersion(existing, userId)
@@ -268,8 +289,8 @@ export function uniqueName(userId, parentId, candidate, { keepExtension = false 
     // Same namespace as assertNameFree: a shared folder must not grow two "x.txt".
     const clash = db.prepare(`SELECT id FROM nodes
       WHERE IFNULL(parent_id,'')=IFNULL(?,'') AND name=? AND deleted_at IS NULL
-        AND (user_id=? OR EXISTS (SELECT 1 FROM memberships m WHERE m.user_id=? AND m.workspace_id=nodes.workspace_id))`)
-      .get(parentId ?? null, name, userId, userId)
+        AND (user_id=? OR (? IS NOT NULL AND EXISTS (SELECT 1 FROM memberships m WHERE m.user_id=? AND m.workspace_id=nodes.workspace_id)))`)
+      .get(parentId ?? null, name, userId, parentId ?? null, userId)
     if (!clash) return name
     const suffix = ` (${counter++})`
     name = base.slice(0, NAME_LIMIT - suffix.length - ext.length) + suffix + ext

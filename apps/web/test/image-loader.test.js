@@ -3,24 +3,21 @@ import { describe, it } from 'node:test'
 import { imageRequestUrl } from '../lib/image-loader.js'
 
 /**
- * The route choice is the only traffic lever this server offers: the thumbnail
- * path answers with `immutable`, the content path revalidates every time.
- * A picture routed to the wrong one silently costs full bandwidth on every
- * revisit, so the rule is pinned here.
+ * Drawer detail must not be replaced by a small, lossy list thumbnail.
  */
 
 const picture = (mime, id = 'n1') => ({ id, name: 'a.jpg', kind: 'file', mime, size: 10 })
 
 describe('imageRequestUrl', () => {
-  it('routes the three resizable-safe formats to the immutable thumbnail path', () => {
+  it('keeps original detail for the three native image formats', () => {
     for (const mime of ['image/jpeg', 'image/png', 'image/webp']) {
       const url = imageRequestUrl(picture(mime))
-      assert.match(url, /\/api\/v1\/files\/n1\/thumbnail\?w=1024$/, mime)
+      assert.equal(url, '/api/v1/files/n1/content', mime)
     }
   })
 
   it('strips mime parameters before deciding', () => {
-    assert.match(imageRequestUrl(picture('image/jpeg; charset=binary')), /thumbnail/)
+    assert.match(imageRequestUrl(picture('image/jpeg; charset=binary')), /content/)
   })
 
   it('keeps every other format on the content path', () => {
@@ -30,8 +27,8 @@ describe('imageRequestUrl', () => {
     }
   })
 
-  it('honours a requested width', () => {
-    assert.match(imageRequestUrl(picture('image/png'), { width: 512 }), /w=512$/)
+  it('does not let a thumbnail width reduce original preview quality', () => {
+    assert.equal(imageRequestUrl(picture('image/png'), { width: 512 }), '/api/v1/files/n1/content')
   })
 
   it('answers null without a node', () => {
@@ -45,8 +42,8 @@ describe('HEIC routing', () => {
     assert.equal(imageRequestUrl({ id: 'n1', mime: 'image/heif' }, { width: 800 }), '/api/v1/files/n1/preview-image?w=800')
   })
 
-  it('keeps the immutable thumbnail route for the three native formats', () => {
-    assert.match(imageRequestUrl({ id: 'n1', mime: 'image/jpeg' }), /thumbnail/)
+  it('keeps original content for native formats', () => {
+    assert.match(imageRequestUrl({ id: 'n1', mime: 'image/jpeg' }), /content/)
   })
 
   it('falls back to the plain content route for anything else', () => {

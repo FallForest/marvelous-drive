@@ -482,7 +482,7 @@ body.is-moving .frow,body.is-moving .gcard{cursor:grabbing}
 .public-file .picon svg{width:18px;height:18px}
 .public-file b{display:block;font-size:var(--fs-base);font-weight:500;word-break:break-word}
 .public-file small{display:block;margin-top:2px;font-size:var(--fs-xs);color:var(--text-faint)}
-.public-actions{display:flex;align-items:center;gap:8px}
+.public-actions{display:flex;flex-wrap:wrap;align-items:center;gap:8px}
 .public-note{margin-top:14px;font-size:var(--fs-xs);color:var(--text-faint);line-height:1.6}
 
 /* ═══ search results view ═════════════════════════════════════ */

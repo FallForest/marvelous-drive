@@ -29,8 +29,8 @@ process.exit(await runBrowserCheck({ title: 'Move interactions check', network: 
     }
     const ids = { source: await folder('Source'), destination: await folder('Dest'), last: await folder('Zulu') }
     ids.deep = await folder('Deep', ids.destination)
-    ids.branch = await folder('Branch', ids.source)
-    ids.leaf = await folder('Leaf', ids.branch)
+    ids.branch = await folder('Nested Branch', ids.source)
+    ids.leaf = await folder('Nested Leaf', ids.branch)
     ids.nested = await file('nested.txt', ids.leaf, 'nested content')
     ids.cancel = await file('cancel.txt', ids.source, 'cancel content')
     ids.root = await file('back-to-root.txt', ids.source, 'root content')
@@ -141,6 +141,10 @@ process.exit(await runBrowserCheck({ title: 'Move interactions check', network: 
   await page.waitFor("!document.querySelector('.frow[data-id=\"" + seeded.root + "\"]')")
   check('a single file can move from a child folder to the drive root', (await snapshot()).find((node) => node.id === seeded.root).parentId === null)
 
+  // Search is the user-visible view where an ancestor and nested file can be
+  // selected together. Directory pages deliberately do not load hidden files.
+  await page.run(() => window.mdrive.navigate('/search?q=Nested'))
+  await page.waitFor("!mdrive.store.state.loading && document.querySelectorAll('.frow[data-id]').length === 3")
   const beforeNested = await requestCount()
   await page.run(async (ids) => {
     const { moveItems } = await import('/lib/actions.js')
@@ -153,6 +157,8 @@ process.exit(await runBrowserCheck({ title: 'Move interactions check', network: 
   check('mixed ancestor and descendant selections move only the ancestor', await requestCount() === beforeNested + 1)
   check('moving an ancestor preserves the whole nested structure', byId.get(seeded.branch).parentId === seeded.destination && byId.get(seeded.leaf).parentId === seeded.branch && byId.get(seeded.nested).parentId === seeded.leaf)
 
+  await page.run((id) => window.mdrive.navigate('/folder/' + id), seeded.source)
+  await page.waitFor("!mdrive.store.state.loading && document.querySelectorAll('.frow[data-id]').length === 3")
   await page.run((ids) => {
     for (const id of [ids.conflict, ids.success]) document.querySelector('.frow[data-id="' + id + '"] .pick').click()
     Array.from(document.querySelectorAll('.sel-bar button')).find((button) => button.textContent.includes('移动到')).click()

@@ -14,6 +14,7 @@ import { registerMaintenanceRoutes } from './routes/maintenance.js'
 import { registerClusterRoutes } from './routes/cluster.js'
 import { sweepExpiredTrash } from './ops/retention.js'
 import { indexIsEmpty, rebuildIndex } from './ops/search-index.js'
+import { resumeIndexJobs, stopIndexJobs } from './ops/index-jobs.js'
 import { backend } from './storage/backend.js'
 import { registerOfficeRoutes } from './routes/office.js'
 import { registerPreviewImageRoutes } from './routes/preview-image.js'
@@ -142,6 +143,8 @@ if (indexIsEmpty()) {
     .catch((error) => console.error('[search] initial index failed:', error))
 }
 setInterval(runRetention, RETENTION_INTERVAL_MS).unref()
+resumeIndexJobs()
+server.on('close', () => { void stopIndexJobs() })
 
 // The storage driver is chosen at import time; report it so a deployment log
 // says which one is actually serving bytes.
@@ -157,7 +160,8 @@ server.listen(config.port, config.host, () => {
 for (const signal of ['SIGINT', 'SIGTERM']) {
   process.on(signal, () => {
     console.log(`${signal} received, closing Marvelous Drive`)
-    server.close(() => {
+    server.close(async () => {
+      await stopIndexJobs()
       try { db.close() } catch { /* already closed */ }
       process.exit(0)
     })

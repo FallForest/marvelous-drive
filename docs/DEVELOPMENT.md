@@ -3,7 +3,9 @@
 ## Prerequisites
 
 - Node.js **22.5+** (the server uses `node:sqlite`; developed on Node 26).
-- Nothing else. No package install, no database server, no bundler.
+- No database server or bundler. Run `npm ci` to install the optional sharp and
+  libheif codecs before image tests or browser checks; core storage starts without
+  them, with unavailable image conversion reported by the relevant endpoint.
 
 ## Run
 
@@ -65,7 +67,7 @@ compose file itself):
 | Script | Runs where | Does |
 | --- | --- | --- |
 | `scripts/deploy/update.sh` | updater container | back up, pin the manifest, pull, recreate, health-gate, roll back |
-| `scripts/deploy/backup.sh` | updater container | consistent SQLite snapshot + tarball of the data volume |
+| `scripts/deploy/backup.sh` | updater container | always a consistent database/secret snapshot; optional stopped-writer local archive |
 
 The ordering inside `update.sh` is load-bearing: the snapshot of `.env` and the
 compose files is taken **before** the new tag is pinned, so a failed health check
@@ -82,8 +84,25 @@ data/
   tmp/              spool files, resumable chunks, zip scratch
 ```
 
-Deleting `data/` resets the instance completely. Backups are a copy of that
-directory while the server is stopped (or of `drive.db` plus a WAL checkpoint).
+Deleting `data/` resets the instance completely. `node scripts/backup.mjs snapshot`
+takes an online `VACUUM INTO` database snapshot and copies the generated JWT
+secret; this is metadata only. A WAL checkpoint followed by copying a live file
+is not a consistent snapshot.
+
+For a complete local recovery archive, stop all writers and run
+`node scripts/backup.mjs --offline`. The flag is an operator assertion, not a
+process detector. The command verifies current/history blob hashes; remote
+storage needs its own byte backup. Restore into a new or empty directory with
+`node scripts/backup.mjs restore <archive.tar> --data <empty-directory>`.
+Validation finishes in staging before promotion, and existing data/WAL files are
+never overlaid. The strict regular-file ustar reader does not automatically
+import old raw volume/PAX/GNU archives. See [DEPLOYMENT.md](DEPLOYMENT.md#backups)
+for the supported layout and off-machine backup responsibility.
+
+`scripts/test/backup.test.mjs` exercises WAL snapshot visibility, isolated full
+archive/restore with history and quarantine, content tampering, unsafe archive
+entries, empty-destination enforcement, and deployment failure gates using
+isolated fixtures. No test uses the project's real data directory or Docker stack.
 
 ## Debugging
 

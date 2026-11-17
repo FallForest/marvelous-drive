@@ -7,6 +7,7 @@ import { sweepExpiredTrash } from '../ops/retention.js'
 import { quotaSnapshot } from '../ops/quota.js'
 import { AUDIT_RETENTION_DAYS, listAudit } from '../ops/audit.js'
 import { indexCoverage, searchContents } from '../ops/search-index.js'
+import { drainIndexJobs, indexJobSummary } from '../ops/index-jobs.js'
 import { addMember, workspaceFor, workspacesFor } from '../workspaces.js'
 
 /** Search, storage statistics, the duplicate report and the health probe. */
@@ -50,6 +51,7 @@ export function registerMiscRoutes(router, { version }) {
       ? String(ctx.url.searchParams.get('scope'))
       : 'all'
     if (!term) { sendJson(ctx.res, 200, { results: [], limit, offset, hasMore: false, scope }); return }
+    if (scope !== 'name') await drainIndexJobs(user.id)
 
     // One row beyond the window is fetched on purpose: its existence is the only
     // honest "there is more" signal, and it costs exactly one row.
@@ -138,7 +140,7 @@ export function registerMiscRoutes(router, { version }) {
         byKind: bytesByKind(user.id),
         trash: trashSummary(user.id),
         // How much of this account's text is actually searchable right now.
-        search: indexCoverage(user.id),
+        search: { ...indexCoverage(user.id), jobs: indexJobSummary(user.id) },
       },
     })
   })

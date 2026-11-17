@@ -63,6 +63,7 @@ db.exec(`
   );
   CREATE INDEX IF NOT EXISTS nodes_parent ON nodes(user_id, parent_id);
   CREATE INDEX IF NOT EXISTS nodes_live ON nodes(user_id, deleted_at);
+  CREATE INDEX IF NOT EXISTS nodes_blob ON nodes(blob_hash);
   CREATE UNIQUE INDEX IF NOT EXISTS nodes_unique_name
     ON nodes(user_id, IFNULL(parent_id,''), name)
     WHERE deleted_at IS NULL;
@@ -93,6 +94,7 @@ db.exec(`
     created_at TEXT NOT NULL
   );
   CREATE INDEX IF NOT EXISTS versions_node ON node_versions(node_id, version DESC);
+  CREATE INDEX IF NOT EXISTS versions_blob ON node_versions(blob_hash, node_id);
 
   CREATE TABLE IF NOT EXISTS upload_sessions (
     id           TEXT PRIMARY KEY,
@@ -368,6 +370,11 @@ export function dropRetiredTables() {
 // Runs after every declaration it needs: `nowIso` is a const, so calling the
 // migration earlier hits the temporal dead zone.
 migrateWorkspaces()
+// Keep the merge policy and snapshot across reload/resume. Old sessions retain
+// the original overwrite behaviour until explicitly supplied by their client.
+if (!db.prepare('PRAGMA table_info(upload_sessions)').all().some((column) => column.name === 'options')) {
+  db.exec("ALTER TABLE upload_sessions ADD COLUMN options TEXT NOT NULL DEFAULT '{}'")
+}
 // Order matters: the index migration only needs the table to exist, and the boot
 // rebuild then fills every column from the nodes table. A first boot lands here
 // with no table at all, which is exactly the "shape differs" case.
@@ -377,3 +384,16 @@ if (migrateSearchIndex()) {
 ensureSearchIndex()
 const retired = dropRetiredTables()
 if (retired.length) console.log('[db] dropped retired tables: ' + retired.join(', '))
+
+// Durable derived work. A crash can leave a running row; boot resumes it.
+db.exec(`CREATE TABLE IF NOT EXISTS index_jobs (
+  node_id TEXT PRIMARY KEY REFERENCES nodes(id) ON DELETE CASCADE,
+  blob_hash TEXT NOT NULL,
+  version INTEGER NOT NULL,
+  generation INTEGER NOT NULL DEFAULT 1,
+  attempts INTEGER NOT NULL DEFAULT 0,
+  state TEXT NOT NULL DEFAULT 'pending' CHECK (state IN ('pending','running','failed')),
+  last_error TEXT,
+  ready_at INTEGER NOT NULL DEFAULT 0,
+  updated_at TEXT NOT NULL
+); CREATE INDEX IF NOT EXISTS index_jobs_ready ON index_jobs(state, ready_at);`)

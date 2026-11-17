@@ -85,14 +85,52 @@ breaking the progress the client shows.
 ## Backups
 
 ```sh
-node scripts/backup.mjs                       # -> backups/drive-<stamp>.tar
-node scripts/backup.mjs --data /srv/mdrive/data --out /srv/backups
-node scripts/backup.mjs restore backups/drive-<stamp>.tar
+node scripts/backup.mjs snapshot              # online: consistent database + generated JWT secret
+# Stop every process writing this local store before making a complete archive:
+node scripts/backup.mjs --offline --data /srv/mdrive/data --out /srv/backups
+node scripts/backup.mjs restore backups/drive-<stamp>.tar --data /srv/mdrive/restored-data
 ```
 
-A backup contains the checkpointed database, the JWT secret and every blob.
-Restore while the service is stopped; the script copies the current database
-aside first.
+`snapshot` uses SQLite `VACUUM INTO`, including committed WAL pages. It writes a
+`.db`, an independent `.jwt-secret` copy when generated, and a metadata-only
+description; it does **not** include blob bytes. Keep any externally configured
+`JWT_SECRET` with your deployment secrets as well.
+
+A complete archive requires local blob storage and `--offline`: this is your
+assertion that all Drive writers have stopped, including maintenance processes.
+A database snapshot alone cannot stop concurrent blob deletion from invalidating
+a file copy. Without `--offline`, the command fails with instructions rather
+than claiming a consistent complete backup. S3, tiered and cluster stores require
+separate backups of their remote bytes; the database-only snapshot remains usable.
+
+The full command snapshots the database, checks its integrity and streams SHA-256
+verification over every blob referenced by current files or version history
+(including trash), then archives the database, generated secret, local blobs and
+quarantine evidence. Temporary upload chunks and derived preview caches are not
+part of this recovery archive. Store the output outside the data directory.
+
+Restore validates the archive and rechecks database/blob integrity in a private
+staging directory before moving it into a new or empty destination. It refuses
+existing data, including old `drive.db-wal` files, and rejects path traversal,
+links, special entries, duplicate paths, malformed headers and trailing records.
+Point the stopped service at the verified restored directory afterwards; the
+original data is never overwritten or deleted by the restore command.
+
+The restore reader accepts this version's regular-file ustar recovery layout.
+Older raw volume tarballs (including WAL/tmp files), PAX/GNU extension archives
+and compressed tarballs are not automatically accepted. Keep those originals;
+recovery from a trusted older format requires a separately inspected offline
+directory instead of passing it straight into this restore command. Recovery
+entries must fit standard ustar fields (each individual file is below 8 GiB).
+
+Every self-update now saves the database and generated secret before image/env
+pinning, even with full data backups disabled; a snapshot failure stops the
+update. To also create a complete local archive, set `DRIVE_BACKUP_DATA=1` in
+`.env` and recreate the updater. The updater checks free space, stops the Drive
+container for the full copy and attempts to restart it even if backup fails.
+Keep other local writers stopped during that copy. Full backup failure aborts
+the update. These snapshots remain on the same machine: copying them off-machine
+and backing up remote storage are the operator's responsibility.
 
 ## Health and monitoring
 
@@ -105,7 +143,8 @@ aside first.
 
 ## Upgrades
 
-1. `node scripts/backup.mjs`
+1. Stop all writers, then `node scripts/backup.mjs --offline` (or arrange an
+   independently consistent remote-store backup with its database snapshot).
 2. Replace the code (git pull, or a new image tag).
 3. Restart the service. Schema changes are applied at boot in `db.js` and are
    idempotent (`CREATE TABLE IF NOT EXISTS`), so a restart is the whole migration.
@@ -188,7 +227,7 @@ once, put it in `.env`, and do not reuse it for anything else.
 Without an updater, the same steps in a shell:
 
 ```sh
-node scripts/backup.mjs                          # data/drive.db + blobs + secret
+node scripts/backup.mjs --offline                # stopped local store: database + blobs + secret
 sed -i 's|^DRIVE_IMAGE=.*|DRIVE_IMAGE=ghcr.io/<owner>/marvelous-drive:0.19.0|' .env
 docker compose pull drive && docker compose up -d --no-deps drive
 curl -fsS http://127.0.0.1:4400/healthz

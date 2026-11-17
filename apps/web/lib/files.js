@@ -7,8 +7,9 @@
 import { h, raw } from './dom.js';
 import { icon, kindIcon, fileKind, bytes, relativeTime, formatDate, sortNodes } from './format.js';
 import { openMenu } from './ui.js';
-import { api, fetchBlob } from './api.js';
+import { api, fetchBlob, getToken } from './api.js';
 import { rememberThumb, THUMBNAIL_MIMES } from './thumb-cache.js';
+import { createThumbnailLoader } from './thumbnail-loader.js';
 
 const COLUMNS = [
   { key: 'name', label: '名称', cls: 'col-name' },
@@ -74,7 +75,7 @@ function selectAllBox(ctx, nodes, selectedCount) {
 /** Rows + header. ctx: { nodes, sortKey, sortDir, selection, view, onSort } */
 export function renderFileList(ctx) {
   const state = ctx.state;
-  const nodes = sortNodes(state.nodes, state.sortKey, state.sortDir);
+  const nodes = state.serverSorted ? state.nodes : sortNodes(state.nodes, state.sortKey, state.sortDir);
   const wrap = h('div', { class: 'list' });
 
   if (!nodes.length) {
@@ -215,44 +216,48 @@ function renderRow(ctx, node, selected) {
    re-downloading every thumbnail on each navigation is the whole problem. */
 const thumbCache = new Map();
 const THUMB_CACHE_LIMIT = 200;
+const thumbInFlight = new Map();
+const thumbnailLoader = createThumbnailLoader();
 
-/**
- * ONE width for every caller, on purpose.
- *
- * The route does not resize: `?w=` is echoed in a response header and the bytes
- * are the original blob. Two different widths are therefore two different URLs
- * that answer with the same bytes, and a browser caches per URL — asking for
- * `w=96` in the list and `w=1024` in the drawer puts one 30 MB photo in the
- * HTTP cache twice. The value is kept because a future server-side resizer will
- * want it; it is just not allowed to vary per call site.
- */
-const THUMBNAIL_WIDTH = 1024;
-const LIST_THUMB_WIDTH = THUMBNAIL_WIDTH;
+/** Real thumbnails use a smaller list representation and a larger grid one. */
+const THUMBNAIL_WIDTH = 320;
+const LIST_THUMB_WIDTH = 96;
 
-/** Server-side thumbnail URL. Width is a hint; today the bytes are the original. */
-export function thumbnailUrl(id, width) {
+/** Authenticated server-side thumbnail URL. */
+function thumbnailUrl(id, width) {
   return '/api/v1/files/' + encodeURIComponent(id) + '/thumbnail?w=' + (width || THUMBNAIL_WIDTH);
 }
 
 function thumbFor(node, width, source) {
-  const cached = thumbCache.get(node.id);
+  const token = getToken();
+  const key = token + ':' + node.id + ':' + (node.blobHash || node.version || '') + ':' + width;
+  const cached = thumbCache.get(key);
   if (cached) return Promise.resolve(cached);
+  if (thumbInFlight.has(key)) return thumbInFlight.get(key);
   const url = source === 'preview-image'
     ? '/api/v1/files/' + encodeURIComponent(node.id) + '/preview-image?w=' + Math.max(width, 240)
     : thumbnailUrl(node.id, width);
-  return fetchBlob(url).then((blob) => {
+  const version = encodeURIComponent(node.blobHash || String(node.version || 1));
+  const pending = fetchBlob(url + '&v=' + version).then((blob) => {
+    if (getToken() !== token) throw new Error('Session changed during thumbnail loading.');
     const url = URL.createObjectURL(blob);
-    const stored = rememberThumb(thumbCache, node.id, url, THUMB_CACHE_LIMIT);
+    const stored = rememberThumb(thumbCache, key, url, THUMB_CACHE_LIMIT);
     // A concurrent render may have won the race: keep its URL, drop this one.
     if (stored.reused && stored.url !== url) URL.revokeObjectURL(url);
     for (const evicted of stored.evicted) URL.revokeObjectURL(evicted);
     return stored.url;
-  });
+  }).finally(() => thumbInFlight.delete(key));
+  thumbInFlight.set(key, pending);
+  return pending;
 }
 
 /** The cached render URL of one row thumbnail, or null when it is not fetched yet. */
-export function peekThumbUrl(id) {
-  return thumbCache.get(id) || null;
+export function peekThumbUrl(node) {
+  const id = typeof node === 'string' ? node : node.id;
+  const content = typeof node === 'string' ? '' : (node.blobHash || node.version || '') + ':';
+  const prefix = getToken() + ':' + id + ':' + content;
+  for (const [key, url] of thumbCache) if (key.startsWith(prefix)) return url;
+  return null;
 }
 
 /**
@@ -273,7 +278,7 @@ export function thumbnailSourceFor(node) {
 
 /** Swaps the row icon for a 32px thumbnail, silently keeping the icon on failure. */
 function attachRowThumb(kindEl, node, source) {
-  thumbFor(node, LIST_THUMB_WIDTH, source)
+  thumbnailLoader.watch(kindEl, () => thumbFor(node, LIST_THUMB_WIDTH, source)
     .then((url) => {
       if (!kindEl.isConnected) return;
       kindEl.classList.add('has-thumb');
@@ -282,7 +287,7 @@ function attachRowThumb(kindEl, node, source) {
         attrs: { alt: '', loading: 'lazy', decoding: 'async', draggable: 'false', width: '32', height: '32', src: url },
       }));
     })
-    .catch(() => { /* no thumbnail: the icon stays */ });
+    .catch(() => { /* no thumbnail: the icon stays */ }));
 }
 
 function renderGrid(ctx, nodes) {
@@ -299,11 +304,11 @@ function renderGrid(ctx, nodes) {
       // A format no route can decode has no thumbnail to ask for; the icon IS
       // the answer, and asking would only produce a failed request per row.
       if (gridSource) {
-        thumbFor(node, THUMBNAIL_WIDTH, gridSource).then((url) => {
+        thumbnailLoader.watch(thumb, () => thumbFor(node, THUMBNAIL_WIDTH, gridSource).then((url) => {
           if (!thumb.isConnected) return;
           const img = h('img', { attrs: { alt: '', loading: 'lazy', decoding: 'async', draggable: 'false', src: url } });
           thumb.replaceChildren(img);
-        }).catch(() => { /* keep the icon placeholder */ });
+        }).catch(() => { /* keep the icon placeholder */ }));
       }
     } else {
       thumb.innerHTML = icon(kindIcon(kind, node.name), 26);

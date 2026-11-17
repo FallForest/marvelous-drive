@@ -11,6 +11,7 @@ import {
   shareContentUrl,
   shareEntryMeta,
   shareFileUrl,
+  shareOfficeUrl,
   sharePreviewUrl,
 } from '../lib/share.js';
 
@@ -37,6 +38,7 @@ describe('public share URLs', () => {
     assert.equal(sharePreviewUrl('t', 'open sesame'), '/shared/t/preview?password=open+sesame');
     assert.equal(shareContentUrl('t', 'open sesame'), '/shared/t/content?password=open+sesame');
     assert.equal(shareArchiveUrl('t', 'open sesame'), '/shared/t/archive?password=open+sesame');
+    assert.equal(shareOfficeUrl('t', 'open sesame', 'node-1'), '/shared/t/office/node-1?password=open+sesame');
     assert.equal(
       shareFileUrl('t', 'node-1', 'open sesame', false),
       '/shared/t/file/node-1?password=open+sesame&inline=1',
@@ -98,9 +100,20 @@ describe('previewable formats', () => {
     assert.equal(canPreviewShared('application/octet-stream', 'a.py'), true);
   });
 
-  it('refuses a binary or a document the page cannot render', () => {
+  it('previews browser media and supported Office documents', () => {
+    assert.equal(canPreviewShared('video/mp4', 'a.mp4'), true);
+    assert.equal(canPreviewShared('audio/mpeg', 'a.mp3'), true);
+    assert.equal(canPreviewShared('application/octet-stream', '报告.docx'), true);
+    assert.equal(canPreviewShared('application/octet-stream', '演示.pptx'), true);
+    assert.equal(canPreviewShared('application/octet-stream', '表格.xlsx'), true);
+  });
+
+  it('refuses binary, legacy Office and images the browser cannot decode', () => {
     assert.equal(canPreviewShared('application/zip', 'a.zip'), false);
-    assert.equal(canPreviewShared('video/mp4', 'a.mp4'), false);
+    assert.equal(canPreviewShared('application/msword', 'a.doc'), false);
+    assert.equal(canPreviewShared('application/octet-stream', 'a.odt'), false);
+    assert.equal(canPreviewShared('image/heic', 'a.heic'), false);
+    assert.equal(canPreviewShared('image/tiff', 'a.tif'), false);
   });
 });
 

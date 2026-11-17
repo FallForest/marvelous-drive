@@ -22,8 +22,9 @@ it depends on.
 A drive's primitives are arbitrary bytes, byte ranges, resumable transfers,
 content hashing and public links. Those do not need a second service, a message
 queue, or a build step: `node:sqlite` is transactional, `node:http` streams, and
-`node:crypto` hashes. The whole server is the standard library, so "install" is
-`node apps/server/src/index.js` and a backup is a copy of `data/`.
+`node:crypto` hashes. Core storage starts with `node apps/server/src/index.js`;
+`npm ci` adds optional image codecs. Backups use a transactional database
+snapshot, or a complete local archive after writers are stopped.
 
 ## Features
 
@@ -55,7 +56,10 @@ queue, or a build step: `node:sqlite` is transactional, `node:http` streams, and
   existing file intact. The move picker offers the same operation by click or
   keyboard. See [docs/INTERACTIONS.md](docs/INTERACTIONS.md).
 - **Duplicates and thumbnails** — a report groups files that share one blob so
-  the copies can be dropped, and image rows show a real thumbnail.
+  the copies can be dropped. JPEG/PNG/WebP rows use bounded WebP thumbnails
+  generated in workers and cached by content hash and size. Requests start near
+  the viewport, with four concurrent loads; the preview drawer retains original
+  image detail.
 - **Activity log** — every mutation is recorded and readable from the account
   menu, newest first and grouped by day.
 - **File browsing and editing** — photo previews support left/right swipes on
@@ -70,7 +74,11 @@ queue, or a build step: `node:sqlite` is transactional, `node:http` streams, and
   drive, and `mdrive team --all` shows every workspace with the id to pass.
 - **Folder upload** — the upload menu offers files or a whole folder; the
   directory skeleton (empty folders included) is created before any bytes move,
-  and a dropped tree keeps its structure.
+  and a dropped tree keeps its structure. Re-uploading into the same location
+  merges folders, compares content hashes and skips unchanged files without
+  sending their bytes or creating versions. New files are added; changed files
+  ask whether to replace (keeping history), keep both, or skip. Remote files
+  absent from the local folder are kept.
 - **Office preview** — `.pptx`, `.docx` and `.xlsx` are extracted server-side
   (ZIP + XML, no LibreOffice) into slides/pages/sheets and rendered in the drawer.
 - **Pluggable storage** — bytes live behind one interface: local disk by default,
@@ -95,17 +103,20 @@ queue, or a build step: `node:sqlite` is transactional, `node:http` streams, and
 - **Self-update** — every release publishes `release/latest.json` and a versioned
   image. A deployment points `DRIVE_UPDATE_MANIFEST_URL` at the manifest, sees
   "0.19.0 is available" in the account menu, and **立即更新** hands the job to an
-  updater container that backs up `data/`, pulls the new tag, recreates the
+  updater container that snapshots the database and generated secret (a full
+  local blob archive is opt-in), pulls the new tag, recreates the
   container and rolls back if `/healthz` does not answer. The API never holds the
   Docker socket. See [docs/RELEASING.md](docs/RELEASING.md).
-- **Zero dependencies** — the server runs on Node's standard library
-  (`node:sqlite`, `node:http`, `node:crypto`); the web client is plain ES
+- **Small runtime** — the core server uses Node's standard library
+  (`node:sqlite`, `node:http`, `node:crypto`); optional `sharp` and `libheif-js`
+  codecs provide image thumbnails and HEIC previews. The web client is plain ES
   modules with no bundler.
 
 ## Quick start
 
 ```sh
 node --version                 # 22.5+ (node:sqlite); developed on 26
+npm ci                         # optional image codecs (recommended)
 node apps/server/src/index.js  # http://127.0.0.1:4400
 ```
 
@@ -174,7 +185,8 @@ node scripts/team-check.mjs       #  5 checks: the team panel and roles
 node scripts/lock-check.mjs       #  6 checks: claim, supersede, release the edit lock
 node scripts/search-check.mjs     #  8 checks: content hit, snippet, .docx text, stats
 node scripts/storage-check.mjs    # 10 checks: ZIP menu, selection archive, breakdown
-node scripts/folder-check.mjs     #  7 checks: dropped tree, empty folder, nesting
+node scripts/folder-check.mjs     # dropped tree, incremental merge and version history
+node scripts/share-check.mjs      # anonymous Unicode previews and real downloads
 node scripts/upload-check.mjs     # 10 checks: picker, 9 MiB session, cancel
 node scripts/feel-check.mjs       # 30 checks: press, stagger cap, VT flag, drawer
 node scripts/office-check.mjs --sample DIR   # pptx/docx/xlsx extraction + drawer

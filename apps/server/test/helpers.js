@@ -34,7 +34,11 @@ export async function startServer() {
     return { status: response.status, json, text, headers: response.headers }
   }
 
-  const close = () => new Promise((resolve) => server.close(resolve))
+  const close = async () => {
+    await new Promise((resolve) => server.close(resolve))
+    const { stopIndexJobs } = await import('../src/ops/index-jobs.js')
+    await stopIndexJobs()
+  }
 
   const cleanup = () => { try { rmSync(dataDir, { recursive: true, force: true }) } catch { /* windows lock */ } }
 

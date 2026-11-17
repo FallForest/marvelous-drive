@@ -1,7 +1,19 @@
 # Third-party notices
 
-Marvelous Drive ships no third-party runtime code by default. One optional
-dependency carries obligations, and this file is where they are met.
+The core server uses Node's standard library. Optional image codecs are listed
+below; their package notices and bundled library licences accompany installation.
+
+## sharp (Apache-2.0) and bundled libvips
+
+`sharp` provides JPEG/PNG/WebP decoding, resizing and WebP thumbnail encoding in
+bounded worker threads. It is an optional dependency pinned in the root lockfile;
+without it the core drive starts and thumbnail requests report decoder unavailable.
+The preview drawer can still fetch original native images.
+
+Source and licence: <https://github.com/lovell/sharp>,
+`node_modules/sharp/LICENSE`. The prebuilt native packages include libvips and
+other codecs with their own notices. Preserve the installed package notices when
+redistributing those binaries; see <https://sharp.pixelplumbing.com/install/>.
 
 ## libheif-js (LGPL-3.0)
 

@@ -42,7 +42,7 @@ process.exit(await runBrowserCheck({ title: 'UI audit regression check', network
     const move = async (id, parentId) => fetch('/api/v1/nodes/' + id, {
       method: 'PUT', headers: json, body: JSON.stringify({ parentId }),
     })
-    const png = Uint8Array.from(atob('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a5h8AAAAASUVORK5CYII='), (c) => c.charCodeAt(0))
+    const png = Uint8Array.from(atob('iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAIAAAD8GO2jAAAACXBIWXMAAAPoAAAD6AG1e1JrAAAAO0lEQVRIiWM4EaFBU8QwakHEaBBpjKaiE6MZTWO0qDgxWppGjFY4J0arzIjRVoXGaMMrYrTpqDGoW9cAXmogTLbfJmgAAAAASUVORK5CYII='), (c) => c.charCodeAt(0))
     const parent = await folder('AuditParent')
     const child = await folder('AuditChild', parent.id)
     const sharedFolder = await folder('SharedBundle')
@@ -105,7 +105,7 @@ process.exit(await runBrowserCheck({ title: 'UI audit regression check', network
   /* ── the public page itself ───────────────────────────────── */
   await page.navigate(server + '/s/' + shareApi.viewerToken, { settle: 1800 })
   const viewerPage = await page.run(() => ({
-    buttons: [...document.querySelectorAll('.public-actions button')].map((button) => button.textContent.trim()),
+    buttons: [...document.querySelectorAll('.public-actions button, .public-actions a')].map((button) => button.textContent.trim()),
   }))
   check('UI01 the viewer page offers preview and no download promise',
     !viewerPage.buttons.some((text) => text.includes('下载文件'))
@@ -129,12 +129,12 @@ process.exit(await runBrowserCheck({ title: 'UI audit regression check', network
     // exists for a folder link, so it is the reliable "this is a folder" signal.
     rows: document.querySelectorAll('.public-card .public-file').length,
     crumbs: Boolean(document.querySelector('.public-card .crumbs')),
-    zip: [...document.querySelectorAll('.public-actions button')].some((button) => button.textContent.includes('ZIP')),
+    zip: [...document.querySelectorAll('.public-actions a')].some((button) => button.textContent.includes('ZIP')),
   }))
   check('UI02 a folder link browses its contents', folderPage.crumbs && folderPage.rows >= 2, JSON.stringify(folderPage))
   check('UI02 a downloader folder link offers the ZIP', folderPage.zip, JSON.stringify(folderPage))
   if (folderPage.zip) {
-    await page.run(() => [...document.querySelectorAll('.public-actions button')].find((button) => button.textContent.includes('ZIP')).click())
+    await page.run(() => [...document.querySelectorAll('.public-actions a')].find((button) => button.textContent.includes('ZIP')).click())
     await sleep(2500)
   }
   page.onEvent = previousHandler

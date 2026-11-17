@@ -198,14 +198,14 @@ process.exit(await runBrowserCheck({ title: 'Gallery / picture browser check', n
   check('the decoded bitmap is not larger than the drawer needs',
     decoded !== null && decoded.width <= 1120, JSON.stringify(decoded))
 
-  check('pictures are requested through the immutable thumbnail route',
+  check('list pictures use the small thumbnail representation',
     imageRequests.some((url) => /\/thumbnail/.test(url)),
     JSON.stringify(imageRequests.slice(0, 3)))
-  check('no picture is requested from the revalidating content route',
-    imageRequests.every((url) => !/\/content(\?|$)/.test(url)),
+  check('the drawer reads original picture content',
+    imageRequests.some((url) => /\/content(\?|$)/.test(url)),
     JSON.stringify(imageRequests.filter((url) => /\/content/.test(url)).slice(0, 3)))
-  check('the list and the drawer ask for ONE width, not two',
-    new Set(imageRequests.map((url) => (/[?&]w=(\d+)/.exec(url) || [])[1])).size <= 1,
+  check('list thumbnails stay small while original previews keep full detail',
+    imageRequests.filter((url) => /\/thumbnail/.test(url)).every((url) => /[?&]w=96(?:&|$)/.test(url)),
     JSON.stringify(Array.from(new Set(imageRequests.map((url) => (/[?&]w=(\d+)/.exec(url) || [])[1])))))
 
   /* ── 8. Esc closes, and reopening costs no request ───────────── */

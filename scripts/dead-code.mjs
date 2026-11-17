@@ -83,7 +83,8 @@ function specifiersOf(file) {
   const patterns = [
     /\bfrom\s*['"]([^'"\n]+)['"]/g,             // import/export ... from '...'
     /\bimport\s*\(\s*['"]([^'"\n]+)['"]\s*\)/g, // import('...')
-    /\brequire\s*\(\s*['"]([^'"\n]+)['"]\s*\)/g // createRequire(...)('...')
+    /\brequire\s*\(\s*['"]([^'"\n]+)['"]\s*\)/g, // createRequire(...)('...')
+    /\bnew\s+URL\s*\(\s*['"]([^'"\n]+)['"]\s*,\s*import\.meta\.url\s*\)/g // Worker module URLs
   ];
   for (const pattern of patterns) {
     pattern.lastIndex = 0;

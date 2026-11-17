@@ -158,8 +158,9 @@ export function createUploader(options) {
   }
 
   /** Create a task for one file and queue it. */
-  function enqueue(file, parentId, conflict) {
+  function enqueue(file, parentId, conflict, conditions = {}) {
     return add(createUploadTask({
+      ...conditions,
       file,
       parentId: parentId === undefined ? null : parentId,
       onConflict: conflict || null,
@@ -195,9 +196,11 @@ export function createUploader(options) {
     const task = add(createUploadTask({
       file,
       parentId: parentId === undefined ? null : parentId,
-      onConflict: null,
       api: client,
       sessionId: session.id,
+      onConflict: session.onConflict || null,
+      expectedVersion: session.expectedVersion,
+      expectedNodeId: session.expectedNodeId,
     }));
     const already = session.receivedChunks ? session.receivedChunks : [];
     const chunkSize = Number(session.chunkSize) || 0;
@@ -226,8 +229,8 @@ export function createUploader(options) {
   }
 
   /** Queue one file and wait for it — the folder plan uploads sequentially. */
-  async function enqueueAndWait(file, parentId, conflict) {
-    const task = enqueue(file, parentId, conflict);
+  async function enqueueAndWait(file, parentId, conflict, conditions) {
+    const task = enqueue(file, parentId, conflict, conditions);
     return outcomeOf(task);
   }
 

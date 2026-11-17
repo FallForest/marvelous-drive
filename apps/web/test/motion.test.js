@@ -241,6 +241,40 @@ describe('markAnimating', () => {
 
 /* ── withViewTransition ───────────────────────────────────────── */
 describe('withViewTransition', () => {
+  it('observes a skipped transition ready promise without an unhandled rejection', async () => {
+    const root = fakeElement()
+    const ready = deferred()
+    const finished = deferred()
+    const doc = { documentElement: root, startViewTransition(update) {
+      update()
+      return { ready: ready.promise, updateCallbackDone: Promise.resolve(), finished: finished.promise }
+    } }
+    withViewTransition(() => {}, { doc, root, reduced: false })
+    ready.reject(new Error('Transition was skipped'))
+    finished.resolve()
+    await new Promise((resolve) => setImmediate(resolve))
+    assert.equal(root.hasAttribute(MOTION_ATTRS.swapAttr), false)
+  })
+
+  it('an interrupted old transition cannot release the current transition flag', async () => {
+    const root = fakeElement()
+    const old = deferred()
+    const current = deferred()
+    const transitions = [old, current]
+    const doc = { documentElement: root, startViewTransition(update) {
+      update()
+      return { finished: transitions.shift().promise }
+    } }
+    withViewTransition(() => {}, { doc, root, reduced: false })
+    withViewTransition(() => {}, { doc, root, reduced: false })
+    old.reject(new Error('superseded'))
+    await Promise.resolve()
+    assert.equal(root.hasAttribute(MOTION_ATTRS.swapAttr), true)
+    current.resolve()
+    await Promise.resolve()
+    assert.equal(root.hasAttribute(MOTION_ATTRS.swapAttr), false)
+  })
+
   it('runs the update directly when the API is missing', () => {
     const root = fakeElement()
     const doc = { documentElement: root }

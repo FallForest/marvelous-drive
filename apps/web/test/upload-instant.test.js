@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
 import { createUploadTask, sha256, INSTANT_LIMIT, SIMPLE_LIMIT } from '../lib/upload.js'
+import { createUploader } from '../lib/upload-queue.js'
 
 /**
  * createUploadTask against an injected client: no HTTP, no DOM.
@@ -156,6 +157,64 @@ describe('instant upload (dedup probe)', () => {
     assert.equal(task.state, 'done')
     assert.equal(client.calls.every((call) => !call.path.startsWith('/blobs/')), true)
     assert.ok(file.size <= SIMPLE_LIMIT)
+  })
+
+  it('does not turn a rejected instant replacement into a fresh upload', async () => {
+    const file = fileOf('stale.bin', 2 * MiB)
+    const client = fakeClient({ request: async (path) => {
+      if (path.startsWith('/blobs/')) return { exists: true }
+      throw apiError('file changed since preflight', 409, 'VERSION_CONFLICT')
+    } })
+    const task = createUploadTask({ file, api: client, expectedVersion: 3, expectedNodeId: 'original' })
+    await assert.rejects(task.start(), (error) => error.code === 'VERSION_CONFLICT')
+    const instant = client.calls.find((call) => call.path === '/uploads/instant')
+    assert.equal(instant.body.expectedVersion, 3)
+    assert.equal(instant.body.expectedNodeId, 'original')
+    assert.equal(client.calls.some((call) => call.method === 'PUT'), false)
+  })
+
+  it('passes the absence guard through the shared scheduler for a new small file', async () => {
+    const client = fakeClient({ request: async () => { throw new Error('no probe needed') } })
+    const uploader = createUploader({ api: client })
+    await uploader.enqueueAndWait(fileOf('new.txt', 3), 'docs', 'overwrite', { expectedVersion: 0 })
+    const put = client.calls.find((call) => call.method === 'PUT')
+    assert.equal(new URL('http://local' + put.path).searchParams.get('expectedVersion'), '0')
+  })
+
+  it('keeps the selected strategy and snapshot on chunked creation and completion', async () => {
+    const file = fileOf('large.bin', 9 * MiB)
+    const client = fakeClient({ request: async (path, options) => {
+      if (path.startsWith('/blobs/')) throw apiError('not found', 404)
+      if (path === '/uploads/sessions') return { upload: { id: 'policy', chunkSize: CHUNK, receivedChunks: [] } }
+      if (path.endsWith('/complete')) return { node: { id: 'renamed', name: 'large (1).bin' } }
+      throw new Error(path)
+    } })
+    const uploader = createUploader({ api: client })
+    await uploader.enqueueAndWait(file, 'docs', 'rename', { expectedVersion: 2, expectedNodeId: 'original' })
+    for (const path of ['/uploads/sessions', '/uploads/sessions/policy/complete']) {
+      const call = client.calls.find((call) => call.path === path)
+      assert.equal(call.body.onConflict, 'rename')
+      assert.equal(call.body.expectedVersion, 2)
+      assert.equal(call.body.expectedNodeId, 'original')
+    }
+  })
+
+  it('restores the server-side conflict strategy when claiming a paused session', async () => {
+    const file = fileOf('paused.bin', 9 * MiB)
+    const session = { id: 'paused', onConflict: 'skip', expectedVersion: 4, expectedNodeId: 'original', chunkSize: CHUNK, receivedChunks: [0, 1] }
+    const client = fakeClient({ request: async (path) => {
+      if (path === '/uploads/sessions/paused') return { upload: session }
+      if (path.endsWith('/complete')) return { node: { id: 'original' } }
+      throw new Error(path)
+    } })
+    const uploader = createUploader({ api: client })
+    uploader.enqueueResume(file, session, 'docs')
+    await uploader.whenIdle()
+    const completed = client.calls.find((call) => call.path.endsWith('/complete'))
+    assert.equal(completed.body.onConflict, 'skip')
+    assert.equal(completed.body.expectedVersion, 4)
+    assert.equal(completed.body.expectedNodeId, 'original')
+    assert.equal(client.calls.some((call) => call.method === 'PUT'), false)
   })
 })
 

@@ -64,6 +64,22 @@ async function fetchBytes(path) {
 }
 
 describe('viewer link preview', () => {
+  it('downloads Unicode filenames without putting non-ASCII characters in HTTP headers', async () => {
+    for (const name of ['说明 📄.txt', 'café.txt', 'quote" test.txt', "a'b(1)!.txt"]) {
+      const file = await upload(name, 'Unicode filename bytes', 'text/plain')
+      const link = await share(file.id, { permission: 'downloader', maxDownloads: 1 })
+      const content = await api('GET', '/api/v1/shared/' + link.token + '/content')
+      assert.equal(content.status, 200, content.text)
+      assert.equal(content.text, 'Unicode filename bytes')
+      const disposition = content.headers.get('content-disposition') || ''
+      const match = /^attachment; filename="([^"\r\n]+)"; filename\*=UTF-8''(.+)$/.exec(disposition)
+      assert.ok(match, disposition)
+      assert.match(match[1], /^[\x20-\x7e]+$/)
+      assert.equal(decodeURIComponent(match[2]), file.name)
+      assert.ok(!/[!'()*]/.test(match[2]), 'RFC 5987 reserved characters must be escaped')
+    }
+  })
+
   it('streams the file inline without spending the download budget', async () => {
     const image = await upload('shot.png', Buffer.from('89504e470d0a1a0a', 'hex'), 'image/png')
     const link = await share(image.id)
@@ -102,7 +118,78 @@ describe('viewer link preview', () => {
   })
 })
 
+describe('download budget', () => {
+  it('does not spend the file, child or archive budget on HEAD', async () => {
+    const root = await folder('HEAD folder')
+    const file = await upload('head.txt', 'head bytes', 'text/plain', root.id)
+    const fileLink = await share(file.id, { permission: 'downloader', maxDownloads: 1 })
+    const folderLink = await share(root.id, { permission: 'downloader', maxDownloads: 1 })
+    for (const path of ['/api/v1/shared/' + fileLink.token + '/content',
+      '/api/v1/shared/' + folderLink.token + '/file/' + file.id,
+      '/api/v1/shared/' + folderLink.token + '/archive']) {
+      assert.equal((await api('HEAD', path)).status, 200)
+    }
+    assert.equal((await api('GET', '/api/v1/shared/' + fileLink.token)).json.share.downloads, 0)
+    assert.equal((await api('GET', '/api/v1/shared/' + folderLink.token)).json.share.downloads, 0)
+    assert.equal((await api('GET', '/api/v1/shared/' + fileLink.token + '/content')).status, 200)
+    assert.equal((await fetchBytes('/api/v1/shared/' + folderLink.token + '/archive')).status, 200)
+  })
+
+  it('allows only one concurrent password-protected download with a budget of one', async () => {
+    const file = await upload('budget.txt', 'once only', 'text/plain')
+    const link = await share(file.id, { permission: 'downloader', password: 'budget secret', maxDownloads: 1 })
+    const downloads = await Promise.all(Array.from({ length: 5 }, () => api('GET',
+      '/api/v1/shared/' + link.token + '/content?password=budget+secret')))
+    assert.equal(downloads.filter((response) => response.status === 200).length, 1)
+    assert.equal(downloads.filter((response) => response.status === 404).length, 4)
+    const listed = await api('GET', '/api/v1/nodes/' + file.id + '/shares', auth())
+    assert.equal(listed.json.shares[0].downloads, 1)
+  })
+})
+
+describe('workspace folder shares', () => {
+  it('shares the same mixed-owner subtree in browsing, previews and ZIPs', async () => {
+    const member = await api('POST', '/api/v1/auth/register', { body: { email: uniqueEmail(), password: 'member password' } })
+    const owner = await api('GET', '/api/v1/me', auth())
+    const { addMember } = await import('../src/workspaces.js')
+    addMember(owner.json.user.workspace.id, member.json.user.id, 'member')
+    const root = await folder('Team share')
+    const owned = await upload('owner.txt', 'owner bytes', 'text/plain', root.id)
+    const nested = await api('POST', '/api/v1/nodes', { token: member.json.token, body: { name: 'Member folder', kind: 'folder', parentId: root.id } })
+    const added = await api('PUT', '/api/v1/uploads?name=member.txt&parentId=' + nested.json.node.id,
+      { token: member.json.token, raw: true, body: 'member bytes', headers: { 'content-type': 'text/plain' } })
+    const outside = await upload('outside.txt', 'private sibling', 'text/plain')
+    const created = await api('POST', '/api/v1/nodes/' + root.id + '/share',
+      { token: member.json.token, body: { permission: 'downloader' } })
+    assert.equal(created.status, 201, created.text)
+    const publicRoot = '/api/v1/shared/' + created.json.share.token
+    const children = await api('GET', publicRoot + '/children')
+    assert.equal(children.status, 200, children.text)
+    assert.deepEqual(children.json.entries.map((entry) => entry.name).sort(), ['Member folder', 'owner.txt'])
+    const deep = await api('GET', publicRoot + '/children?parentId=' + nested.json.node.id)
+    assert.deepEqual(deep.json.entries.map((entry) => entry.name), ['member.txt'])
+    assert.equal((await api('GET', publicRoot + '/file/' + owned.id + '?inline=1')).text, 'owner bytes')
+    assert.equal((await api('GET', publicRoot + '/file/' + added.json.node.id + '?inline=1')).text, 'member bytes')
+    assert.equal((await api('GET', publicRoot + '/file/' + outside.id + '?inline=1')).status, 404)
+    const archive = await fetchBytes(publicRoot + '/archive')
+    assert.equal(archive.status, 200, archive.body.toString())
+    const zip = readZip(archive.body)
+    assert.deepEqual(zip.names().sort(), ['Team share/', 'Team share/Member folder/', 'Team share/Member folder/member.txt', 'Team share/owner.txt'])
+    assert.equal(zip.get('Team share/Member folder/member.txt').toString(), 'member bytes')
+  })
+})
+
 describe('folder share browsing', () => {
+  it('downloads a Chinese-named folder as a valid ZIP', async () => {
+    const root = await folder('项目资料')
+    await upload('说明.txt', 'shared folder bytes', 'text/plain', root.id)
+    const link = await share(root.id, { permission: 'downloader' })
+    const archive = await fetchBytes('/api/v1/shared/' + link.token + '/archive')
+    assert.equal(archive.status, 200, archive.body.toString())
+    assert.ok((archive.headers.get('content-disposition') || '').includes("filename*=UTF-8''" + encodeURIComponent(root.name + '.zip')))
+    assert.equal(readZip(archive.body).get('项目资料/说明.txt').toString(), 'shared folder bytes')
+  })
+
   let root
   let nested
   let link

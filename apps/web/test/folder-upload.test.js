@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
-import { planFromFileList, relativeSegments, uploadPlan } from '../lib/folder-upload.js'
+import { planFromFileList, prepareFolderFiles, relativeSegments, uploadPlan } from '../lib/folder-upload.js'
+import { sha256 } from '../lib/upload.js'
 
 /** Directory upload planning: the pure part of the folder upload path. */
 
@@ -201,5 +202,109 @@ describe('uploadPlan', () => {
       uploadFile: async () => { throw new Error('should not upload'); },
     });
     assert.deepEqual(result, { folders: 1, failedFolders: 0, uploaded: 0, total: 0 });
+  });
+
+  it('blocks a failed branch instead of placing descendants in the target root', async () => {
+    const created = [];
+    const uploads = [];
+    const result = await uploadPlan(plan, {
+      parentId: 'drive',
+      createFolder: async (parentId, name) => { created.push(name); throw new Error('forbidden'); },
+      uploadFile: async (f, parentId) => uploads.push([f.name, parentId]),
+    });
+    assert.deepEqual(created, ['Docs']);
+    assert.deepEqual(uploads, []);
+    assert.equal(result.failedFolders, 3);
+    assert.equal(result.uploaded, 0);
+  });
+
+  it('does not enqueue anything when the merge decision is canceled', async () => {
+    const result = await uploadPlan(plan, {
+      createFolder: async () => ({ id: 'dir' }),
+      prepareFiles: async () => null,
+      uploadFile: async () => { throw new Error('must not run'); },
+    });
+    assert.equal(result.canceled, true);
+    assert.equal(result.uploaded, 0);
+  });
+});
+
+describe('incremental folder merge', () => {
+  const local = (content, name = 'notes.txt') => new File([content], name);
+  const remote = async (f, extra = {}) => ({ id: 'old', name: f.name, kind: 'file', size: f.size, version: 3, blobHash: await sha256(f), ...extra });
+
+  it('skips identical small files without prompting or scheduling a transfer', async () => {
+    const file = local('same small bytes');
+    const existing = await remote(file);
+    let transfers = 0;
+    const summary = await uploadPlan({ dirs: new Set(['', 'Docs']), files: [{ file, path: 'Docs' }] }, {
+      createFolder: async () => ({ id: 'docs' }),
+      prepareFiles: (entries) => prepareFolderFiles(entries, {
+        listFiles: async () => [existing], hashFile: sha256,
+        chooseConflict: async () => { throw new Error('identical content needs no decision'); },
+      }),
+      uploadFile: async () => transfers++,
+    });
+    assert.equal(transfers, 0);
+    assert.equal(summary.skipped, 1);
+    assert.equal(summary.unchanged, 1);
+    assert.equal(summary.uploaded, 0);
+  });
+
+  it('compares hashes even when sizes match, and asks once for all changed files', async () => {
+    const a = local('old', 'a.txt'), b = local('old', 'b.txt');
+    const nodes = [await remote(a), await remote(b, { id: 'old-b' })];
+    let reads = 0, questions = 0;
+    const result = await prepareFolderFiles([
+      { file: local('new', 'a.txt'), parentId: 'docs' },
+      { file: local('new', 'b.txt'), parentId: 'docs' },
+    ], {
+      listFiles: async () => { reads++; return nodes; }, hashFile: sha256,
+      chooseConflict: async (count) => { questions++; assert.equal(count, 2); return 'overwrite'; },
+    });
+    assert.equal(reads, 1);
+    assert.equal(questions, 1);
+    assert.equal(result[0].skip, false);
+    assert.equal(result[0].options.expectedVersion, 3);
+    assert.equal(result[0].options.expectedNodeId, 'old');
+    assert.equal(result[0].options.hash, await sha256(local('new')));
+    assert.equal(result[0].options.onConflict, 'overwrite');
+  });
+
+  it('uploads only new entries and keeps the preflight absence guard', async () => {
+    const file = local('new');
+    const result = await prepareFolderFiles([{ file, parentId: 'docs' }], {
+      listFiles: async () => [], hashFile: sha256,
+      chooseConflict: async () => { throw new Error('no conflict'); },
+    });
+    assert.equal(result[0].options.expectedVersion, 0);
+    assert.equal(result[0].skip, false);
+  });
+
+  it('keeps paths separate, preserves remote-only files and honours skip/rename', async () => {
+    const existing = await remote(local('old'));
+    const entries = [{ file: local('new'), parentId: 'a' }, { file: local('new'), parentId: 'b' }];
+    for (const strategy of ['skip', 'rename']) {
+      const result = await prepareFolderFiles(entries, {
+        listFiles: async (id) => id === 'a' ? [existing, { id: 'remote-only', name: 'cloud.txt', kind: 'file' }] : [],
+        hashFile: sha256, chooseConflict: async () => strategy,
+      });
+      assert.equal(result.length, 2, 'cloud-only files produce no deletion');
+      assert.equal(result[0].skip, strategy === 'skip');
+      assert.equal(result[1].skip, false);
+      assert.equal(result[1].options.expectedVersion, 0);
+    }
+  });
+
+  it('never treats unavailable hashing as proof that the content is unchanged', async () => {
+    const file = local('old');
+    const existing = await remote(file);
+    let questions = 0;
+    const result = await prepareFolderFiles([{ file, parentId: 'docs' }], {
+      listFiles: async () => [existing], hashFile: async () => '',
+      chooseConflict: async () => { questions++; return null; },
+    });
+    assert.equal(questions, 1);
+    assert.equal(result, null);
   });
 });

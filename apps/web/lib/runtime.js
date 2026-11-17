@@ -34,6 +34,10 @@ export const runtime = {
   currentParentId() { return undefined; },
   /** Appends the next page of search results (the search view's 继续加载). */
   loadMoreSearch() {},
+  /** Appends the next page of the current directory, starred view or trash. */
+  loadMoreNodes() {},
+  /** Reloads page one after sorting, keeping shared navigation/stat caches. */
+  reloadRoute() {},
 };
 
 /** Called once by app.js, after every module has defined its functions. */

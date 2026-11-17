@@ -28,6 +28,7 @@ import {
   DURATION, MOTION_ATTRS, STAGGER, announceEntrance, markAnimating, onceOnRoute, prefersReducedMotion, withViewTransition,
 } from './lib/motion.js';
 import { store, session } from './lib/session.js';
+import { createRouteData, mergeNavigationNodes, NODE_PAGE_SIZE } from './lib/route-data.js';
 import { runtime, wire } from './lib/runtime.js';
 import { viewContent, statusContent, titleFor } from './lib/views.js';
 import { buildContext, restoreSearchFocus } from './lib/context.js';
@@ -35,7 +36,7 @@ import {
   openPreviewFor, lookupNode, startRename, startDelete, startPurge, deleteSelection, moveSelection,
   downloadSelection, downloadSelectionArchive, downloadFolderArchive,
 } from './lib/actions.js';
-import { focusRouteContent } from './lib/focus.js';
+import { captureFocusAddress, focusRouteContent, restoreFocusAddress } from './lib/focus.js';
 import { shortcutsEnabled } from './lib/shortcuts.js';
 import { attachDropZone } from './lib/dnd.js';
 import { pickFiles, pickUploadKind, uploadFiles, uploadFolderPlan, restoreUploads, currentParentId } from './lib/uploads.js';
@@ -49,6 +50,7 @@ const queue = createQueuePanel({
 const uploader = createUploader({ queue, api: { request, putRaw } });
 
 const root = document.getElementById('app');
+const routeData = createRouteData(api);
 
 /* ═══ routing ══════════════════════════════════════════════════ */
 function navigate(path, options) {
@@ -127,53 +129,33 @@ async function loadRoute(route, options) {
   renderShell();
 
   try {
-    if (route.name === 'search') {
-      const q = route.query || '';
-      // Stats come along even here: landing directly on /search used to leave the
-      // sidebar claiming "已用 0 B" because nothing ever fetched them.
-      const [payload, stats, live] = await Promise.all([
-        q ? api.get('/search?q=' + encodeURIComponent(q) + '&limit=50') : Promise.resolve({ results: [] }),
-        api.get('/storage/stats').catch(() => ({ stats: store.state.stats })),
-        api.get('/nodes'),
-      ]);
-      if (!current()) return;
-      // A direct search URL still needs the tree: it supplies sidebar targets,
-      // source parents and the move picker's destinations.
-      store.state.nodes = live && Array.isArray(live.nodes) ? live.nodes : [];
-      session.index = buildIndex(store.state.nodes);
-      store.state.searchResults = payload && Array.isArray(payload.results) ? payload.results : [];
-      store.state.searchQuery = q;
-      if (stats && stats.stats) store.state.stats = stats.stats;
-      store.state.selection = carried ? keepLiveIds(carried, session.index) : new Set();
-      store.state.anchorId = null;
-      store.state.searchMore = payload && payload.hasMore
-        ? { hasMore: true, limit: Number(payload.limit) || 50, offset: Number(payload.offset) || 0, loading: false }
-        : null;
-      store.state.loading = false;
-      paintRoute(route);
-      return;
-    }
-
-    const [live, trashed, stats] = await Promise.all([
-      api.get('/nodes'),
-      api.get('/nodes?trash=1').catch(() => ({ nodes: [] })),
-      api.get('/storage/stats').catch(() => ({ stats: null })),
-    ]);
+    const result = await routeData.load(route, {
+      sortKey: store.state.sortKey,
+      sortDir: store.state.sortDir,
+      force: opts.force === true,
+      count: opts.keepSelection && store.state.nodeMore ? store.state.nodeMore.offset + NODE_PAGE_SIZE : NODE_PAGE_SIZE,
+    });
     if (!current()) return;
-    store.state.searchMore = null;
-    session.index = buildIndex(live && Array.isArray(live.nodes) ? live.nodes : []);
-    store.state.nodes = live && Array.isArray(live.nodes) ? live.nodes : [];
-    store.state.trash = trashed && Array.isArray(trashed.nodes) ? trashed.nodes : [];
-    store.state.stats = stats ? stats.stats : null;
+    const payload = result.payload;
+    const rows = route.name === 'search' ? (payload.results || []) : (payload.nodes || []);
+    store.state.stats = result.stats || store.state.stats;
+    session.navigationNodes = result.folders;
+    session.index = buildIndex(mergeNavigationNodes(result.folders, rows));
+    store.state.nodes = route.name === 'trash' || route.name === 'search' ? [] : rows;
+    store.state.trash = route.name === 'trash' ? rows : [];
+    store.state.serverSorted = route.name !== 'search';
+    store.state.searchResults = route.name === 'search' ? rows : [];
+    store.state.searchQuery = route.name === 'search' ? route.query || '' : '';
+    store.state.searchMore = route.name === 'search' && payload.hasMore
+      ? { hasMore: true, limit: Number(payload.limit) || 50, offset: Number(payload.offset) || 0, loading: false }
+      : null;
+    store.state.nodeMore = route.name === 'search' ? null : {
+      hasMore: Boolean(payload.hasMore), limit: Number(payload.limit) || NODE_PAGE_SIZE,
+      offset: Number(payload.offset) || 0, loading: false,
+    };
     store.state.loading = false;
     store.state.selection = carried ? keepLiveIds(carried, session.index) : new Set();
     store.state.anchorId = null;
-
-    if (route.name === 'drive' && route.folderId && !session.index.byId.has(route.folderId)) {
-      toast('该文件夹不存在或已删除。', { type: 'warning' });
-      navigate('/', { replace: true });
-      return;
-    }
     paintRoute(route);
   } catch (error) {
     // A failed request from a route the user already left must not paint an
@@ -195,26 +177,53 @@ async function loadRoute(route, options) {
  */
 async function loadMoreSearch() {
   const more = store.state.searchMore;
-  if (!more || !more.hasMore || more.loading) return;
-  if (store.state.route.name !== 'search') return;
-  const query = store.state.route.query || '';
+  if (!more || !more.hasMore || more.loading || store.state.route.name !== 'search') return;
+  const route = store.state.route;
+  const ticket = routeLoadSeq;
+  const current = () => ticket === routeLoadSeq && store.state.route === route && store.state.searchMore === more;
   more.loading = true;
   runtime.renderShell();
   try {
-    const payload = await api.get('/search?q=' + encodeURIComponent(query)
+    const payload = await api.get('/search?q=' + encodeURIComponent(route.query || '')
       + '&limit=' + encodeURIComponent(String(more.limit))
       + '&offset=' + encodeURIComponent(String(more.offset + more.limit)));
+    if (!current()) return;
     const page = payload && Array.isArray(payload.results) ? payload.results : [];
-    const known = new Set((store.state.searchResults || []).map((node) => node.id));
-    store.state.searchResults = (store.state.searchResults || []).concat(page.filter((node) => !known.has(node.id)));
-    more.offset = Number(payload && payload.offset) || (more.offset + more.limit);
-    more.hasMore = Boolean(payload && payload.hasMore);
-    toast(page.length ? '已加载更多结果。' : '没有更多结果了。', { type: 'info', timeout: 1800 });
+    store.state.searchResults = mergeNavigationNodes(store.state.searchResults, page);
+    session.index = buildIndex(mergeNavigationNodes(session.navigationNodes, store.state.searchResults));
+    more.offset = Number(payload.offset) || (more.offset + more.limit);
+    more.hasMore = Boolean(payload.hasMore);
   } catch (error) {
-    toast((error && error.message) || '加载更多结果失败。', { type: 'error' });
+    if (current()) toast((error && error.message) || '加载更多结果失败。', { type: 'error' });
   } finally {
-    more.loading = false;
-    runtime.renderShell();
+    if (current()) { more.loading = false; runtime.renderShell(); }
+  }
+}
+
+/** Load another current-directory page without discarding the current selection. */
+async function loadMoreNodes() {
+  const more = store.state.nodeMore;
+  if (!more || !more.hasMore || more.loading) return;
+  const route = store.state.route;
+  const ticket = routeLoadSeq;
+  const current = () => ticket === routeLoadSeq && store.state.route === route && store.state.nodeMore === more;
+  more.loading = true;
+  runtime.renderShell();
+  try {
+    const payload = await routeData.page(route, {
+      sortKey: store.state.sortKey, sortDir: store.state.sortDir,
+      limit: more.limit, offset: more.offset + more.limit,
+    });
+    if (!current()) return;
+    const field = route.name === 'trash' ? 'trash' : 'nodes';
+    store.state[field] = mergeNavigationNodes(store.state[field], payload.nodes);
+    session.index = buildIndex(mergeNavigationNodes(session.navigationNodes, store.state[field]));
+    more.offset = Number(payload.offset) || (more.offset + more.limit);
+    more.hasMore = Boolean(payload.hasMore);
+  } catch (error) {
+    if (current()) toast((error && error.message) || '加载更多文件失败。', { type: 'error' });
+  } finally {
+    if (current()) { more.loading = false; runtime.renderShell(); }
   }
 }
 
@@ -239,11 +248,42 @@ function paintRoute(route) {
   withViewTransition(() => renderShell(), { reduced: prefersReducedMotion() });
 }
 
+/**
+ * Reloads the current route after a mutation.
+ *
+ * The 120ms window coalesces the bursts a single gesture can produce (a drag
+ * that moves ten rows, a batch delete). It must not, however, *drop* the last
+ * call: a second mutation that starts inside the window still changes server
+ * state, and returning a resolved promise without refreshing left the UI
+ * showing the state from before it — a star toggled twice in quick succession
+ * ended up unstarred on the server and painted as starred. A call inside the
+ * window now schedules one trailing refresh, and every caller gets the promise
+ * that resolves when a refresh (its own or the trailing one) has landed.
+ */
 function refreshData() {
   const now = Date.now();
-  if (now - session.lastRefreshAt < 120) return Promise.resolve();
-  session.lastRefreshAt = now;
-  return loadRoute(store.state.route, { keepSelection: true });
+  if (now - session.lastRefreshAt >= 120 && !session.refreshPending) {
+    session.lastRefreshAt = now;
+    const pending = loadRoute(store.state.route, { keepSelection: true, force: true });
+    session.refreshPending = pending.finally(() => {
+      if (session.refreshPending === pending) session.refreshPending = null;
+    });
+    return session.refreshPending;
+  }
+  // Inside the window: one trailing run, shared by every caller that asks for it.
+  if (!session.refreshTimer) {
+    const wait = Math.max(0, 120 - (now - session.lastRefreshAt));
+    session.refreshTimer = setTimeout(() => {
+      session.refreshTimer = null;
+      session.lastRefreshAt = Date.now();
+      const trailing = loadRoute(store.state.route, { keepSelection: true, force: true });
+      session.refreshPending = trailing.finally(() => {
+        if (session.refreshPending === trailing) session.refreshPending = null;
+      });
+    }, wait);
+    if (typeof session.refreshTimer.unref === 'function') session.refreshTimer.unref();
+  }
+  return session.refreshPending || Promise.resolve();
 }
 
 /** Selected ids that still exist in the refreshed tree. */
@@ -255,6 +295,15 @@ function keepLiveIds(ids, index) {
 
 /* ═══ auth ═════════════════════════════════════════════════════ */
 function mountAuth() {
+  routeLoadSeq += 1;
+  routeData.clear();
+  session.navigationNodes = [];
+  session.index = buildIndex([]);
+  store.state.nodes = [];
+  store.state.trash = [];
+  store.state.stats = null;
+  store.state.nodeMore = null;
+  store.state.searchMore = null;
   store.state.user = null;
   session.shellEls = null;
   session.selectionSlot = null;
@@ -283,6 +332,13 @@ onUnauthorized(() => {
 function renderShell() {
   const state = store.state;
   if (!state.user) { mountAuth(); return; }
+  // Where the caret is, in terms a re-render can find again. Every rebuild of
+  // the view detaches the element the user is standing on, so a mutation that
+  // repaints the list (a star toggle, a rename, a refresh after a delete) used
+  // to leave the caret on <body> — the next Tab restarted at the top of the
+  // document and the next Space went nowhere. Taken here rather than in
+  // refreshData() so every repaint heals, including a sort or a view switch.
+  const focusBefore = captureFocusAddress(session.shellEls && session.shellEls.viewEl);
   if (session.authHandle && session.authHandle.destroy) { session.authHandle.destroy(); session.authHandle = null; }
   restoreUploads(uploader);
 
@@ -340,6 +396,11 @@ function renderShell() {
   if (session.pendingRouteFocus) {
     session.pendingRouteFocus = false;
     focusRouteContent(session.shellEls.viewEl);
+  } else if (focusBefore) {
+    // No navigation asked for the heading, so put the caret back where it was.
+    // A row that still exists gets its control back; the route-focus case above
+    // deliberately wins because there the user moved to a different page.
+    restoreFocusAddress(session.shellEls.viewEl, focusBefore);
   }
   playViewEntrance(route);
 }
@@ -651,6 +712,8 @@ wire({
   uploadFolderPlan: (plan, parentId) => uploadFolderPlan(uploader, plan, parentId),
   uploadFiles: (files) => uploadFiles(uploader, files),
   loadMoreSearch,
+  loadMoreNodes,
+  reloadRoute: () => loadRoute(store.state.route),
   currentParentId,
 });
 

@@ -6,6 +6,97 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.26.0] - 2026-11-17
+
+Derived images, background work, and the wiring that makes both survivable.
+
+Thumbnails stopped being the original bytes echo: the server now decodes once,
+downscales, and caches by content, which is what makes a photo folder scroll
+instead of stall. That work has to run somewhere, so Office/PDF parsing and
+image transcoding share one bounded worker pool rather than blocking the
+request that asked for them.
+
+### Added
+
+- **Real JPEG/PNG/WebP thumbnails.** `ops/thumbnail.js` decodes with `sharp`,
+  re-encodes a bounded WebP, and caches it by `sha256@width` — content-addressed,
+  so one decode serves every node pointing at those bytes and a rewritten file
+  cannot serve stale pixels. Output is capped at 8 MiB and 40 MP; the cache path
+  is published by atomic rename so a second process never reads half an image.
+  `sharp` is an `optionalDependency`: a deployment without it answers
+  `503 DECODER_UNAVAILABLE` and keeps its icons, which is the honest answer.
+- **`apps/server/src/text/cpu-tasks.js`** — one bounded worker pool (2 concurrent,
+  32 queued, 30s timeout) shared by parsing and transcoding. Each job owns one
+  worker and the worker exits afterwards, so an idle pool holds neither a thread
+  nor a decoder's native memory. Remote bytes are only read *after* admission, so
+  a queue of waiting previews cannot accumulate blobs in memory.
+- **`apps/server/src/ops/index-jobs.js`** — durable Office/PDF indexing. A job row
+  survives a restart, an interrupted run resumes, and `pending`/`failed` counts
+  are reportable; a content search waits for readable queued work rather than
+  answering "no matches" while the text is still being extracted.
+- **Directory-scoped browsing.** `/nodes` accepts `limit`/`offset`/`sort`/
+  `direction` and the client pages 100 rows at a time with continuation, while
+  folder navigation and statistics are cached for 30s instead of refetched per
+  render. The trash is fetched only in its own view.
+- **`apps/web/lib/thumbnail-loader.js`** — viewport-triggered loading with a
+  bounded queue (4 in flight), so a folder of 500 photos requests the dozen the
+  user can actually see. `apps/web/lib/sha256.js` gives the client hashing on
+  plain-HTTP deployments, where `crypto.subtle` is unavailable.
+- **Public share capabilities.** Office previews render for anonymous visitors,
+  audio/video play through native controls, and both are checked against the
+  password and the shared subtree. `HEAD` probes no longer spend a download limit,
+  and concurrent downloads cannot exceed the remaining budget.
+- **Update snapshots.** An update takes a transactional database/secret snapshot
+  before pinning an image. A full local archive requires stopped writers, verifies
+  current and historical blob hashes, and restores only into a new or empty
+  destination.
+- **CI gates the release.** Critical browser regressions run in CI, and publishing
+  waits for CI to pass instead of trusting the tag.
+- **New browser checks** — `directory-check` (paging and continuation),
+  `share-check` (anonymous mobile shares, Unicode names, Office/audio previews),
+  and `scripts/test/backup.test.mjs` for the archive/restore contract.
+
+### Changed
+
+- **Text extraction moved off the request thread.** Office and PDF parsing now run
+  in the worker pool with source-size limits, so one large document cannot stall
+  the event loop that is also serving uploads.
+- **The drawer keeps original detail.** List and grid ask for a 96px and a 320px
+  representation; the preview drawer still renders the original, because a
+  thumbnail is for scanning and a preview is for looking.
+- **Folder re-upload merges instead of duplicating.** Directories are merged and
+  identical files are skipped before any transfer, without adding versions.
+  Changed files ask for a conflict strategy, and the choice survives a reload.
+- **A failed directory no longer flattens its descendants** into the target
+  folder — the tree keeps the shape the user dropped.
+
+### Fixed
+
+- **A second mutation inside the 120ms refresh window was painted stale.** The
+  throttle dropped the trailing call: a star toggled twice in quick succession
+  ended up unstarred on the server and painted as starred, because the second
+  refresh never ran. A call inside the window now schedules one trailing refresh
+  and every caller waits for a refresh that has actually landed.
+- **A repaint dropped the caret on `<body>`.** Any mutation that rebuilt the list
+  (star, rename, delete) detached the focused control, so the next Tab restarted
+  at the top of the document and the next Space went nowhere. The render now
+  records the caret's row and control before rebuilding and restores it after —
+  falling back to the row itself when the control changed identity, as
+  `加星标` does when it becomes `取消星标`, and never guessing a different row.
+- **Four browser checks seeded a corrupt PNG.** The 1×1 fixture used by
+  `dnd-check`, `interaction-check`, `share-check` and `ui-regression-check`
+  decompressed to three bytes where an 8-bit RGB row needs four, so `libpng`
+  rejected it and the new thumbnail pipeline answered `422` — the checks then
+  waited forever for an `img` that could never appear. Replaced with a valid
+  32×32 image; the pipeline is unchanged and still rejects genuinely broken bytes.
+- **Blob probes and instant uploads require a live reference.** A `blobs` row can
+  outlive its file; answering "already stored" from the row alone produced a node
+  that fails on download.
+- **Public downloads carry the original name.** Chinese and emoji filenames
+  survive a folder ZIP and an attachment, and mobile browsers stream to disk
+  instead of buffering the whole file.
+- **The CLI colour tests isolate their terminal**, including `TERM=dumb`.
+
 ## [0.25.0] - 2026-11-16
 
 Closing the gaps between what the interface promises and what it does.

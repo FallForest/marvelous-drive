@@ -3,15 +3,25 @@ name: CI
 on:
   push:
   pull_request:
+  workflow_call:
+    inputs:
+      ref:
+        type: string
+        required: false
+        default: ''
 
 jobs:
   test:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.ref }}
       - uses: actions/setup-node@v4
         with:
           node-version: 24
+      - name: Install optional image codecs
+        run: npm ci --no-audit --no-fund
       # Globs, not directories: Node 24 no longer resolves a bare directory
       # argument to the test files inside it ("Cannot find module .../test").
       - name: Server tests
@@ -39,12 +49,36 @@ jobs:
           bash -n scripts/deploy/update.sh
           bash -n scripts/deploy/backup.sh
 
+  browser:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: npm ci --no-audit --no-fund
+      - name: Browser regression checks with isolated data
+        run: |
+          export DRIVE_DATA_DIR="$(mktemp -d)"
+          node scripts/run-checks.mjs --server http://127.0.0.1:4488 --only browser-check,upload-check,share-check,preview-race-check,ui-regression-check,directory-check
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: browser-failure-screenshots
+          path: .tmp/shots
+          if-no-files-found: ignore
+
   images:
     # Builds both images on every push so a Dockerfile that only breaks on
     # Linux is caught here, not at release time.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.ref }}
       - uses: docker/setup-buildx-action@v3
       - name: Build the drive image
         uses: docker/build-push-action@v6

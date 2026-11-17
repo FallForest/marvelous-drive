@@ -1,18 +1,20 @@
 import { db, nowIso, transaction } from '../db.js'
 import { userFromRequest } from '../auth.js'
 import { config } from '../config.js'
-import { fail, sendBlob, sendJson, spoolBody } from '../http.js'
+import { fail, sendBlob, sendJson, sendRaw, spoolBody } from '../http.js'
 import { adoptBlob, releaseBlob, retainBlob } from '../storage/blobs.js'
 import { backend, readBlobBuffer } from '../storage/backend.js'
 import {
-  findFileByName, nodeJson, normalizeConflictStrategy, normalizeName, requireFile, upsertFile,
+  findFileByName, nodeJson, normalizeConflictStrategy, normalizeName, requireFile, uploadConditions, upsertFile,
 } from '../nodes.js'
 import { recordVersion, listVersions } from '../versions.js'
 import { recordAudit } from '../ops/audit.js'
 import { assertWithinQuota } from '../ops/quota.js'
-import { indexNode } from '../ops/search-index.js'
+import { queueIndex as indexNode } from '../ops/index-jobs.js'
 import { touchBlob } from '../ops/access-log.js'
 import { resolveMime } from '../mime.js'
+import { thumbnail } from '../ops/thumbnail.js'
+import { CpuTaskError } from '../text/cpu-tasks.js'
 
 /**
  * File content: simple upload, instant (deduplicated) upload, download with
@@ -32,26 +34,7 @@ import { resolveMime } from '../mime.js'
 
 const SHA256_RE = /^[a-f0-9]{64}$/
 
-/**
- * Thumbnail support: which stored mime types a browser can always decode, and
- * the window the `w` query is clamped into.
- *
- * This route does not resize anything, on purpose. A real thumbnail needs a
- * JPEG/PNG/WebP decoder, a resampler and an encoder in pure Node — there is no
- * runtime dependency to borrow one from and no external process to shell out
- * to. PNG alone is feasible (`node:zlib` inflates, unfiltering is ~80 lines);
- * a baseline + progressive JPEG decoder and a WebP VP8/VP8L decoder each cost
- * several hundred lines and carry real risk on hostile input. Browsers already
- * downsample off the main thread and cache the decoded result, so the trade is
- * passthrough + immutable caching + `<img width height>` + `object-fit: cover`.
- *
- * Path for a real implementation, if it ever pays off:
- *   1. decode to raw RGB (PNG first, then JPEG baseline, then WebP),
- *   2. box-filter down to the requested box plus one bilinear pass,
- *   3. re-encode as a single-store PNG (node:zlib deflate, ~40 lines),
- *   4. cache it beside the blob keyed by `hash@width`; blobs are content
- *      addressed, so the hash is already the cache key.
- */
+/** Accepted thumbnail sources; decoding and resizing run in bounded workers. */
 const THUMBNAIL_MIME = new Set(['image/jpeg', 'image/png', 'image/webp'])
 /**
  * Cacheable for a week — but never `public`.
@@ -68,8 +51,6 @@ const THUMBNAIL_CACHE_CONTROL = 'private, max-age=604800, immutable'
 const THUMBNAIL_WIDTH_MIN = 16
 const THUMBNAIL_WIDTH_MAX = 1024
 const THUMBNAIL_WIDTH_DEFAULT = 240
-/** Above this size the response is tagged so a client can adapt if it wants. */
-const THUMBNAIL_PASSTHROUGH_BYTES = 8 * 1024 * 1024
 
 /** `?w=` to an integer inside [16, 1024], defaulting to 240. */
 function thumbnailWidth(raw) {
@@ -89,6 +70,7 @@ const uploadPayload = (result, extra = {}) => ({
   node: nodeJson(result.node),
   ...(result.renamedFrom ? { renamedFrom: result.renamedFrom } : {}),
   ...(result.skipped ? { skipped: true } : {}),
+  ...(result.unchanged ? { unchanged: true } : {}),
   ...extra,
 })
 
@@ -99,13 +81,35 @@ async function discardBody(req) {
   return bytes
 }
 
-/** The stored blob record, or null; also guards against a lost blob. */
-async function storedBlob(hash) {
-  const row = db.prepare('SELECT size, refs FROM blobs WHERE hash=?').get(hash)
-  if (!row) return null
-  // Through the backend: "does it still exist" is not a filesystem question.
+/**
+ * A hash proves byte identity, not permission to read those bytes. Only a live
+ * file the caller can read (including its history) can authorize reuse. Count
+ * those references rather than blobs.refs, which also includes private files
+ * in other accounts.
+ */
+function visibleStoredBlob(userId, hash) {
+  const row = db.prepare(`SELECT b.size,
+    (SELECT COUNT(*) FROM nodes n
+      WHERE n.blob_hash=b.hash AND n.kind='file' AND n.deleted_at IS NULL
+        AND (n.user_id=? OR EXISTS (
+          SELECT 1 FROM memberships m WHERE m.user_id=? AND m.workspace_id=n.workspace_id
+        ))) +
+    (SELECT COUNT(*) FROM node_versions v JOIN nodes n ON n.id=v.node_id
+      WHERE v.blob_hash=b.hash AND n.kind='file' AND n.deleted_at IS NULL
+        AND (n.user_id=? OR EXISTS (
+          SELECT 1 FROM memberships m WHERE m.user_id=? AND m.workspace_id=n.workspace_id
+        ))) AS refs
+    FROM blobs b WHERE b.hash=?`).get(userId, userId, userId, userId, hash)
+  return row && row.refs > 0 ? { size: row.size, refs: row.refs } : null
+}
+
+/** Authorized metadata, provided the bytes still exist in the selected backend. */
+async function storedBlob(userId, hash) {
+  if (!visibleStoredBlob(userId, hash)) return null
+  // Stat may await a remote backend. A membership can be revoked, or the last
+  // visible file trashed, while it is in flight; do not return stale access.
   const info = await backend.stat(hash)
-  return info ? { size: row.size, refs: row.refs } : null
+  return info ? visibleStoredBlob(userId, hash) : null
 }
 
 const safeMime = (value) => {
@@ -134,9 +138,7 @@ async function storeBody(req, limit) {
 
 /** Bytes a same-named live file in the target folder already occupies. */
 function replacedBytesFor(userId, parentId, name) {
-  const row = db.prepare(`SELECT size FROM nodes
-    WHERE user_id=? AND IFNULL(parent_id,'')=IFNULL(?,'') AND name=? AND kind='file' AND deleted_at IS NULL`)
-    .get(userId, parentId ?? null, name)
+  const row = findFileByName(userId, parentId, name)
   return row ? row.size : 0
 }
 
@@ -144,14 +146,13 @@ export function registerFileRoutes(router) {
   /**
    * Dedup probe: does this drive already hold these exact bytes?
    *
-   * Only `size` and `refs` leak — never the on-disk path — and the blob is a
-   * global (content-addressed) fact, so the answer is the same for any account
-   * that already has that content.
+   * Invisible content answers exactly like absent content. `refs` describes
+   * only authorized live files and their history, never other accounts' usage.
    */
   router.get('/api/v1/blobs/:sha256', async (ctx) => {
-    userFromRequest(ctx.req, ctx.url)
+    const user = userFromRequest(ctx.req, ctx.url)
     const sha256 = sha256OrFail(ctx.params.sha256, ctx.fail)
-    const blob = await storedBlob(sha256)
+    const blob = await storedBlob(user.id, sha256)
     if (!blob) ctx.fail(404, 'NOT_FOUND', 'No blob with this sha256 is stored.')
     sendJson(ctx.res, 200, { exists: true, sha256, size: blob.size, refs: blob.refs })
   })
@@ -167,6 +168,7 @@ export function registerFileRoutes(router) {
   router.post('/api/v1/uploads/instant', async (ctx) => {
     const user = userFromRequest(ctx.req, ctx.url)
     const input = await ctx.json()
+    const conditions = uploadConditions(input)
     const sha256 = sha256OrFail(input.sha256, ctx.fail)
     const onConflict = normalizeConflictStrategy(input.onConflict)
     const name = normalizeName(input.name)
@@ -174,7 +176,7 @@ export function registerFileRoutes(router) {
     if (input.size === undefined || input.size === null) ctx.fail(400, 'INVALID_INPUT', 'size is required for an instant upload.')
     const size = Number(input.size)
     if (!Number.isFinite(size) || size < 0) ctx.fail(400, 'INVALID_INPUT', 'size must be a non-negative number of bytes.')
-    const blob = await storedBlob(sha256)
+    const blob = await storedBlob(user.id, sha256)
     if (!blob) ctx.fail(404, 'BLOB_NOT_FOUND', 'These bytes are not stored yet; upload them normally.')
     if (blob.size !== size) {
       ctx.fail(400, 'INVALID_INPUT', `size does not match the stored blob (${blob.size} bytes).`)
@@ -187,10 +189,15 @@ export function registerFileRoutes(router) {
       sendJson(ctx.res, 200, { node: nodeJson(existing), skipped: true, deduplicated: true })
       return
     }
+    // No await between this final permission check and retaining/creating the
+    // node: a remote stat is not a durable grant to somebody else's content.
+    if (!visibleStoredBlob(user.id, sha256)) {
+      ctx.fail(404, 'BLOB_NOT_FOUND', 'These bytes are not stored yet; upload them normally.')
+    }
     assertWithinQuota(user.id, size, replacedBytesFor(user.id, parentId, name))
     retainBlob(sha256)
     try {
-      const result = upsertFile(user.id, { name, parentId, mime, size, blobHash: sha256, onConflict })
+      const result = upsertFile(user.id, { name, parentId, mime, size, blobHash: sha256, onConflict, ...conditions })
       if (result.skipped) await releaseBlob(sha256)
       if (result.previousBlob) await releaseBlob(result.previousBlob)
       recordAudit(user.id, 'instant-upload', { nodeId: result.node.id, detail: name + ' · ' + size + 'B dedup', ip: ctx.ip })
@@ -211,6 +218,7 @@ export function registerFileRoutes(router) {
   router.put('/api/v1/uploads', async (ctx) => {
     const user = userFromRequest(ctx.req, ctx.url)
     const onConflict = normalizeConflictStrategy(ctx.url.searchParams.get('onConflict'))
+    const conditions = uploadConditions(Object.fromEntries(ctx.url.searchParams))
     const name = normalizeName(nameFromRequest(ctx.url, ctx.req))
     const parentId = ctx.url.searchParams.get('parentId') || null
     // The name decides the type where the table knows it: a .heic from a phone
@@ -234,7 +242,13 @@ export function registerFileRoutes(router) {
       await releaseBlob(blob.hash)
       throw error
     }
-    const result = upsertFile(user.id, { name, parentId, mime, size: blob.size, blobHash: blob.hash, onConflict })
+    let result
+    try {
+      result = upsertFile(user.id, { name, parentId, mime, size: blob.size, blobHash: blob.hash, onConflict, ...conditions })
+    } catch (error) {
+      await releaseBlob(blob.hash)
+      throw error
+    }
     if (result.skipped) await releaseBlob(blob.hash)
     if (result.previousBlob) await releaseBlob(result.previousBlob)
     recordAudit(user.id, result.previousBlob ? 'overwrite' : 'upload', { nodeId: result.node.id, detail: name + ' · ' + blob.size + 'B', ip: ctx.ip })
@@ -321,13 +335,7 @@ export function registerFileRoutes(router) {
     })
   })
 
-  /**
-   * List thumbnails. Only the three formats a browser is certain to decode are
-   * accepted; anything else answers `415 UNSUPPORTED_MEDIA_TYPE` so the client
-   * keeps the row icon instead of drawing garbage. The bytes are the original
-   * blob and the answer is cacheable for a week, because a blob hash can never
-   * change — see `THUMBNAIL_MIME` above for why no resize happens here.
-   */
+  /** Small WebP representations, with permission checked before the cache. */
   router.get('/api/v1/files/:id/thumbnail', async (ctx) => {
     const user = userFromRequest(ctx.req, ctx.url)
     const row = requireFile(user.id, ctx.params.id)
@@ -341,19 +349,21 @@ export function registerFileRoutes(router) {
     const info = await backend.stat(row.blob_hash)
     if (!info) ctx.fail(404, 'BLOB_NOT_FOUND', 'The stored content is missing.')
     touchBlob(row.blob_hash)
-    await sendBlob(ctx.req, ctx.res, backend, row.blob_hash, {
-      mime,
-      // A thumbnail is one whole representation, cached per URL: no Range.
-      acceptRanges: false,
-      headers: {
-        'cache-control': THUMBNAIL_CACHE_CONTROL,
-        // Two accounts, one URL: the response body depends on who asked.
-        vary: 'Authorization',
-        'x-thumbnail-width': String(width),
-        // Large originals are still handed over whole: the browser downsamples
-        // them itself, but a client that cares may want to know.
-        ...(info.size > THUMBNAIL_PASSTHROUGH_BYTES ? { 'x-thumbnail': 'passthrough' } : {}),
-      },
+    let result
+    try { result = await thumbnail(row.blob_hash, width) }
+    catch (error) {
+      if (error instanceof CpuTaskError) ctx.fail(error.status, error.code, error.message)
+      throw error
+    }
+    sendRaw(ctx.res, 200, result.buffer, {
+      'content-type': result.mime,
+      // Stable node URLs must revalidate; versioned URLs identify immutable bytes.
+      'cache-control': ctx.url.searchParams.get('v') === row.blob_hash
+        ? THUMBNAIL_CACHE_CONTROL : 'private, no-cache',
+      vary: 'Authorization',
+      'x-thumbnail-width': String(width),
+      'x-thumbnail': 'generated',
+      'x-thumbnail-cache': result.cache,
     })
   })
 

@@ -11,7 +11,8 @@ import { h } from './dom.js';
 import { request } from './api.js';
 import { toast, openMenu, dialog } from './ui.js';
 import { createFolder } from './files.js';
-import { pickDirectoryPlan, uploadPlan } from './folder-upload.js';
+import { pickDirectoryPlan, prepareFolderFiles, uploadPlan } from './folder-upload.js';
+import { sha256 } from './upload.js';
 import { store, session } from './session.js';
 import {
   clearLiveHandle, fileFromHandle, forgetHandle, listHandles, matchSessions, receivedBytes,
@@ -102,22 +103,50 @@ export function currentParentId() {
 
 /** Creates the folder skeleton first, then streams every file into it. */
 export async function uploadFolderPlan(uploader, plan, parentId) {
+  try {
+    return await mergeFolderPlan(uploader, plan, parentId);
+  } catch (error) {
+    toast('文件夹检查未完成，请稍后重新上传。', { type: 'warning', detail: error.message });
+    await runtime.refreshData().catch(() => {});
+  }
+}
+
+async function mergeFolderPlan(uploader, plan, parentId) {
   if (!plan || (!plan.files.length && plan.dirs.size <= 1)) {
     toast('这个文件夹是空的，没有可上传的内容。', { type: 'info' });
     return;
   }
   const label = plan.name || '文件夹';
-  toast('正在创建 ' + label + ' 的目录结构…', { type: 'info', timeout: 2000 });
+  toast('正在检查「' + label + '」的新增和变化文件…', { type: 'info', timeout: 3000 });
+  const directories = new Map();
+  const listFiles = async (targetParent) => {
+    const key = targetParent || 'root';
+    if (!directories.has(key)) {
+      const live = await request('/nodes?parentId=' + encodeURIComponent(key));
+      directories.set(key, live.nodes || []);
+    }
+    return directories.get(key);
+  };
   const summary = await uploadPlan(plan, {
     parentId,
     createFolder: async (targetParent, name) => {
+      const cleanName = String(name).trim().replace(/\s+/g, ' ');
+      const existingFolder = (await listFiles(targetParent)).find((node) => node.kind === 'folder' && node.name === cleanName);
+      if (existingFolder) {
+        const conflict = new Error('exists');
+        conflict.status = 409;
+        conflict.existing = existingFolder;
+        throw conflict;
+      }
       try {
-        return await createFolder(targetParent, name);
+        const created = await createFolder(targetParent, name);
+        directories.get(targetParent || 'root').push(created);
+        return created;
       } catch (error) {
         // Mirror what the server says: a same-named folder is reusable, not fatal.
         if (error && error.status === 409) {
           const live = await request('/nodes?parentId=' + encodeURIComponent(targetParent || 'root'));
-          const existing = (live.nodes || []).find((node) => node.kind === 'folder' && node.name === name);
+          const existing = (live.nodes || []).find((node) => node.kind === 'folder' && node.name === cleanName);
           if (existing) {
             const conflict = new Error('exists');
             conflict.status = 409;
@@ -134,14 +163,17 @@ export async function uploadFolderPlan(uploader, plan, parentId) {
     // three-slot scheduler never saw a second file until the first had finished
     // — a folder upload was a strict relay of single requests.
     concurrency: Math.max(1, Number(uploader.limit) || 1),
-    uploadFile: (file, targetParent) => uploader.enqueueAndWait(file, targetParent),
+    prepareFiles: (entries) => prepareFolderFiles(entries, { listFiles, hashFile: sha256, chooseConflict: (count) => askConflictStrategy(count, true) }),
+    uploadFile: (file, targetParent, options) => uploader.enqueueAndWait(file, targetParent, options.onConflict, options),
   });
-  const failed = summary.total - summary.uploaded;
+  if (summary.canceled) { toast('已取消这次上传。', { type: 'info' }); await runtime.refreshData(); return; }
+  const failed = summary.total - summary.uploaded - summary.skipped;
+  const detail = summary.skipped ? '已跳过 ' + summary.skipped + ' 个文件（其中 ' + summary.unchanged + ' 个内容未变，无需重传）。' : undefined;
   await runtime.refreshData();
-  if (failed) {
-    toast('已上传 ' + summary.uploaded + ' 个文件，' + failed + ' 个失败（可在队列中重试）', { type: 'warning' });
+  if (failed || summary.failedFolders) {
+    toast('已上传 ' + summary.uploaded + ' 个文件，' + failed + ' 个文件、' + summary.failedFolders + ' 个文件夹未完成', { type: 'warning', detail });
   } else {
-    toast('「' + label + '」已上传：' + summary.folders + ' 个文件夹，' + summary.uploaded + ' 个文件', { type: 'success' });
+    toast('「' + label + '」已合并：上传 ' + summary.uploaded + ' 个文件，跳过 ' + summary.skipped + ' 个文件', { type: 'success', detail });
   }
   if (plan.name) {
     const rootNode = (await request('/nodes?parentId=' + encodeURIComponent(parentId || 'root'))).nodes
@@ -201,7 +233,7 @@ const CONFLICT_CHOICES = [
  * Resolves null when the dialog is dismissed, which cancels the upload rather
  * than silently picking overwrite.
  */
-export function askConflictStrategy(count) {
+function askConflictStrategy(count, folderMerge = false) {
   return new Promise((resolve) => {
     let settled = false;
     const finish = (value) => { if (!settled) { settled = true; resolve(value); } };
@@ -211,7 +243,9 @@ export function askConflictStrategy(count) {
       checked: index === 0,
     }));
     const body = h('div', { class: 'field' },
-      h('p', { class: 'muted', text: '当前文件夹里已有 ' + count + ' 个同名的文件，请选择这次上传的处理方式。' }),
+      h('p', { class: 'muted', text: folderMerge
+        ? '文件夹中有 ' + count + ' 个同名文件内容不同或无法核对，请选择处理方式。内容未变的文件会自动跳过，云端独有文件会保留。'
+        : '当前文件夹里已有 ' + count + ' 个同名的文件，请选择这次上传的处理方式。' }),
       ...CONFLICT_CHOICES.map((choice, index) => h('label', { attrs: { for: name + '-' + choice.value, style: 'display:flex;gap:8px;align-items:flex-start;padding:4px 0' } },
         radios[index],
         h('span', {},
@@ -247,7 +281,7 @@ export function askConflictStrategy(count) {
   });
 }
 
-export function uploadFiles(uploader, files) {
+export async function uploadFiles(uploader, files) {
   const route = store.state.route;
   if (route.name !== 'drive') {
     toast('请先回到某个文件夹再上传。', { type: 'warning' });
@@ -256,15 +290,20 @@ export function uploadFiles(uploader, files) {
   const parentId = route.folderId || null;
   const list = Array.from(files || []).filter(Boolean);
   if (!list.length) return;
-  const existing = existingFilesIn(session.index, parentId);
-  const conflicts = conflictingNames(new Set(existing.keys()), list);
-  if (!conflicts.size) { startUpload(uploader, list, parentId, null, existing); return; }
-  // The dialog owns the ordering: the files are not queued until it answers, so
-  // a cancel leaves nothing running and no strategy half-applied.
-  askConflictStrategy(conflicts.size).then((strategy) => {
+  try {
+    // The visible page is deliberately incomplete. Check the target directory
+    // before asking about collisions so an off-page name cannot be overwritten
+    // without offering the same replace / keep-both / skip choice.
+    const payload = await request('/nodes?parentId=' + encodeURIComponent(parentId || 'root') + '&kind=file');
+    const existing = new Map((payload.nodes || []).map((node) => [node.name, node]));
+    const conflicts = conflictingNames(new Set(existing.keys()), list);
+    if (!conflicts.size) { startUpload(uploader, list, parentId, null, existing); return; }
+    const strategy = await askConflictStrategy(conflicts.size);
     if (!strategy) { toast('已取消这次上传。', { type: 'info', timeout: 2400 }); return; }
     startUpload(uploader, list, parentId, strategy, existing);
-  });
+  } catch (error) {
+    toast('无法检查同名文件，本次上传尚未开始。', { type: 'error', detail: error.message });
+  }
 }
 
 /** How many names in the batch were already taken before the upload started. */

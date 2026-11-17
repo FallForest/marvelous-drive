@@ -21,7 +21,7 @@ process.exit(await runBrowserCheck({ title: 'File interactions check', network: 
       if (!response.ok) throw new Error('upload failed: ' + name)
       return (await response.json()).node.id
     }
-    const png = Uint8Array.from(atob('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a5h8AAAAASUVORK5CYII='), (c) => c.charCodeAt(0))
+    const png = Uint8Array.from(atob('iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAIAAAD8GO2jAAAACXBIWXMAAAPoAAAD6AG1e1JrAAAAO0lEQVRIiWM4EaFBU8QwakHEaBBpjKaiE6MZTWO0qDgxWppGjFY4J0arzIjRVoXGaMMrYrTpqDGoW9cAXmogTLbfJmgAAAAASUVORK5CYII='), (c) => c.charCodeAt(0))
     const ids = {
       png: await upload('thumbnail.png', 'image/png', png),
       svg: await upload('vector.svg', 'image/svg+xml', '<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"/>'),

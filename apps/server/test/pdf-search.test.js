@@ -253,7 +253,7 @@ describe('PDF content search', () => {
   it('counts a PDF as covered, so coverage does not report a hole', async () => {
     const before = await api('GET', '/api/v1/maintenance/search', auth())
     await upload('fresh.pdf', buildPdf({ ops: textOps(['another searchable paragraph here']) }))
-    const afterStatus = await api('GET', '/api/v1/maintenance/search', auth())
+    const afterStatus = await api('GET', '/api/v1/maintenance/search?wait=1', auth())
     assert.equal(afterStatus.json.coverage.missing, 0, JSON.stringify(afterStatus.json.coverage))
     assert.ok(afterStatus.json.coverage.eligible >= before.json.coverage.eligible, 'a PDF is eligible for the index')
     assert.equal(afterStatus.json.upToDate, true)
@@ -262,7 +262,7 @@ describe('PDF content search', () => {
   it('records a scanned PDF as refused with a reason, not as a gap', async () => {
     const scan = buildPdf({ ops: ['q', '612 0 0 792 0 0 cm', '/Im1 Do', 'Q'].join('\n') })
     await upload('scanned.pdf', scan)
-    const status = await api('GET', '/api/v1/maintenance/search', auth())
+    const status = await api('GET', '/api/v1/maintenance/search?wait=1', auth())
     assert.ok(status.json.coverage.refused >= 1, JSON.stringify(status.json.coverage))
     assert.equal(status.json.coverage.missing, 0)
     assert.equal(status.json.upToDate, true)
@@ -274,7 +274,7 @@ describe('PDF content search', () => {
       Buffer.from('2 0 obj\n<< /Filter /Standard /V 2 >>\nendobj\ntrailer\n<< /Root 1 0 R /Encrypt 2 0 R >>\n%%EOF\n', 'latin1'),
     ])
     await upload('locked.pdf', encrypted)
-    const status = await api('GET', '/api/v1/maintenance/search', auth())
+    const status = await api('GET', '/api/v1/maintenance/search?wait=1', auth())
     assert.equal(status.json.coverage.missing, 0, JSON.stringify(status.json.coverage))
   })
 

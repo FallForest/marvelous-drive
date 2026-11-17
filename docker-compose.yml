@@ -58,9 +58,11 @@ services:
       UPDATE_PROJECT_DIR: /workspace
       COMPOSE_FILE: ${COMPOSE_FILE:-docker-compose.yml}
       COMPOSE_PROJECT_NAME: ${COMPOSE_PROJECT_NAME:-marvelous-drive}
-      # Read-only mount of the drive's volume: the backup step tars it, and the
-      # data is not in the project directory (a named volume holds it).
+      # Metadata snapshots are mandatory; a full stopped-drive archive is opt-in.
       DRIVE_DATA_DIR: /drive-data
+      BACKUP_DIR: /workspace/backups
+      BACKUP_DATA: ${DRIVE_BACKUP_DATA:-0}
+      BACKUP_KEEP: ${DRIVE_BACKUP_KEEP:-5}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       # The compose files and the update scripts, so the agent can run compose

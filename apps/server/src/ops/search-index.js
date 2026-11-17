@@ -4,9 +4,9 @@ import {
   containerIndexLimit,
   isContainerDocument,
   isOfficeDocument,
-  officeText,
-  pdfText,
 } from '../text/office-text.js'
+import { runCpuTask } from '../text/cpu-tasks.js'
+import { previewSource } from './preview-source.js'
 
 /**
  * Full-text index over file contents.
@@ -82,15 +82,35 @@ export function removeFromIndex(nodeId) {
 export async function indexNode(node) {
   try {
     if (!node || node.kind !== 'file') return false
-    removeFromIndex(node.id)
     // The caller passes a node JSON that may predate workspaces (or come from a
     // route's `nodeJson`), so the workspace is read from the row, not trusted.
-    const stored = db.prepare('SELECT workspace_id FROM nodes WHERE id=?').get(node.id)
-    const workspaceId = node.workspace_id ?? (stored ? stored.workspace_id : null)
+    const readCurrent = () => db.prepare('SELECT * FROM nodes WHERE id=?').get(node.id)
+    const stored = readCurrent()
+    if (!stored || stored.deleted_at || stored.blob_hash !== (node.blob_hash ?? null)
+        || (node.version !== undefined && stored.version !== node.version)) return false
+    const stillCurrent = () => {
+      const current = readCurrent()
+      return current && !current.deleted_at && current.blob_hash === stored.blob_hash && current.version === stored.version
+    }
+    const skip = (reason) => {
+      if (!stillCurrent()) return false
+      removeFromIndex(node.id)
+      recordSkip(node.id, reason)
+      return false
+    }
+    const save = (body) => {
+      if (!stillCurrent()) return false
+      // Remove at commit time, after the asynchronous work and generation
+      // check: an older job must never remove or overwrite a newer index row.
+      removeFromIndex(node.id)
+      db.prepare('INSERT INTO node_text(node_id,user_id,workspace_id,name,body) VALUES (?,?,?,?,?)')
+        .run(stored.id, stored.user_id, stored.workspace_id, stored.name, body)
+      return true
+    }
     // A node created without content (POST /nodes) has no blob at all. It is not
     // a failure — there is simply nothing to index — so it is recorded as a
     // skip, otherwise it stays a permanent gap in the coverage report.
-    if (!node.blob_hash) { recordSkip(node.id, 'empty'); return false }
+    if (!node.blob_hash) return skip('empty')
 
     // Container documents (OOXML, PDF) carry their text inside a wrapper, so they
     // take a different route: no NUL check, no UTF-8 decode — the extractor reads
@@ -98,32 +118,26 @@ export async function indexNode(node) {
     // found nothing.
     if (isContainerDocument(node.name, node.mime)) {
       const limit = containerIndexLimit(node.name, node.mime)
-      if (Number(node.size) > limit) { recordSkip(node.id, isOfficeDocument(node.name, node.mime) ? 'office-too-big' : 'pdf-too-big'); return false }
-      const raw = await readBlobBuffer(backend, node.blob_hash)
-      const extracted = isOfficeDocument(node.name, node.mime)
-        ? officeText(raw, node.name, node.mime)
-        : pdfText(raw, node.name, node.mime)
+      if (Number(node.size) > limit) return skip(isOfficeDocument(node.name, node.mime) ? 'office-too-big' : 'pdf-too-big')
+      const extracted = await runCpuTask(isOfficeDocument(node.name, node.mime) ? 'office-text' : 'pdf-text', async (signal) => ({
+        ...(await previewSource(backend, node.blob_hash, limit, signal)), name: node.name, mime: node.mime,
+      }))
       const text = typeof extracted === 'string' ? extracted : String(extracted.text || '')
       if (!text.trim()) {
         // A named reason is the difference between "we know why this is missing"
         // and "search is broken": `encrypted` and `no-text` (a scan) are not the
         // same thing to the person wondering where their file went.
-        recordSkip(node.id, typeof extracted === 'string' ? 'no-text' : (extracted.reason || 'no-text'))
-        return false
+        return skip(typeof extracted === 'string' ? 'no-text' : (extracted.reason || 'no-text'))
       }
-      db.prepare('INSERT INTO node_text(node_id,user_id,workspace_id,name,body) VALUES (?,?,?,?,?)')
-        .run(node.id, node.user_id, workspaceId, node.name, text)
-      return true
+      return save(text)
     }
 
-    if (!isIndexable(node.name, node.mime, node.size)) { recordSkip(node.id, 'not-text'); return false }
+    if (!isIndexable(node.name, node.mime, node.size)) return skip('not-text')
     const buffer = await readBlobBuffer(backend, node.blob_hash)
     // A lone NUL byte is the cheapest reliable "this is binary" signal.
-    if (buffer.includes(0)) { recordSkip(node.id, 'binary'); return false }
+    if (buffer.includes(0)) return skip('binary')
     const body = buffer.toString('utf8')
-    db.prepare('INSERT INTO node_text(node_id,user_id,workspace_id,name,body) VALUES (?,?,?,?,?)')
-      .run(node.id, node.user_id, workspaceId, node.name, body)
-    return true
+    return save(body)
   } catch (error) {
     console.error('[search] failed to index ' + (node && node.id) + ':', error)
     return false

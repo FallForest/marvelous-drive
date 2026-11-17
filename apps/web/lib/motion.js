@@ -25,6 +25,7 @@ const ANIMATION_FALLBACK_MS = 400;
 
 /** 视图转场的最长存活时间：被中断的转场 finished 永远不会 resolve。 */
 const VIEW_TRANSITION_TIMEOUT_MS = 2000;
+const activeTransitions = new WeakMap();
 
 /** 只在真正动画期间挂上的类（规则 2：不准常驻 will-change）。 */
 const ANIMATING_CLASS = 'is-animating';
@@ -168,6 +169,7 @@ export function withViewTransition(update, options) {
 
   let released = false;
   let timer;
+  const owner = {};
 
   const release = () => {
     if (released) return;
@@ -176,13 +178,24 @@ export function withViewTransition(update, options) {
       globalThis.clearTimeout(timer);
       timer = undefined;
     }
-    if (root && typeof root.removeAttribute === 'function') root.removeAttribute(SWAP_ATTR);
+    if (root && activeTransitions.get(root) === owner) {
+      activeTransitions.delete(root);
+      if (typeof root.removeAttribute === 'function') root.removeAttribute(SWAP_ATTR);
+    }
   };
 
-  if (root && typeof root.setAttribute === 'function') root.setAttribute(SWAP_ATTR, '');
+  if (root && typeof root.setAttribute === 'function') {
+    activeTransitions.set(root, owner);
+    root.setAttribute(SWAP_ATTR, '');
+  }
 
   try {
     const transition = doc.startViewTransition(update);
+    // A skipped animation rejects `ready` even when the DOM update succeeds.
+    // Rapid navigation routinely skips an old transition; observe both promises
+    // so that normal interruption never becomes an unhandled rejection.
+    transition?.ready?.then(undefined, () => {});
+    transition?.updateCallbackDone?.then(undefined, release);
     if (transition && transition.finished && typeof transition.finished.then === 'function') {
       // resolve 和 reject 都要释放：下一次导航打断转场时走的是 reject 分支。
       transition.finished.then(release, release);

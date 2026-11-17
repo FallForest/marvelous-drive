@@ -4,7 +4,8 @@ import { sendJson } from '../http.js'
 import { releaseBlob, retainBlob } from '../storage/blobs.js'
 import { recordAudit } from '../ops/audit.js'
 import { acquireLock, activeLock, releaseLock } from '../ops/locks.js'
-import { indexNode, removeFromIndex, renameInIndex } from '../ops/search-index.js'
+import { removeFromIndex, renameInIndex } from '../ops/search-index.js'
+import { queueIndex as indexNode } from '../ops/index-jobs.js'
 import { dropVersions } from '../versions.js'
 import {
   childrenCount, createNode, getNode, nodeJson, pathTo, requireNode,
@@ -30,8 +31,12 @@ const SORTS = {
  * which is what a shared drive means. Without it the query stays exactly what it
  * was before workspaces existed, so the personal view cannot regress.
  */
-function listNodes(userId, { parentId, trash, starred, sort = 'name', kind, workspace = null }) {
-  const order = SORTS[sort] || SORTS.name
+function listNodes(userId, { parentId, trash, starred, sort = 'name', kind, workspace = null, limit = null, offset = 0, direction = null }) {
+  let order = SORTS[sort] || SORTS.name
+  if (direction) {
+    const column = { name: 'lower(name)', size: 'size', updated: 'updated_at', created: 'created_at' }[sort] || 'lower(name)'
+    order = `CASE WHEN kind='folder' THEN lower(name) END ASC, CASE WHEN kind='file' THEN ${column} END ${direction === 'desc' ? 'DESC' : 'ASC'}, lower(name) ${direction === 'desc' ? 'DESC' : 'ASC'}`
+  }
   const where = []
   const params = []
   if (workspace) {
@@ -43,8 +48,8 @@ function listNodes(userId, { parentId, trash, starred, sort = 'name', kind, work
     // Inside a folder, visibility is the folder's, not the owner's: a member who
     // wrote into my folder must appear in it. The caller is already authorised for
     // the folder by the route (requireFolder/requireNode) before this runs.
-    where.push('EXISTS (SELECT 1 FROM memberships m WHERE m.user_id=? AND m.workspace_id=nodes.workspace_id)')
-    params.push(userId)
+    where.push('(user_id=? OR EXISTS (SELECT 1 FROM memberships m WHERE m.user_id=? AND m.workspace_id=nodes.workspace_id))')
+    params.push(userId, userId)
   } else {
     where.push('user_id=?')
     params.push(userId)
@@ -57,8 +62,11 @@ function listNodes(userId, { parentId, trash, starred, sort = 'name', kind, work
   }
   if (starred) where.push('starred=1')
   if (kind === 'file' || kind === 'folder') { where.push('kind=?'); params.push(kind) }
-  const rows = db.prepare(`SELECT * FROM nodes nodes_alias WHERE ${where.join(' AND ').replace(/nodes\./g, 'nodes_alias.')} ORDER BY (kind='folder') DESC, ${order}`).all(...params)
-  return rows.map((row) => nodeJson(row))
+  const paging = limit === null ? '' : ' LIMIT ? OFFSET ?'
+  if (limit !== null) params.push(limit + 1, offset)
+  const rows = db.prepare(`SELECT * FROM nodes nodes_alias WHERE ${where.join(' AND ').replace(/nodes\./g, 'nodes_alias.')} ORDER BY (kind='folder') DESC, ${order}, id ASC${paging}`).all(...params)
+  if (limit === null) return { nodes: rows.map((row) => nodeJson(row)) }
+  return { nodes: rows.slice(0, limit).map((row) => nodeJson(row)), limit, offset, hasMore: rows.length > limit }
 }
 
 export function registerNodeRoutes(router) {
@@ -128,15 +136,29 @@ export function registerNodeRoutes(router) {
   router.get('/api/v1/nodes', async (ctx) => {
     const user = userFromRequest(ctx.req, ctx.url)
     const query = ctx.url.searchParams
-    const nodes = listNodes(user.id, {
-      parentId: query.has('parentId') ? query.get('parentId') : undefined,
+    const paged = query.has('limit') || query.has('offset')
+    const limit = paged ? Number(query.get('limit') ?? 100) : null
+    const offset = Number(query.get('offset') ?? 0)
+    if (paged && (!Number.isSafeInteger(limit) || limit < 1 || limit > 500)) ctx.fail(400, 'INVALID_INPUT', 'limit must be an integer between 1 and 500.')
+    if (!Number.isSafeInteger(offset) || offset < 0) ctx.fail(400, 'INVALID_INPUT', 'offset must be a non-negative integer.')
+    const direction = query.get('direction')
+    if (direction !== null && direction !== 'asc' && direction !== 'desc') ctx.fail(400, 'INVALID_INPUT', 'direction must be asc or desc.')
+    const parentId = query.has('parentId') ? query.get('parentId') : undefined
+    if (parentId && parentId !== 'root') {
+      const parent = requireNode(user.id, parentId)
+      if (parent.deleted_at) ctx.fail(404, 'NOT_FOUND', 'Folder was not found.')
+      if (parent.kind !== 'folder') ctx.fail(400, 'NOT_FOLDER', 'The parent must be a folder.')
+    }
+    const payload = listNodes(user.id, {
+      parentId,
       trash: query.get('trash') === '1' || query.get('trash') === 'true',
       starred: query.get('starred') === '1' || query.get('starred') === 'true',
       sort: query.get('sort') || 'name',
       kind: query.get('kind') || undefined,
       workspace: query.get('workspace') || null,
+      limit, offset, direction,
     })
-    sendJson(ctx.res, 200, { nodes })
+    sendJson(ctx.res, 200, payload)
   })
 
   router.post('/api/v1/nodes', async (ctx) => {

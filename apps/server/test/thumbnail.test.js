@@ -1,13 +1,13 @@
 import assert from 'node:assert/strict'
 import { after, before, describe, it } from 'node:test'
 import { startServer, uniqueEmail } from './helpers.js'
+import sharp from 'sharp'
+import { encodePng } from '../src/text/image-normalize.js'
 
 /**
  * GET /api/v1/files/:id/thumbnail
  *
- * The route hands over the original blob for the three formats a browser can
- * always decode, tagged so it may be cached for a week. Everything else keeps
- * its row icon on the client, which starts with a 415.
+ * Real bounded representations, permission checks and cache invalidation.
  */
 
 let app
@@ -29,10 +29,7 @@ after(async () => {
 const auth = (extra = {}) => ({ token, ...extra })
 
 /** One pixel PNG: enough to be a real image, small enough to inline. */
-const PNG = Buffer.from(
-  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
-  'base64',
-)
+const PNG = encodePng(Buffer.from([255, 0, 0, 255]), 1, 1)
 
 /**
  * The shared client reads bodies as text, which mangles binary; thumbnails are
@@ -56,19 +53,22 @@ async function upload(name, body, type) {
 }
 
 describe('file thumbnails', () => {
-  it('answers a png with the stored type and a one week immutable cache', async () => {
+  it('answers a WebP without enlargement and versions its immutable cache', async () => {
     const node = await upload('pixel.png', PNG, 'image/png')
-    const response = await raw('/api/v1/files/' + node.id + '/thumbnail?w=240')
+    const response = await raw('/api/v1/files/' + node.id + '/thumbnail?w=240&v=' + node.blobHash)
     assert.equal(response.status, 200)
-    assert.equal(response.headers.get('content-type'), 'image/png')
+    assert.equal(response.headers.get('content-type'), 'image/webp')
     // `private`: a week of freshness, scoped to one browser profile. A public
     // response would let a second account in the same profile read this picture.
     assert.equal(response.headers.get('cache-control'), 'private, max-age=604800, immutable')
     assert.equal(response.headers.get('vary'), 'Authorization')
-    assert.equal(response.headers.get('content-length'), String(PNG.length))
+    assert.equal(response.headers.get('content-length'), String(response.body.length))
     assert.equal(response.headers.get('x-thumbnail-width'), '240')
-    assert.equal(response.headers.get('x-thumbnail'), null, 'a small image is not tagged as a passthrough')
-    assert.deepEqual(response.body, PNG, 'the original bytes are passed through untouched')
+    assert.equal(response.headers.get('x-thumbnail'), 'generated')
+    assert.notDeepEqual(response.body, PNG)
+    const metadata = await sharp(response.body).metadata()
+    assert.equal(metadata.width, 1, 'small sources are never enlarged')
+    assert.equal(metadata.height, 1)
   })
 
   it('clamps the requested width instead of failing on nonsense', async () => {
@@ -94,7 +94,41 @@ describe('file thumbnails', () => {
     const response = await raw('/api/v1/files/' + node.id + '/thumbnail', { range: 'bytes=0-3' })
     assert.equal(response.status, 200, 'a 206 would mean Range leaked into the thumbnail route')
     assert.equal(response.headers.get('content-range'), null)
-    assert.deepEqual(response.body, PNG)
+    assert.equal((await sharp(response.body).metadata()).format, 'webp')
+  })
+
+  it('downsizes every supported source and reuses the generated cache', async () => {
+    for (const format of ['jpeg', 'png', 'webp']) {
+      const image = await sharp({ create: { width: 800, height: 400, channels: 3, background: '#4488aa' } })
+        [format]().toBuffer()
+      const node = await upload('large.' + format, image, 'image/' + format)
+      const path = '/api/v1/files/' + node.id + '/thumbnail?w=96&v=' + node.blobHash
+      const first = await raw(path)
+      assert.equal(first.status, 200)
+      const metadata = await sharp(first.body).metadata()
+      assert.equal(metadata.width, 96)
+      assert.equal(metadata.height, 48)
+      assert.ok(first.body.length < image.length)
+      const cached = await raw(path)
+      assert.equal(cached.headers.get('x-thumbnail-cache'), 'hit')
+      assert.deepEqual(cached.body, first.body)
+    }
+  })
+
+  it('revalidates unversioned URLs and rejects a foreign node even on a warm cache', async () => {
+    const node = await upload('warm.png', PNG, 'image/png')
+    const path = '/api/v1/files/' + node.id + '/thumbnail?w=96'
+    const warm = await raw(path)
+    assert.equal(warm.headers.get('cache-control'), 'private, no-cache')
+    const other = await api('POST', '/api/v1/auth/register', { body: { email: uniqueEmail(), password: 'other password' } })
+    const denied = await api('GET', path, { token: other.json.token })
+    assert.equal(denied.status, 404)
+  })
+
+  it('never returns original bytes for corrupt image input', async () => {
+    const node = await upload('broken.png', Buffer.from('invalid image'), 'image/png')
+    const response = await api('GET', '/api/v1/files/' + node.id + '/thumbnail?w=96', auth())
+    assert.equal(response.status, 422)
   })
 
   it('refuses every format a browser cannot promise to decode', async () => {

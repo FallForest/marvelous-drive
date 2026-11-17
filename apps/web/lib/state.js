@@ -1,9 +1,8 @@
 /*
  * state.js — application state, route parsing and the flat-tree index.
  *
- * The API returns one flat list of live nodes; every screen (breadcrumb, tree,
- * folder listing, star filter) is derived from that single cache, so navigating
- * never issues a second request per folder.
+ * The navigation index holds folders and the current page's files. Visible rows
+ * are paged separately so opening one directory never downloads the whole drive.
  */
 
 /** Parse location.pathname + search into a route descriptor. */
@@ -48,6 +47,9 @@ export function createStore(initial) {
       searchQuery: '',
       /** { hasMore, limit, offset, loading } while a search page has more hits. */
       searchMore: null,
+      /** Directory/trashed/starred page metadata; selection covers loaded rows. */
+      nodeMore: null,
+      serverSorted: false,
       loading: false,
       loadError: null,
       view: 'list',        // list | grid

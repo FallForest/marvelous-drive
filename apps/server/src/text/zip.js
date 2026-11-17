@@ -1,5 +1,5 @@
 import { createWriteStream } from 'node:fs'
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { join } from 'node:path'
 import { db, nowIso } from '../db.js'
 import { config } from '../config.js'
@@ -38,13 +38,14 @@ function dosStamp(date) {
   return { time, day }
 }
 
-function collectFiles(userId, folderId, prefix, out) {
-  const rows = db.prepare("SELECT * FROM nodes WHERE user_id=? AND parent_id=? AND deleted_at IS NULL ORDER BY (kind='folder') DESC, lower(name)").all(userId, folderId)
+function collectFiles(userId, folderId, prefix, out, workspaceId) {
+  const ownerColumn = workspaceId ? 'workspace_id' : 'user_id'
+  const rows = db.prepare(`SELECT * FROM nodes WHERE ${ownerColumn}=? AND parent_id=? AND deleted_at IS NULL ORDER BY (kind='folder') DESC, lower(name)`).all(workspaceId || userId, folderId)
   for (const row of rows) {
     const entryName = prefix ? `${prefix}/${row.name}` : row.name
     if (row.kind === 'folder') {
       out.push({ name: `${entryName}/`, folder: true, size: 0, date: row.updated_at })
-      collectFiles(userId, row.id, entryName, out)
+      collectFiles(userId, row.id, entryName, out, workspaceId)
     } else if (row.blob_hash) {
       out.push({ name: entryName, folder: false, size: row.size, hash: row.blob_hash, date: row.updated_at })
     }
@@ -67,12 +68,15 @@ export async function buildZip(userId, folderId) {
  * archive prefix and each file is stored at the top level under its own name.
  * Duplicate names inside the archive are suffixed, because two selected folders
  * can legitimately be called the same thing.
+ * `workspaceId` includes contributors' children for an already-authorized
+ * shared root. The caller must authorize the selection before enabling it.
  */
-export async function buildZipFrom(userId, roots) {
+export async function buildZipFrom(userId, roots, { workspaceId } = {}) {
   const entries = []
   const used = new Set()
   for (const root of roots) {
-    const row = db.prepare('SELECT * FROM nodes WHERE id=? AND user_id=? AND deleted_at IS NULL').get(root.id, userId)
+    const ownerColumn = workspaceId ? 'workspace_id' : 'user_id'
+    const row = db.prepare(`SELECT * FROM nodes WHERE id=? AND ${ownerColumn}=? AND deleted_at IS NULL`).get(root.id, workspaceId || userId)
     if (!row) continue
     let prefix = row.name
     if (used.has(prefix)) {
@@ -83,7 +87,7 @@ export async function buildZipFrom(userId, roots) {
     used.add(prefix)
     if (row.kind === 'folder') {
       entries.push({ name: prefix + '/', folder: true, size: 0, date: row.updated_at })
-      collectFiles(userId, row.id, prefix, entries)
+      collectFiles(userId, row.id, prefix, entries, workspaceId)
     } else if (row.blob_hash) {
       entries.push({ name: prefix, folder: false, size: row.size, hash: row.blob_hash, date: row.updated_at })
     }
@@ -92,7 +96,7 @@ export async function buildZipFrom(userId, roots) {
 }
 
 async function writeArchive(entries) {
-  const tempPath = join(config.tmpDir, `zip-${process.pid}-${Date.now()}.part`)
+  const tempPath = join(config.tmpDir, `zip-${process.pid}-${randomUUID()}.part`)
   const out = createWriteStream(tempPath)
   const hash = createHash('sha256')
   let offset = 0

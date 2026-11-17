@@ -67,6 +67,8 @@ zip.js            Stored ZIP writer (CRC32, streaming)
 zip-read.js       Minimal ZIP reader (stored/deflate, zip64, bomb caps)
 image-normalize.js HEIC frame → downscaled RGBA → PNG (box filter + node:zlib)
 heif-loader.js    The only importer of libheif: lazy WASM, LGPL, fails soft
+cpu-tasks.js      Bounded worker admission, deadlines and lifecycle
+cpu-worker.js     Pure image/document extraction dispatcher in worker threads
 ```
 
 ### `ops/` — scheduled and cross-cutting work
@@ -77,6 +79,9 @@ scrub.js          Blob integrity: missing files, orphans, size mismatches
 audit.js          Append-only action log with a 90 day window
 access-log.js     Blob read tracking (one row per blob per day) + hot/cold split
 search-index.js   Body index: FTS5 + LIKE merge, index on write, rebuild on boot
+index-jobs.js     Durable Office/PDF index queue, replay and search barrier
+thumbnail.js      Content-hash/size WebP cache and worker orchestration
+preview-source.js Capped local/remote source preparation after worker admission
 locks.js          Advisory edit locks: short TTL, takeover, audit trail
 quota.js          Per-account byte ceiling, checked on every write path
 rate-limit.js     Login throttle: ten failures per address per fifteen minutes
@@ -120,6 +125,8 @@ app.js            Shell + boot only: router, mounted chrome, the wiring table
 lib/
   session.js      The shared mutable state every other module agrees through
   runtime.js      The verbs modules call back into the shell with (breaks cycles)
+  route-data.js   Current-directory pages and invalidatable folders/stats caches
+  thumbnail-loader.js Viewport observation and bounded image request scheduling
   views.js        The four pages, the skeleton/error states, the status bar
   context.js      The handler table every view is handed
   actions.js      Open / rename / move / delete / restore / share / download
@@ -138,6 +145,7 @@ lib/
   image-fit.js    How big to decode: contain-fit, long-edge cap, pixel budget
   image-loader.js Route choice + createImageBitmap downsampling for one picture
   image-size.js   Reads width/height from a PNG/JPEG/GIF/WebP header
+  sha256.js       Web Crypto hashing with a fallback for non-secure origins
   row-action.js   What a click means: action vs. selection (see the rules below)
   preview.js      Preview drawer: image, PDF, text, markdown, media, edit lock
   text-editor.js  Explicit text editing: version check, encodings, dirty drafts
@@ -255,6 +263,8 @@ feature-check.mjs    thumbnails, batch bar, draggable rows, duplicates drawer
 upload-check.mjs     picker, 9 MiB resumable session, batch bar, cancel
 resume-check.mjs     a reloaded page claims its live session and can discard it
 folder-check.mjs     a dropped entry tree keeps folders, nesting and empty dirs
+directory-check.mjs  directory paging, continuation and server ordering
+share-check.mjs      anonymous shares: Unicode names, Office and media previews
 versions-check.mjs   the history drawer, and its absence on a v1 file
 lock-check.mjs       the advisory edit lock: claim, supersede, release
 search-check.mjs     content hit, snippet, .docx text, sidebar usage

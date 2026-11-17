@@ -3,12 +3,9 @@
  *
  * Three decisions live here, and each one is a cost decision:
  *
- * 1. WHICH ROUTE. `/files/:id/content` answers `cache-control: private,
- *    max-age=0, must-revalidate`, so the browser re-answers every byte on every
- *    visit. `/files/:id/thumbnail` carries `max-age=604800, immutable` and the
- *    same bytes behind it. Using the thumbnail route therefore costs the same
- *    on first view and nothing at all on the second — the only traffic lever
- *    this server offers, because it does not resize.
+ * 1. WHICH ROUTE. List/grid thumbnails are small lossy representations. The
+ *    drawer reads original native image content so detail and animation remain
+ *    intact. HEIC uses the server's transcoded representation.
  *
  * 2. HOW BIG TO DECODE. `createImageBitmap` takes resizeWidth/resizeHeight and
  *    downsamples during decode; the full-size bitmap is never materialised. A
@@ -22,27 +19,19 @@
  */
 
 import { contentUrl, fetchBlob } from './api.js';
-import { thumbnailUrl } from './files.js';
-import { THUMBNAIL_MIMES } from './thumb-cache.js';
 import { fitSize, needsRecap, recapFor } from './image-fit.js';
 import { HEADER_PROBE_BYTES, imageSize } from './image-size.js';
 
-/**
- * The URL that answers with an immutable cache header when it can.
- *
- * Only the three formats the route accepts are sent there; a GIF, AVIF or SVG
- * would get a 415, so those keep the plain content URL and pay the revalidation
- * (they are also the formats a browser cannot cheaply re-encode).
- */
+/** Full detail for native formats; a server preview for HEIC/HEIF. */
 export function imageRequestUrl(node, options) {
   if (!node || !node.id) return null;
   const opts = options || {};
   const mime = String(node.mime || '').split(';')[0].trim().toLowerCase();
-  if (THUMBNAIL_MIMES.has(mime)) return thumbnailUrl(node.id, opts.width || 1024);
   // HEIC/HEIF: no browser decodes these, so the server transcodes a preview.
   // The route answers a PNG with the same immutable cache contract.
   if (mime === 'image/heic' || mime === 'image/heif') {
-    return '/api/v1/files/' + encodeURIComponent(node.id) + '/preview-image?w=' + (opts.width || 1600);
+    return '/api/v1/files/' + encodeURIComponent(node.id) + '/preview-image?w=' + (opts.width || 1600)
+      + (node.blobHash ? '&v=' + encodeURIComponent(node.blobHash) : '');
   }
   return contentUrl(node.id);
 }

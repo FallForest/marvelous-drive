@@ -7,11 +7,12 @@ import { userFromRequest } from '../auth.js'
 import { config } from '../config.js'
 import { fail, sendJson } from '../http.js'
 import { adoptBlob, releaseBlob, retainBlob } from '../storage/blobs.js'
-import { findFileByName, nodeJson, normalizeConflictStrategy, upsertFile } from '../nodes.js'
+import { findFileByName, nodeJson, normalizeConflictStrategy, normalizeName, uploadConditions, upsertFile } from '../nodes.js'
 import { randomId } from '../security.js'
 import { resolveMime } from '../mime.js'
 import { assertWithinQuota } from '../ops/quota.js'
 import { backend } from '../storage/backend.js'
+import { queueIndex } from '../ops/index-jobs.js'
 
 /**
  * Resumable uploads.
@@ -49,6 +50,7 @@ const uploadJson = (row) => ({
   sha256: row.sha256,
   expiresAt: row.expires_at,
   createdAt: row.created_at,
+  ...JSON.parse(row.options || '{}'),
 })
 
 function requireSession(userId, id) {
@@ -71,9 +73,7 @@ async function hashFile(path) {
 
 /** Bytes an existing same-named file would be replaced by this upload. */
 function replacedBytesForUpload(userId, parentId, name) {
-  const row = db.prepare(`SELECT size FROM nodes
-    WHERE user_id=? AND IFNULL(parent_id,'')=IFNULL(?,'') AND name=? AND kind='file' AND deleted_at IS NULL`)
-    .get(userId, parentId ?? null, name)
+  const row = findFileByName(userId, parentId, name)
   return row ? row.size : 0
 }
 
@@ -81,6 +81,7 @@ export function registerUploadRoutes(router) {
   router.post('/api/v1/uploads/sessions', async (ctx) => {
     const user = userFromRequest(ctx.req, ctx.url)
     const input = await ctx.json()
+    const options = { onConflict: normalizeConflictStrategy(input.onConflict), ...uploadConditions(input) }
     const size = Number(input.size)
     if (!Number.isFinite(size) || size < 0) ctx.fail(400, 'INVALID_INPUT', 'size must be a non-negative number of bytes.')
     if (size > config.maxUploadBytes) ctx.fail(413, 'FILE_TOO_LARGE', `Files are limited to ${config.maxUploadBytes} bytes.`)
@@ -88,7 +89,7 @@ export function registerUploadRoutes(router) {
     if (!Number.isFinite(chunkSize) || chunkSize < config.upload.minChunkSize || chunkSize > config.upload.maxChunkSize) {
       ctx.fail(400, 'INVALID_INPUT', `chunkSize must be between ${config.upload.minChunkSize} and ${config.upload.maxChunkSize} bytes.`)
     }
-    const name = String(input.name || 'upload.bin').trim()
+    const name = normalizeName(input.name || 'upload.bin')
     if (!name) ctx.fail(400, 'INVALID_INPUT', 'A file name is required.')
     const sha256 = input.sha256 ? String(input.sha256).toLowerCase() : null
     if (sha256 && !/^[a-f0-9]{64}$/.test(sha256)) ctx.fail(400, 'INVALID_INPUT', 'sha256 must be 64 hex characters.')
@@ -100,9 +101,9 @@ export function registerUploadRoutes(router) {
     const totalChunks = Math.max(1, Math.ceil(size / chunkSize))
     const createdAt = nowIso()
     const expiresAt = new Date(Date.now() + config.upload.sessionTtlMs).toISOString()
-    db.prepare(`INSERT INTO upload_sessions(id,user_id,name,size,sha256,parent_id,chunk_size,total_chunks,received,expires_at,created_at)
-                VALUES (?,?,?,?,?,?,?,?,'[]',?,?)`)
-      .run(id, user.id, name, size, sha256, input.parentId ?? null, chunkSize, totalChunks, expiresAt, createdAt)
+    db.prepare(`INSERT INTO upload_sessions(id,user_id,name,size,sha256,parent_id,chunk_size,total_chunks,received,expires_at,created_at,options)
+                VALUES (?,?,?,?,?,?,?,?,'[]',?,?,?)`)
+      .run(id, user.id, name, size, sha256, input.parentId ?? null, chunkSize, totalChunks, expiresAt, createdAt, JSON.stringify(options))
     await mkdir(sessionDir(id), { recursive: true })
     sendJson(ctx.res, 201, { upload: uploadJson(requireSession(user.id, id)) })
   })
@@ -181,7 +182,9 @@ export function registerUploadRoutes(router) {
     const user = userFromRequest(ctx.req, ctx.url)
     const session = requireSession(user.id, ctx.params.id)
     const input = await ctx.json().catch(() => ({}))
-    const onConflict = normalizeConflictStrategy(ctx.url.searchParams.get('onConflict') ?? input.onConflict)
+    const saved = JSON.parse(session.options || '{}')
+    const onConflict = normalizeConflictStrategy(ctx.url.searchParams.get('onConflict') ?? input.onConflict ?? saved.onConflict)
+    const conditions = uploadConditions({ ...saved, ...input })
     const received = JSON.parse(session.received || '[]')
     if (received.length !== session.total_chunks) {
       const missing = []
@@ -231,6 +234,7 @@ export function registerUploadRoutes(router) {
           size: session.size,
           blobHash: digest,
           onConflict,
+          ...conditions,
         })
       } catch (error) {
         await releaseBlob(digest)
@@ -238,6 +242,7 @@ export function registerUploadRoutes(router) {
       }
       if (adopted.skipped) await releaseBlob(digest)
       if (adopted.previousBlob) await releaseBlob(adopted.previousBlob)
+      if (!adopted.skipped) await queueIndex(adopted.node)
       sendJson(ctx.res, adopted.skipped ? 200 : 201, {
         node: nodeJson(adopted.node),
         ...(adopted.renamedFrom ? { renamedFrom: adopted.renamedFrom } : {}),
@@ -284,16 +289,25 @@ export function registerUploadRoutes(router) {
       return
     }
     const hashValue = await adoptBlob(tempPath, session.size, digest)
-    const result = upsertFile(user.id, {
-      name: session.name,
-      parentId: session.parent_id,
-      mime: resolveMime(session.name, ctx.req.headers['content-type']),
-      size: session.size,
-      blobHash: hashValue,
-      onConflict,
-    })
+    let result
+    try {
+      result = upsertFile(user.id, {
+        name: session.name,
+        parentId: session.parent_id,
+        mime: resolveMime(session.name, ctx.req.headers['content-type']),
+        size: session.size,
+        blobHash: hashValue,
+        onConflict,
+        ...conditions,
+      })
+    } catch (error) {
+      await releaseBlob(hashValue)
+      await cleanupSession(session.id)
+      throw error
+    }
     if (result.skipped) await releaseBlob(hashValue)
     if (result.previousBlob) await releaseBlob(result.previousBlob)
+    if (!result.skipped) await queueIndex(result.node)
     await cleanupSession(session.id)
     sendJson(ctx.res, result.skipped ? 200 : 201, {
       node: nodeJson(result.node),

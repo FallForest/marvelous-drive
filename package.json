@@ -1,7 +1,7 @@
 {
   "name": "marvelous-drive",
   "private": true,
-  "version": "0.25.0",
+  "version": "0.26.0",
   "type": "module",
   "description": "Self-hosted cloud drive with a web client, a CLI and a content-addressed blob store.",
   "engines": {
@@ -21,8 +21,8 @@
     "lint": "node scripts/check-syntax.mjs && node scripts/motion-lint.mjs apps/web/styles",
     "smoke": "node scripts/smoke.mjs",
     "verify": "node scripts/smoke.mjs && node scripts/motion-lint.mjs apps/web/styles",
-
     "browser-check": "node scripts/browser-check.mjs",
+    "directory-check": "node scripts/directory-check.mjs",
     "click-check": "node scripts/click-check.mjs",
     "gallery-check": "node scripts/gallery-check.mjs",
     "mobile-preview-check": "node scripts/mobile-preview-check.mjs",
@@ -41,6 +41,7 @@
     "upload-check": "node scripts/upload-check.mjs",
     "resume-check": "node scripts/resume-check.mjs",
     "folder-check": "node scripts/folder-check.mjs",
+    "share-check": "node scripts/share-check.mjs",
     "office-check": "node scripts/office-check.mjs",
     "storage-check": "node scripts/storage-check.mjs",
     "feature-check": "node scripts/feature-check.mjs",
@@ -57,6 +58,7 @@
     "packages/*"
   ],
   "optionalDependencies": {
-    "libheif-js": "1.18.2"
+    "libheif-js": "1.18.2",
+    "sharp": "0.35.5"
   }
 }

@@ -39,6 +39,11 @@ known-good. What waiting costs is only that the running image lags `main`.
 
 ## Steps
 
+The Release workflow first calls the reusable CI workflow against the exact tag
+being published (including a manually selected existing tag). Unit, syntax,
+motion, browser regression and image-build checks must all pass before the
+publishing job starts. Browser failures retain screenshots as CI artifacts.
+
 1. Confirm the batch is coherent: `pnpm test`, `pnpm lint`, `pnpm check` clean.
 2. Bump the version in `package.json`, `apps/server/package.json` and
    `release/latest.json` (all three `version` fields plus the three URLs in the
@@ -78,9 +83,11 @@ known-good. What waiting costs is only that the running image lags `main`.
    running version.
 3. **立即更新** calls `POST /api/v1/system/update`. The API checks the caller is a
    workspace admin and forwards the request to the updater container.
-4. The updater rewrites `DRIVE_IMAGE`/`DRIVE_VERSION` in `.env`, then runs
-   `scripts/deploy/update.sh`: back up `data/`, `docker compose pull`, recreate
-   the `drive` service, and poll `/healthz`.
+4. The updater runs `scripts/deploy/update.sh`: snapshot configuration, SQLite
+   and the generated JWT secret, then pin `DRIVE_IMAGE`/`DRIVE_VERSION`, pull,
+   recreate the `drive` service, and poll `/healthz`. A snapshot failure stops
+   before image pinning. `DRIVE_BACKUP_DATA=1` additionally requests a full local
+   blob archive, with space checks and a stopped service during the copy.
 5. On a failed health check the script restores the previous `.env` and compose
    files and recreates the old container. The failure is reported back through
    `GET /api/v1/system/update-status`, which the panel has been polling.
@@ -91,15 +98,18 @@ start containers.
 
 ## Rolling back by hand
 
-The previous image keeps its tag in GHCR forever, and every update leaves
-`backups/pre-update-<stamp>.env` and `backups/data-<stamp>.tar`:
+Each successful pre-update snapshot leaves configuration plus
+`backups/pre-update-<stamp>.db` and the generated secret when present. Full
+`backups/data-<stamp>.tar` archives exist only when full backup was enabled.
+The configured retention keeps the newest snapshot sets. To return to a
+previous image tag:
 
    ```sh
 sed -i 's|^DRIVE_IMAGE=.*|DRIVE_IMAGE=ghcr.io/<owner>/marvelous-drive:0.18.0|' .env
 docker compose up -d --no-deps drive
    ```
 
-Restoring `data/` from the tarball is only needed if the schema changed in a way
+Restoring `data/` from a verified full archive is only needed if the schema changed in a way
 the old image cannot read. Schema changes are additive (`CREATE TABLE IF NOT
 EXISTS`, `ALTER TABLE ... ADD COLUMN` guarded by a column check), so the previous
 image normally reads the new database without complaint.

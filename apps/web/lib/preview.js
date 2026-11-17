@@ -509,7 +509,7 @@ function blurredBackdrop(node) {
 
 /** The row thumbnail's object URL, when the list has already fetched it. */
 function thumbUrlFor(node) {
-  return peekThumbUrl(node.id);
+  return peekThumbUrl(node);
 }
 
 /** Last-resort paint: the raw bytes in an <img>, no bitmap, no resize. */

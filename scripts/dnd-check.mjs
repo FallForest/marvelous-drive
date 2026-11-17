@@ -150,7 +150,7 @@ process.exit(await runBrowserCheck({ title: 'Drag and drop check', viewport: { w
       method: 'PUT', headers: { ...headers, 'content-type': mime }, body,
     })).json()).node.id
     const target = await makeFolder('原生拖放目标')
-    const png = Uint8Array.from(atob('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9Zlc0AAAAASUVORK5CYII='), c => c.charCodeAt(0))
+    const png = Uint8Array.from(atob('iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAIAAAD8GO2jAAAACXBIWXMAAAPoAAAD6AG1e1JrAAAAO0lEQVRIiWM4EaFBU8QwakHEaBBpjKaiE6MZTWO0qDgxWppGjFY4J0arzIjRVoXGaMMrYrTpqDGoW9cAXmogTLbfJmgAAAAASUVORK5CYII='), c => c.charCodeAt(0))
     return {
       target,
       picture: await upload('mouse-photo.png', png, 'image/png'),

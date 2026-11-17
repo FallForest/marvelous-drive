@@ -6,6 +6,7 @@ import { backend } from '../storage/backend.js'
 import { releaseBlob } from '../storage/blobs.js'
 import { requireNode } from '../nodes.js'
 import { resolveMime } from '../mime.js'
+import { officePreview } from './office.js'
 
 /**
  * Public share links.
@@ -47,7 +48,7 @@ function requireShareNode(userId, id) {
 }
 
 function resolveShare(token) {
-  const row = db.prepare(`SELECT s.*, n.name, n.size, n.mime, n.kind, n.blob_hash, n.deleted_at
+  const row = db.prepare(`SELECT s.*, n.name, n.size, n.mime, n.kind, n.blob_hash, n.deleted_at, n.workspace_id
       FROM shares s JOIN nodes n ON n.id=s.node_id WHERE s.token=?`).get(token)
   if (!row) throw fail(404, 'SHARE_NOT_FOUND', 'This link is not valid.')
   if (row.deleted_at) throw fail(404, 'SHARE_NOT_FOUND', 'This link is not valid.')
@@ -91,9 +92,15 @@ const INLINE_HEADERS = {
 
 /** One node inside the share's subtree; anything else is a 404, not a 403. */
 function shareNodeOf(row, nodeId) {
-  const node = db.prepare('SELECT * FROM nodes WHERE id=? AND user_id=? AND deleted_at IS NULL').get(nodeId, row.user_id)
-  if (!node || !isInside(node.id, row.node_id)) throw fail(404, 'NOT_FOUND', 'File was not found.')
+  const node = db.prepare('SELECT * FROM nodes WHERE id=? AND workspace_id=? AND deleted_at IS NULL').get(nodeId, row.workspace_id)
+  if (!node || !isInside(node.id, row.node_id, row.workspace_id)) throw fail(404, 'NOT_FOUND', 'File was not found.')
   return node
+}
+
+function countDownload(row) {
+  const claimed = db.prepare(`UPDATE shares SET downloads=downloads+1 WHERE id=?
+      AND (max_downloads IS NULL OR downloads<max_downloads)`).run(row.id)
+  if (!claimed.changes) throw fail(404, 'SHARE_NOT_FOUND', 'This link has reached its download limit.')
 }
 
 /**
@@ -172,7 +179,7 @@ export function registerShareRoutes(router) {
         maxDownloads: row.max_downloads,
         downloads: row.downloads,
         createdAt: row.created_at,
-        node: { id: row.node_id, name: row.name, size: row.size, mime: row.mime, kind: row.kind },
+        node: { id: row.node_id, name: row.name, size: row.size, mime: resolveMime(row.name, row.mime), kind: row.kind },
       },
       protected: Boolean(row.password_hash),
       locked: false,
@@ -202,11 +209,11 @@ export function registerShareRoutes(router) {
     const row = await unlockShare(ctx)
     if (row.permission !== 'downloader') throw fail(403, 'FORBIDDEN', 'This link does not allow downloads.')
     if (row.kind !== 'file' || !row.blob_hash) throw fail(404, 'NOT_FOUND', 'File was not found.')
-    db.prepare('UPDATE shares SET downloads=downloads+1 WHERE id=?').run(row.id)
     await sendBlob(ctx.req, ctx.res, backend, row.blob_hash, {
       mime: resolveMime(row.name, row.mime),
       download: true,
       filename: row.name,
+      onStart: () => countDownload(row),
     })
   })
 
@@ -222,11 +229,11 @@ export function registerShareRoutes(router) {
     const row = await unlockShare(ctx)
     const parent = shareNodeOf(row, ctx.url.searchParams.get('parentId') || row.node_id)
     if (parent.kind !== 'folder') throw fail(400, 'NOT_FOLDER', 'The parent must be a folder.')
-    // Same owner filter as the archive: what a recipient can list and what the
-    // ZIP contains must be one set, or a folder would show files it cannot ship.
+    // Workspace contributors keep ownership of the files they add. The token
+    // grants this subtree, irrespective of who created each child.
     const entries = db.prepare(`SELECT id,name,kind,size,mime,updated_at FROM nodes
-        WHERE parent_id=? AND user_id=? AND deleted_at IS NULL
-        ORDER BY (kind='folder') DESC, lower(name)`).all(parent.id, row.user_id)
+        WHERE parent_id=? AND workspace_id=? AND deleted_at IS NULL
+        ORDER BY (kind='folder') DESC, lower(name)`).all(parent.id, row.workspace_id)
     sendJson(ctx.res, 200, {
       rootId: row.node_id,
       parentId: parent.id,
@@ -247,15 +254,13 @@ export function registerShareRoutes(router) {
     if (row.permission !== 'downloader') throw fail(403, 'FORBIDDEN', 'This link does not allow downloads.')
     if (row.kind !== 'folder') throw fail(400, 'NOT_A_FILE', 'Only a folder share can be archived as a whole.')
     const { buildZipFrom } = await import('../text/zip.js')
-    const blob = await buildZipFrom(row.user_id, [{ id: row.node_id }])
-    // One archive is one download: a budgeted link must not gain unbounded
-    // traffic by asking for the folder instead of the file.
-    db.prepare('UPDATE shares SET downloads=downloads+1 WHERE id=?').run(row.id)
+    const blob = await buildZipFrom(row.user_id, [{ id: row.node_id }], { workspaceId: row.workspace_id })
     try {
       await sendBlob(ctx.req, ctx.res, backend, blob.hash, {
         mime: 'application/zip',
         download: true,
         filename: row.name + '.zip',
+        onStart: () => countDownload(row),
       })
     } finally {
       // The response is already streaming: a cleanup failure must not turn a
@@ -277,22 +282,32 @@ export function registerShareRoutes(router) {
     const node = shareNodeOf(row, ctx.params.nodeId)
     if (node.kind !== 'file' || !node.blob_hash) throw fail(404, 'NOT_FOUND', 'File was not found.')
     const inline = row.permission !== 'downloader' || ctx.url.searchParams.get('inline') === '1'
-    if (!inline) db.prepare('UPDATE shares SET downloads=downloads+1 WHERE id=?').run(row.id)
     await sendBlob(ctx.req, ctx.res, backend, node.blob_hash, {
       mime: resolveMime(node.name, node.mime),
       download: !inline,
       filename: node.name,
       headers: inline ? INLINE_HEADERS : {},
+      onStart: inline ? undefined : () => countDownload(row),
     })
   })
+
+  const office = async (ctx) => {
+    const row = await unlockShare(ctx)
+    const node = shareNodeOf(row, ctx.params.nodeId || row.node_id)
+    if (node.kind !== 'file') throw fail(400, 'NOT_A_FILE', 'Only a file can be previewed.')
+    sendJson(ctx.res, 200, await officePreview(node))
+  }
+  router.get('/api/v1/shared/:token/office', office)
+  router.get('/api/v1/shared/:token/office/:nodeId', office)
 }
 
-function isInside(nodeId, ancestorId) {
+function isInside(nodeId, ancestorId, workspaceId) {
   let current = nodeId
   let guard = 0
   while (current && guard++ < 512) {
+    const row = db.prepare('SELECT parent_id FROM nodes WHERE id=? AND workspace_id=? AND deleted_at IS NULL').get(current, workspaceId)
+    if (!row) return false
     if (current === ancestorId) return true
-    const row = db.prepare('SELECT parent_id FROM nodes WHERE id=?').get(current)
     current = row ? row.parent_id : null
   }
   return false

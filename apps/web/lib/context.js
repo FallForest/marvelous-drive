@@ -65,11 +65,13 @@ export function buildContext(ancestors, selectionSlot) {
       const state = store.state;
       if (state.sortKey === key) state.sortDir = state.sortDir === 'asc' ? 'desc' : 'asc';
       else { state.sortKey = key; state.sortDir = 'asc'; }
-      runtime.renderShell();
+      if (state.serverSorted) runtime.reloadRoute();
+      else runtime.renderShell();
     },
     onSortDirection: () => {
       store.state.sortDir = store.state.sortDir === 'asc' ? 'desc' : 'asc';
-      runtime.renderShell();
+      if (store.state.serverSorted) runtime.reloadRoute();
+      else runtime.renderShell();
     },
     onViewChange: (view) => {
       store.state.view = view;
@@ -91,6 +93,7 @@ export function buildContext(ancestors, selectionSlot) {
     // The search page's "继续加载": the shell owns the request and the append,
     // the view only renders the button and its busy state.
     onSearchMore: () => runtime.loadMoreSearch(),
+    onNodesMore: () => runtime.loadMoreNodes(),
 
     onToggleFolder: (folderId) => {
       const state = store.state;

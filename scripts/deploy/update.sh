@@ -64,35 +64,11 @@ if [ -f package.json ]; then
   cp package.json "$BACKUP_DIR/pre-update-$timestamp.package.json"
 fi
 
-# Config snapshot above is the rollback unit; the data tarball is optional.
-#
-# A drive holds tens of gigabytes of blobs, and ./backups sits on the same disk
-# as the data. Tarring it needs a second copy of the whole store: on the box this
-# was measured on, 71 GB of data produced a 71 GB tarball and drove free space
-# from 110 GB to 39 GB mid-update. That is not a backup, it is a way to run out
-# of disk while eight containers are running. Schema changes are additive and
-# idempotent (CREATE TABLE IF NOT EXISTS), so the previous image reads the new
-# database and the tag rollback is enough to undo a bad release.
-#
-# Set BACKUP_DATA=1 to opt back in; it still refuses when the tarball would not
-# fit with headroom, and says so instead of filling the disk.
-echo "==> backing up data"
-if [ "${BACKUP_DATA:-0}" = "1" ]; then
-  need_mb=$(du -sm "${DRIVE_DATA_DIR:-/drive-data}" 2>/dev/null | cut -f1)
-  need_mb=${need_mb:-0}
-  free_mb=$(df -m "$BACKUP_DIR" | awk 'NR==2 {print $4}')
-  # Twice the store plus 1 GiB: the tarball itself, and room for the image pull
-  # and the SQLite snapshot that happen in the same run.
-  reserve=$(( need_mb * 2 + 1024 ))
-  if [ "$free_mb" -lt "$reserve" ]; then
-    echo "    skipped: needs ${need_mb} MB of data, ${reserve} MB free required, ${free_mb} MB available"
-    echo "    (set BACKUP_DATA=1 only on a volume with room, or back up off the host)"
-  else
-    bash "$ROOT/scripts/deploy/backup.sh" "$timestamp"
-  fi
-else
-  echo "    skipped: config snapshot only (set BACKUP_DATA=1 to also tar the store)"
-fi
+# Metadata is small enough to snapshot on every update, including committed WAL
+# pages. Failure stops the update before image/env pinning. A complete blob
+# archive remains opt-in; backup.sh checks space and stops writers for that copy.
+echo "==> backing up database and generated JWT secret"
+BACKUP_DIR="$BACKUP_DIR" bash "$ROOT/scripts/deploy/backup.sh" "$timestamp"
 # Retention. One run leaves a pre-update-<stamp> set plus one data-<stamp>.tar,
 # and nothing used to delete them: a real deployment accumulated 61 files and
 # 21 MB over a month. Keep the newest BACKUP_KEEP sets and drop the rest.

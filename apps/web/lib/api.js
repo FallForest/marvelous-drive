@@ -159,12 +159,15 @@ export function sharedInfoUrl(token) { return API_BASE + '/shared/' + encodeURIC
  * keeps the bearer header, so blobs are turned into object URLs by the caller.
  */
 export async function fetchBlob(path, options) {
+  const opts = options || {};
+  const auth = opts.auth !== false;
   const headers = new Headers();
-  if (token) headers.set('Authorization', 'Bearer ' + token);
+  if (auth && token) headers.set('Authorization', 'Bearer ' + token);
   let response;
   try {
-    response = await fetch(apiUrl(path), { headers, signal: options && options.signal, credentials: 'same-origin' });
-  } catch {
+    response = await fetch(apiUrl(path), { headers, signal: opts.signal, credentials: 'same-origin' });
+  } catch (error) {
+    if (error && error.name === 'AbortError') throw error;
     throw new ApiError('无法获取文件内容。', { code: 'NETWORK_ERROR' });
   }
   if (!response.ok) {
@@ -174,7 +177,7 @@ export async function fetchBlob(path, options) {
       const payload = await response.json();
       if (payload && payload.error) { code = payload.error.code || code; message = payload.error.message || message; }
     } catch { /* non JSON body */ }
-    if (response.status === 401 && token) { clearToken(); fireUnauthorized(); }
+    if (response.status === 401 && auth && token) { clearToken(); fireUnauthorized(); }
     throw new ApiError(message, { status: response.status, code });
   }
   return response.blob();

@@ -61,7 +61,7 @@ type Node = {
 
 | Method | Path | Notes |
 | --- | --- | --- |
-| GET | `/nodes` | No `parentId` → the whole live tree (what the web client caches); `?parentId=<uuid>` → direct children; `?parentId=root` → root level. Plus `?trash=1`, `?starred=1`, `?kind=file\|folder`, `?sort=name\|size\|updated\|created`. Folders sort before files |
+| GET | `/nodes` | No `parentId` → the whole live tree (legacy CLI shape); `?parentId=<uuid>` → authorized direct children; `?parentId=root` → root level. Plus `?trash=1`, `?starred=1`, `?kind=file\|folder`, `?sort=name\|size\|updated\|created`, `?direction=asc\|desc`. Folders sort before files. Optional `limit=1..500&offset=0..` returns `{nodes,limit,offset,hasMore}`; without paging parameters the response remains `{nodes}` |
 | GET | `/nodes/:id` | Adds `children`, `path` (breadcrumb), and for files `downloadUrl`/`previewUrl` |
 | POST | `/nodes` | `{ name, kind?, parentId? }` → `201 { node }` |
 | PUT | `/nodes/:id` | `{ name?, parentId?, expectedVersion? }` → `{ node }` |
@@ -91,6 +91,7 @@ Uploads and copies therefore auto-suffix ` (1)`, ` (2)` when needed.
 | GET | `/blobs/:sha256` | `{ exists, sha256, size, refs }` for a stored blob; `404 NOT_FOUND`; `400` unless 64 lowercase hex |
 | PUT | `/files/:id/content` | Raw body, replaces content, appends a version; optional `?expectedVersion=N` returns `409 VERSION_CONFLICT` for a stale version, checked atomically after receiving the body. `X-Checksum-Sha256` optional; `?onConflict=skip` writes nothing |
 | GET | `/files/:id/content` | Streams the blob; `Range` → `206`; `?download=1` → attachment |
+| GET | `/files/:id/thumbnail?w=240&v=<blobHash>` | JPEG/PNG/WebP sources → WebP bounded on both axes, without enlargement; `w` clamps to 16..1024. Versioned matching URLs are private/immutable for one week; other URLs revalidate. Permission is checked before cache access. `X-Thumbnail-Cache: hit\|miss`; no Range support. Missing decoder/busy processor → `503`, invalid image → `422`, source over 64 MiB or 40 MP → `413` |
 | GET | `/files/:id/text` | `{ text, truncated, mime }` (first 512 KiB by default, `?limit=`) |
 | GET | `/files/:id/versions` | `{ versions: [{ id, version, size, mime, createdBy, createdAt }], currentVersion }` |
 | POST | `/files/:id/versions/:versionId/restore` | `{ expectedVersion }` → `{ node }`; `409 VERSION_CONFLICT` when stale |
@@ -110,6 +111,20 @@ The file name for `PUT /uploads` comes from `?name=`, then `X-File-Name`, then
 | `rename` | New bytes stored as `name (1).ext` (`uniqueName()`, counter before the extension) → `201 { node, renamedFrom }`; the old file is untouched |
 | `skip` | Nothing written → `200 { node, skipped: true }` with the node that already owns the name; the uploaded blob is released, so `blobs.refs` stays the same |
 
+For `overwrite`, identical content (hash and size) returns
+`200 { node, skipped: true, unchanged: true }` without changing timestamps,
+versions or blob references. Uploads can pass `expectedVersion` and
+`expectedNodeId` in the simple-upload query or instant/session JSON. A stale
+snapshot returns `409 VERSION_CONFLICT`; version `0` means no file may already
+exist at that name. Session creation persists these conditions and `onConflict`
+so a later resume retains the same policy.
+
+The web folder uploader merges same-named directories, compares local hashes
+with live listings, and skips unchanged files before sending content. Changed
+files require a batch conflict choice; absent local files never delete remote
+files. This is a file-level merge, not a block-level delta transfer. Hashing
+also works on HTTP deployments without WebCrypto.
+
 `PUT /files/:id/content` always targets an existing file, so `skip` there means
 "keep the current bytes" and `rename` is `400`.
 
@@ -121,13 +136,28 @@ POST /api/v1/uploads/instant    { name, sha256, size, parentId?, mime?, onConfli
                                → 201 { node, deduplicated: true }            (404 BLOB_NOT_FOUND, 400 INVALID_INPUT on size mismatch)
 ```
 
-The probe exposes `size` and `refs` only — never the on-disk path. For files
+The probe exposes only authorized `size` and `refs` — never the on-disk path or
+another account's reference count. Reuse requires a live readable file (or its
+history) owned by the caller or in a workspace they belong to. A private foreign
+hash and an absent hash both answer 404, even when the declared size is wrong.
+Physical blob deduplication remains global when bytes are uploaded normally.
+For files
 above the client's threshold the flow is: hash locally, probe, and either call
 `/uploads/instant` (hit) or fall back to `PUT /uploads` / `/uploads/sessions`
 on `404 BLOB_NOT_FOUND`. The second copy costs one blob reference, not one file
 on disk.
 
 ## Resumable uploads
+
+Office/PDF content indexing is asynchronous for simple, instant and resumable
+uploads. Completed uploads are immediately downloadable; text/body search waits
+up to 15 seconds for the caller's readable pending jobs (`503 SEARCH_INDEX_BUSY`
+when that budget expires). `scope=name` searches do not wait. Storage statistics
+include `stats.search.jobs: {pending,running,failed}` scoped to readable nodes;
+`GET /maintenance/search` adds aggregate job counts for the operator. Add
+`?wait=1` to that maintenance endpoint to wait for the caller's pending work.
+Jobs survive restart, retry up to three times, and reject stale blob/version
+results. Regular small text files retain immediate indexing.
 
 1. `POST /uploads/sessions` `{ name, size, sha256?, parentId?, chunkSize? }` →
    `201 { upload: { id, name, size, parentId, chunkSize, totalChunks, receivedChunks, expiresAt } }`.
@@ -187,6 +217,7 @@ remembered:
 | --- | --- | --- | --- |
 | `GET /shared/:token[?password=]` | both | `{ share: { token, permission, expiresAt, node: { id, name, size, mime, kind } }, protected, locked }` | no |
 | `GET /shared/:token/preview[?password=]` | both | the file's bytes, inline, `nosniff` + `Content-Security-Policy: sandbox` | no |
+| `GET /shared/:token/office[/:nodeId][?password=]` | both | extracted Office content, same `{ office, file }` shape as `/files/:id/office`; optional node must be inside the share | no |
 | `GET /shared/:token/content[?password=]` | downloader | the file's bytes, `Content-Disposition: attachment` | **yes** |
 | `GET /shared/:token/children[?password=][&parentId=]` | both | `{ rootId, parentId, permission, entries: [{ id, name, kind, size, mime, updatedAt }] }` | no |
 | `GET /shared/:token/archive[?password=]` | downloader | the shared folder as one ZIP, `attachment` | **yes**, once |
@@ -196,6 +227,17 @@ remembered:
 else, and a downloader link reads them plus every attachment form. `parentId`
 outside the shared subtree is `404`, never an empty list — the recipient learns
 nothing about ids the share does not contain.
+
+Folder shares include every contributor's non-deleted content in that subtree;
+browsing, individual files and the ZIP use the same workspace boundary. `HEAD`
+probes never spend a download. Attachment GETs reserve the available budget
+atomically after the blob has been found, so concurrent requests cannot exceed
+`maxDownloads`.
+
+The public page offers native attachment links for downloads, avoiding a full
+in-memory Blob before a mobile browser can save the file. Images, PDF, text,
+supported OOXML documents and browser-playable audio/video can be previewed;
+media streams through Range requests. Unsupported formats are labelled explicitly.
 
 ## Office preview (OOXML)
 

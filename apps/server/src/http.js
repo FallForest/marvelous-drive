@@ -152,7 +152,7 @@ function parseRange(header, size) {
  * for a remote one. Every user-facing download goes through here instead, so
  * swapping the backend later does not mean rewriting the routes.
  */
-export async function sendBlob(req, res, backend, key, { mime, download = false, filename, headers: extraHeaders, acceptRanges = true } = {}) {
+export async function sendBlob(req, res, backend, key, { mime, download = false, filename, headers: extraHeaders, acceptRanges = true, onStart } = {}) {
   const info = await backend.stat(key)
   if (!info) throw fail(404, 'NOT_FOUND', 'File was not found.')
   const size = info.size
@@ -163,14 +163,21 @@ export async function sendBlob(req, res, backend, key, { mime, download = false,
     ...extraHeaders,
   }
   if (download) {
-    const name = basename(filename || key).replace(/["\\\r\n]/g, '_')
-    headers['content-disposition'] = `attachment; filename="${name}"; filename*=UTF-8''${encodeURIComponent(name)}`
+    const name = basename(filename || key).toWellFormed()
+    // HTTP field values cannot contain Chinese or emoji. Keep an ASCII
+    // fallback for older clients and carry the real name in RFC 5987 UTF-8.
+    const fallback = name.replace(/[^\x20-\x7e]|["\\]/g, '_')
+    const encoded = encodeURIComponent(name).replace(/[!'()*]/g, (char) => '%' + char.charCodeAt(0).toString(16).toUpperCase())
+    headers['content-disposition'] = `attachment; filename="${fallback}"; filename*=UTF-8''${encoded}`
   }
   // A caller that answers one immutable representation (a thumbnail) must not
   // honour Range: a 206 would fragment a response the client caches per URL.
   const range = acceptRanges ? parseRange(req.headers.range, size) : null
   const start = range ? range.start : 0
   const end = range ? range.end : size - 1
+  // A public share reserves its download budget only once the blob and its
+  // headers are ready. HEAD probes must never spend that budget.
+  if (req.method !== 'HEAD') onStart?.()
   if (range) {
     headers['content-range'] = `bytes ${start}-${end}/${size}`
     headers['content-length'] = end - start + 1

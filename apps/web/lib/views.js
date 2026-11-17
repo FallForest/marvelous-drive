@@ -20,6 +20,7 @@ import { runtime } from './runtime.js';
 export function visibleNodes() {
   const state = store.state;
   const route = state.route;
+  if (state.serverSorted && route.name !== 'search') return route.name === 'trash' ? state.trash : state.nodes;
   if (route.name === 'trash') return sortNodes(state.trash, state.sortKey, state.sortDir);
   if (route.name === 'starred') return sortNodes(state.nodes.filter((node) => node.starred), state.sortKey, state.sortDir);
   if (route.name === 'search') return state.searchResults || [];
@@ -162,6 +163,23 @@ function searchMoreBar(ctx) {
   );
 }
 
+/** Loading is explicit: counts and selection refer to the rows already shown. */
+function nodeMoreBar(ctx, count) {
+  const more = store.state.nodeMore;
+  if (!more || !more.hasMore) return null;
+  const button = h('button', {
+    class: 'btn btn-sm',
+    attrs: { type: 'button', 'aria-busy': more.loading ? 'true' : 'false' },
+    text: more.loading ? '正在加载…' : '继续加载',
+    on: { click: () => { if (!more.loading) ctx.onNodesMore(); } },
+  });
+  button.disabled = Boolean(more.loading);
+  return h('div', {
+    class: 'node-more', attrs: { role: 'status' },
+    style: { display: 'flex', alignItems: 'center', gap: '12px', padding: '12px', flexWrap: 'wrap' },
+  }, h('span', { class: 'muted', text: '已加载 ' + count + ' 项，还有更多。全选仅选择已加载的项目。' }), button);
+}
+
 /** The search page. */
 function searchView(ctx) {
   const state = store.state;
@@ -216,10 +234,11 @@ function listView(ctx) {
       // data-route-heading is the anchor the shell focuses after a navigation
       // (a route change must move focus somewhere predictable for the keyboard).
       h('h1', { attrs: { 'data-route-heading': '' }, text: heading }),
-      h('span', { class: 'sub', text: nodes.length + ' 项' }),
+      h('span', { class: 'sub', text: (store.state.nodeMore && store.state.nodeMore.hasMore ? '已加载 ' : '') + nodes.length + ' 项' }),
     ),
     ctx.selectionSlot,
     renderFileList(listContext(ctx, nodes)),
+    nodeMoreBar(ctx, nodes.length),
     hints(),
   );
   runtime.paintSelection();

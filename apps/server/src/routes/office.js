@@ -1,9 +1,10 @@
-import { stat } from 'node:fs/promises'
 import { userFromRequest } from '../auth.js'
-import { backend, readBlobBuffer } from '../storage/backend.js'
+import { backend } from '../storage/backend.js'
 import { fail, sendJson } from '../http.js'
 import { requireFile } from '../nodes.js'
-import { OfficeError, detectOffice, extractOffice } from '../text/office.js'
+import { detectOffice } from '../text/office.js'
+import { runCpuTask } from '../text/cpu-tasks.js'
+import { previewSource } from '../ops/preview-source.js'
 
 /**
  * The OOXML preview endpoint.
@@ -24,54 +25,49 @@ import { OfficeError, detectOffice, extractOffice } from '../text/office.js'
 /** Above this the extraction would cost more memory than a preview is worth. */
 const MAX_OFFICE_BYTES = 64 * 1024 * 1024
 
-const ZIP_MAGIC = Buffer.from([0x50, 0x4b, 0x03, 0x04])
-const ZIP_MAGIC_EMPTY = Buffer.from([0x50, 0x4b, 0x05, 0x06])
-
-const hasZipMagic = (buffer) => {
-  if (buffer.length < 4) return false
-  if (buffer.subarray(0, 4).equals(ZIP_MAGIC)) return true
-  if (buffer.subarray(0, 4).equals(ZIP_MAGIC_EMPTY)) return true
-  return false
-}
-
 export function registerOfficeRoutes(router) {
   router.get('/api/v1/files/:id/office', async (ctx) => {
     const user = userFromRequest(ctx.req, ctx.url)
     const row = requireFile(user.id, ctx.params.id)
-    if (!row.blob_hash) ctx.fail(404, 'NOT_FOUND', 'This file has no content yet.')
-
-    const kind = detectOffice(row.name, row.mime)
-    if (!kind) {
-      ctx.fail(400, 'NOT_OFFICE', 'This file is not a .pptx, .docx or .xlsx document.')
-    }
-
-    // Backend, not a path: the store may be remote.
-    const info = await backend.stat(row.blob_hash)
-    if (!info) ctx.fail(404, 'NOT_FOUND', 'The stored content is missing.')
-    if (info.size > MAX_OFFICE_BYTES) {
-      ctx.fail(413, 'FILE_TOO_LARGE', 'Office previews are limited to ' + MAX_OFFICE_BYTES + ' bytes.')
-    }
-
-    const buffer = await readBlobBuffer(backend, row.blob_hash)
-    if (!hasZipMagic(buffer)) {
-      ctx.fail(400, 'NOT_OFFICE', 'The file header is not an OOXML (ZIP) container.')
-    }
-
-    let office
-    try {
-      office = extractOffice(buffer, kind)
-    } catch (error) {
-      if (error instanceof OfficeError && error.code === 'NOT_OFFICE') {
-        ctx.fail(400, 'NOT_OFFICE', error.message)
-      }
-      ctx.fail(422, 'PREVIEW_UNAVAILABLE', error && error.message
-        ? error.message
-        : 'The office document could not be parsed.')
-    }
-
-    sendJson(ctx.res, 200, {
-      office,
-      file: { id: row.id, name: row.name, mime: row.mime, size: row.size },
-    })
+    sendJson(ctx.res, 200, await officePreview(row))
   })
+}
+
+/** Extract content after the caller has authorized the file or share token. */
+export async function officePreview(row) {
+  if (!row.blob_hash) throw fail(404, 'NOT_FOUND', 'This file has no content yet.')
+
+  const kind = detectOffice(row.name, row.mime)
+  if (!kind) {
+    throw fail(400, 'NOT_OFFICE', 'This file is not a .pptx, .docx or .xlsx document.')
+  }
+
+  // Backend, not a path: the store may be remote.
+  const info = await backend.stat(row.blob_hash)
+  if (!info) throw fail(404, 'NOT_FOUND', 'The stored content is missing.')
+  if (info.size > MAX_OFFICE_BYTES) {
+    throw fail(413, 'FILE_TOO_LARGE', 'Office previews are limited to ' + MAX_OFFICE_BYTES + ' bytes.')
+  }
+
+  let office
+  try {
+    office = await runCpuTask('office', async (signal) => ({
+      ...(await previewSource(backend, row.blob_hash, MAX_OFFICE_BYTES, signal)), kind,
+    }))
+  } catch (error) {
+    if (error.code === 'NOT_OFFICE') {
+      throw fail(400, 'NOT_OFFICE', error.message)
+    }
+    if (error.status === 503 || error.status === 413 || error.status === 404) {
+      throw fail(error.status, error.code, error.message)
+    }
+    throw fail(422, 'PREVIEW_UNAVAILABLE', error && error.message
+      ? error.message
+      : 'The office document could not be parsed.')
+  }
+
+  return {
+    office,
+    file: { id: row.id, name: row.name, mime: row.mime, size: row.size },
+  }
 }

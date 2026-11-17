@@ -11,11 +11,8 @@ ENV NODE_ENV=production \
 # by a source edit, which is the whole reason it is a separate RUN.
 COPY package.json package-lock.json pnpm-workspace.yaml ./
 
-# The HEIC decoder is an optionalDependency: without this line the image runs
-# fine but every .heic answers 503, because heif-loader.js resolves libheif-js
-# at runtime. `npm ci` rather than `npm install`: the lockfile pins the decoder
-# to the version the notice in apps/server/THIRD-PARTY.md is written against,
-# and it installs from a manifest that lists no other runtime dependency.
+# Optional sharp/libheif image codecs are pinned by the lockfile. Install them
+# in release images so thumbnails and HEIC previews work without a manual step.
 RUN npm ci --omit=dev --no-audit --no-fund
 
 COPY apps/server ./apps/server

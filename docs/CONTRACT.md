@@ -165,11 +165,17 @@ and by `POST /api/v1/uploads/instant` (`onConflict` in the body).
 
 ### Instant upload (dedup)
 
+Hash reuse is scoped to live readable files and their history: ownership or
+current workspace membership is required. A private foreign hash is
+indistinguishable from an absent hash (404), and probe refs counts only
+authorized references. Receiving and verifying a normal upload can still reuse
+the global physical blob. A hash by itself is never a read capability.
+
 The server already addresses content by sha256, so a client that knows the hash
 of its bytes can skip the transfer entirely.
 
 - `GET /api/v1/blobs/:sha256` (auth) â†?`200 {exists:true, sha256, size, refs}`
-  when the blob is stored, `404 NOT_FOUND` otherwise, `400 INVALID_INPUT`
+  when the blob is stored and readable, `404 NOT_FOUND` otherwise, `400 INVALID_INPUT`
   unless the path segment matches `^[a-f0-9]{64}$`. Only `size` and `refs` are
   exposed; the on-disk path never is.
 - `POST /api/v1/uploads/instant` (auth)

@@ -4,6 +4,7 @@ import { sendJson } from '../http.js'
 import { requireWorkspaceOwner } from '../admin.js'
 import { forgetMissing, quarantineBlobs, reclaimOrphans, scanBlobs, verifyChecksums } from '../ops/scrub.js'
 import { indexCoverage, rebuildIndex } from '../ops/search-index.js'
+import { drainIndexJobs, indexJobSummary, reconcileIndexJobs } from '../ops/index-jobs.js'
 import { accessReport } from '../ops/access-log.js'
 import { backend } from '../storage/backend.js'
 import { config } from '../config.js'
@@ -95,8 +96,10 @@ export function registerMaintenanceRoutes(router) {
   router.get('/api/v1/maintenance/search', async (ctx) => {
     const user = userFromRequest(ctx.req, ctx.url)
     requireWorkspaceOwner(user, ctx.fail)
+    if (ctx.url.searchParams.get('wait') === '1') await drainIndexJobs(user.id)
     const coverage = indexCoverage()
-    sendJson(ctx.res, 200, { coverage, upToDate: coverage.missing === 0 })
+    const jobs = indexJobSummary()
+    sendJson(ctx.res, 200, { coverage, jobs, upToDate: coverage.missing === 0 && !jobs.pending && !jobs.running && !jobs.failed })
   })
 
   /**
@@ -110,6 +113,7 @@ export function registerMaintenanceRoutes(router) {
     requireWorkspaceOwner(user, ctx.fail)
     const before = indexCoverage()
     const summary = await rebuildIndex({ log: console })
+    reconcileIndexJobs()
     const after = indexCoverage()
     sendJson(ctx.res, 200, { summary, before, after })
   })

@@ -1,6 +1,6 @@
 {
-  "version": "0.25.0",
-  "image": "ghcr.io/fallforest/marvelous-drive:0.25.0",
-  "releaseUrl": "https://github.com/FallForest/marvelous-drive/releases/tag/v0.25.0",
+  "version": "0.26.0",
+  "image": "ghcr.io/fallforest/marvelous-drive:0.26.0",
+  "releaseUrl": "https://github.com/FallForest/marvelous-drive/releases/tag/v0.26.0",
   "notesUrl": "https://github.com/FallForest/marvelous-drive/releases"
 }

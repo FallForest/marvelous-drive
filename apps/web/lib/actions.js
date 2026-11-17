@@ -433,10 +433,9 @@ export async function toggleStarWithToast(node) {
   try {
     const starred = await toggleStar(node);
     toast(starred ? '已加入星标。' : '已取消星标。', { type: 'success', timeout: 1800 });
-    if (store.state.route.name === 'starred') { await runtime.refreshData(); return; }
-    runtime.paintSelection();
-    // The star button state lives in the row; re-render the list only.
-    runtime.renderShell();
+    // This mutation also changes the sidebar count and can reorder a paged
+    // starred view. Invalidate the shared metadata instead of repainting it stale.
+    await runtime.refreshData();
   } catch (error) {
     toast((error && error.message) || '操作失败。', { type: 'error' });
   }

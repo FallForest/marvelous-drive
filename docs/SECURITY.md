@@ -21,9 +21,10 @@ Rotating the secret signs everybody out. That is the intended recovery path.
 
 ## Authorization
 
-Drive is personal: one account owns its whole tree, so there is no cross-user
-read path to defend. The invariant every route keeps is that the `user_id`
-filter is part of the SQL, not a check after the fact:
+Every account has its own drive; workspace membership can grant access to
+another account's nodes. Authorization belongs in the query: ownership or a
+current membership for the node's workspace must be checked before content is
+returned or reused. A personal-only lookup uses:
 
 ```js
 db.prepare('SELECT * FROM nodes WHERE id=? AND user_id=?').get(id, userId)
@@ -32,6 +33,20 @@ db.prepare('SELECT * FROM nodes WHERE id=? AND user_id=?').get(id, userId)
 Child rows (`node_versions`, `shares`, `node_locks`, `upload_sessions`) are
 always reached through a node that was already resolved for that user, and
 deleting a user cascades.
+
+Knowing a content hash does not grant access. Blob probes and instant uploads
+require a live readable node or one of its historical versions. A revoked
+membership or a trashed last reference removes this reuse right. Probe counts
+include only authorized references, and foreign hashes answer the same 404 as
+absent ones. Permissions are rechecked after remote storage checks and before
+creating an instant-upload reference. Normal uploads may still share physical
+storage after their bytes have been received and verified.
+
+Thumbnail authorization precedes the content-addressed disk cache. Browser
+requests carry the bearer header, use private caching, and include the content
+hash in immutable thumbnail URLs; replacing file content cannot reuse the old
+thumbnail URL. Decoder source bytes, pixels, output size, queue length and run
+time are bounded, and parsing runs outside the HTTP event loop.
 
 ## Uploads
 

@@ -823,6 +823,26 @@ describe('GET /api/v1/files/:id/office', () => {
     assert.deepEqual(response.json.office.meta, { sheetCount: 2, truncated: false })
   })
 
+  it('previews Office through anonymous password-gated shares without spending the download budget', async () => {
+    for (const [name, bytes, mime, kind] of [
+      ['分享演示.pptx', buildPptx(), PPTX_MIME, 'slides'],
+      ['分享文档.docx', buildDocx(), DOCX_MIME, 'document'],
+      ['分享表格.xlsx', buildXlsx(), XLSX_MIME, 'sheet'],
+    ]) {
+      const uploaded = await upload(name, bytes, mime)
+      const created = await app.client('POST', '/api/v1/nodes/' + uploaded.json.node.id + '/share',
+        { token, body: { password: 'office secret', maxDownloads: 1 } })
+      const base = '/api/v1/shared/' + created.json.share.token
+      assert.equal((await app.client('GET', base + '/office')).status, 401)
+      const preview = await app.client('GET', base + '/office?password=office+secret')
+      assert.equal(preview.status, 200, preview.text)
+      assert.equal(preview.json.office.kind, kind)
+      assert.equal((await app.client('GET', base + '?password=office+secret')).json.share.downloads, 0)
+      const other = await upload('unshared-' + name, bytes, mime)
+      assert.equal((await app.client('GET', base + '/office/' + other.json.node.id + '?password=office+secret')).status, 404)
+    }
+  })
+
   it('answers 400 NOT_OFFICE for a file that is not OOXML', async () => {
     const uploaded = await upload('notes.txt', Buffer.from('just text'), 'text/plain')
     const response = await app.client('GET', '/api/v1/files/' + uploaded.json.node.id + '/office', { token })

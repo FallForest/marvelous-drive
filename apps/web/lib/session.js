@@ -25,6 +25,8 @@ export const store = createStore();
 export const session = {
   /** id → node and parent id → children, rebuilt from the live list. */
   index: { byId: new Map(), children: new Map() },
+  /** Cached folder metadata, without files from unrelated directories. */
+  navigationNodes: [],
   /** The mounted shell: { shell, sidebarHost, topbar, toolbar, viewEl, statusbar }. */
   shellEls: null,
   /** The DOM slot the selection bar renders into, or null when there is none. */

@@ -16,6 +16,7 @@
  */
 
 import { putRaw, request } from './api.js';
+import { sha256Stream } from './sha256.js';
 
 export const SIMPLE_LIMIT = 8 * 1024 * 1024; // 8 MiB
 const CHUNK_SIZE = 8 * 1024 * 1024;   // 8 MiB, matches the contract default
@@ -68,9 +69,9 @@ function supportsSubtle() {
   return !!(typeof crypto !== 'undefined' && crypto.subtle && typeof crypto.subtle.digest === 'function');
 }
 
-/** Lowercase hex SHA-256 of a Blob/ArrayBuffer. Returns '' when unavailable. */
+/** Lowercase SHA-256, including insecure HTTP origins and large local files. */
 export async function sha256(blob) {
-  if (!supportsSubtle()) return '';
+  if (!supportsSubtle() || (blob instanceof Blob && blob.size > 64 * 1024 * 1024)) return sha256Stream(blob);
   let buffer;
   if (blob instanceof Blob) buffer = await blob.arrayBuffer();
   else buffer = blob;
@@ -176,6 +177,8 @@ async function tryInstantUpload(task, file, options) {
         size: file.size,
         mime: task.type,
         onConflict: opts.onConflict || undefined,
+        expectedVersion: opts.expectedVersion,
+        expectedNodeId: opts.expectedNodeId,
       },
     });
     const node = payload && payload.node ? payload.node : payload;
@@ -183,6 +186,7 @@ async function tryInstantUpload(task, file, options) {
     return { node, deduplicated: true };
   } catch (error) {
     if (error && error.name === 'AbortError') throw error;
+    if (error && error.status === 409) throw error;
     // BLOB_NOT_FOUND (the blob was evicted meanwhile) or an old build: upload it.
     return null;
   }
@@ -201,6 +205,7 @@ export function createUploadTask(options) {
   const file = opts.file;
   const parentId = opts.parentId || null;
   const onConflict = opts.onConflict || null;
+  const conditions = { expectedVersion: opts.expectedVersion, expectedNodeId: opts.expectedNodeId };
   const client = opts.api || { request, putRaw };
   // A task handed a session id is a *resume*: the bytes are partly on the
   // server already, so it skips the dedup probe and the hash has usually been
@@ -339,7 +344,7 @@ export function createUploadTask(options) {
       // session, so the shortcut is skipped for it.
       const instant = task.sessionId
         ? null
-        : await tryInstantUpload(task, file, { hash, parentId, onConflict, client, signal });
+        : await tryInstantUpload(task, file, { hash, parentId, onConflict, ...conditions, client, signal });
       if (instant) {
         task.node = instant.node;
         task.deduplicated = true;
@@ -354,7 +359,7 @@ export function createUploadTask(options) {
       setState('uploading');
       if (file.size <= SIMPLE_LIMIT) {
         const node = await (client.putRaw || putRaw)(
-          '/uploads' + encodeQuery({ parentId, name: file.name, onConflict }),
+          '/uploads' + encodeQuery({ parentId, name: file.name, onConflict, ...conditions }),
           file,
           {
             contentType: task.type,
@@ -366,7 +371,7 @@ export function createUploadTask(options) {
         task.node = node && node.node ? node.node : node;
       } else {
         task.node = await resumableUpload(task, file, {
-          parentId, hash, client, signal, onConflict, setState, setProgress,
+          parentId, hash, client, signal, onConflict, ...conditions, setState, setProgress,
           parallel: chunkParallel,
         });
       }
@@ -434,6 +439,9 @@ async function resumableUpload(task, file, options) {
         sha256: options.hash || undefined,
         parentId: options.parentId || undefined,
         chunkSize: requestedChunkSize,
+        onConflict: options.onConflict || undefined,
+        expectedVersion: options.expectedVersion,
+        expectedNodeId: options.expectedNodeId,
       },
     });
     session = created && created.upload ? created.upload : created;
@@ -503,7 +511,10 @@ async function resumableUpload(task, file, options) {
   if (failure) throw failure.reason;
 
   options.setState('finalizing');
-  const completed = await request('/uploads/sessions/' + encodeURIComponent(session.id) + '/complete', { method: 'POST' });
+  const completed = await request('/uploads/sessions/' + encodeURIComponent(session.id) + '/complete', {
+    method: 'POST',
+    body: { onConflict: options.onConflict || undefined, expectedVersion: options.expectedVersion, expectedNodeId: options.expectedNodeId },
+  });
   return completed && completed.node ? completed.node : completed;
 }
 

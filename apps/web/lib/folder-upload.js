@@ -86,7 +86,7 @@ export async function planFromDataTransfer(items) {
   }
   // Start one level above the dropped entry so the dropped folder is created
   // too, and so an empty folder is still part of the plan.
-  for (const rootEntry of roots) await walk(rootEntry, rootEntry.name)
+  for (const rootEntry of roots) await walk(rootEntry, rootEntry.isDirectory ? rootEntry.name : '')
   return { name: roots.length === 1 && roots[0].isDirectory ? roots[0].name : '', dirs, files }
 }
 
@@ -97,7 +97,7 @@ export async function planFromDataTransfer(items) {
  * the traversal stays testable without HTTP. Returns a summary the caller can
  * toast.
  */
-export async function uploadPlan(plan, { parentId = null, createFolder, uploadFile, onFolder, onFile, concurrency = 1 }) {
+export async function uploadPlan(plan, { parentId = null, createFolder, uploadFile, prepareFiles, onFolder, onFile, concurrency = 1 }) {
   const folderIds = new Map([['', parentId]])
   const ordered = [...plan.dirs].sort((a, b) => a.split('/').length - b.split('/').length || a.localeCompare(b))
   let folders = 0
@@ -107,15 +107,16 @@ export async function uploadPlan(plan, { parentId = null, createFolder, uploadFi
     const slash = path.lastIndexOf('/')
     const parentPath = slash === -1 ? '' : path.slice(0, slash)
     const name = path.slice(slash + 1)
-    const targetParent = folderIds.get(parentPath) ?? parentId
     try {
+      if (!folderIds.has(parentPath)) throw new Error('父文件夹创建失败：' + parentPath)
+      const targetParent = folderIds.get(parentPath)
       const node = await createFolder(targetParent, name)
       folderIds.set(path, node.id)
       folders += 1
       if (onFolder) onFolder(path, node)
     } catch (error) {
       // A conflict means the folder already exists; reuse it instead of failing.
-      if (error && error.status === 409 && error.existing) {
+      if (error && error.status === 409 && error.existing && error.existing.kind !== 'file') {
         folderIds.set(path, error.existing.id)
         continue
       }
@@ -130,7 +131,13 @@ export async function uploadPlan(plan, { parentId = null, createFolder, uploadFi
   // round trip of latency per file, one connection in flight, and a 200 Mbps
   // link that never went above a few MB/s.
   const limit = Math.max(1, Math.floor(Number(concurrency)) || 1)
-  const queue = plan.files.slice()
+  let queue = plan.files.map((entry) => ({ ...entry, parentId: folderIds.get(entry.path), blocked: !folderIds.has(entry.path) }))
+  // Resolve conflicts for the entire tree before scheduling any file. A cancel
+  // never leaves some replacements running while the user is still deciding.
+  if (prepareFiles) {
+    queue = await prepareFiles(queue)
+    if (!queue) return { folders, failedFolders, uploaded: 0, total: plan.files.length, canceled: true }
+  }
   if (limit > 1) {
     // Largest first: with a fixed number of slots, starting the files that
     // dominate the batch keeps every slot busy to the end instead of leaving
@@ -138,14 +145,22 @@ export async function uploadPlan(plan, { parentId = null, createFolder, uploadFi
     queue.sort((a, b) => (Number(b.file && b.file.size) || 0) - (Number(a.file && a.file.size) || 0))
   }
   let uploaded = 0
+  let skipped = 0
+  let unchanged = 0
   let cursor = 0
   const worker = async () => {
     while (cursor < queue.length) {
       const entry = queue[cursor]
       cursor += 1
-      const targetParent = folderIds.get(entry.path) ?? parentId
       try {
-        await uploadFile(entry.file, targetParent)
+        if (entry.blocked) throw new Error('目标文件夹创建失败：' + entry.path)
+        if (entry.skip) {
+          skipped += 1
+          if (entry.unchanged) unchanged += 1
+          if (onFile) onFile(entry, true)
+          continue
+        }
+        await uploadFile(entry.file, entry.parentId, entry.options)
         uploaded += 1
         if (onFile) onFile(entry, true)
       } catch (error) {
@@ -155,7 +170,40 @@ export async function uploadPlan(plan, { parentId = null, createFolder, uploadFi
   }
   const workers = Math.min(limit, queue.length)
   await Promise.all(Array.from({ length: workers }, () => worker()))
-  return { folders, failedFolders, uploaded, total: plan.files.length }
+  return { folders, failedFolders, uploaded, total: plan.files.length, ...(prepareFiles ? { skipped, unchanged } : {}) }
+}
+
+/** Live directory listings and content hashes, never timestamps, decide a merge. */
+export async function prepareFolderFiles(entries, { listFiles, hashFile, chooseConflict }) {
+  const listings = new Map()
+  const prepared = []
+  let conflicts = 0
+  for (const entry of entries) {
+    if (entry.blocked) { prepared.push(entry); continue }
+    const key = entry.parentId || 'root'
+    if (!listings.has(key)) listings.set(key, await listFiles(entry.parentId))
+    const name = String(entry.file.name).trim().replace(/\s+/g, ' ')
+    const existing = listings.get(key).find((node) => node.kind === 'file' && node.name === name)
+    let hash = ''
+    if (existing && Number(existing.size) === entry.file.size && existing.blobHash) hash = await hashFile(entry.file)
+    if (hash && hash === existing?.blobHash) {
+      prepared.push({ ...entry, skip: true, unchanged: true })
+      continue
+    }
+    if (existing) conflicts += 1
+    prepared.push({ ...entry, existing, options: {
+      hash,
+      expectedVersion: existing ? existing.version : 0,
+      expectedNodeId: existing?.id,
+    } })
+  }
+  const strategy = conflicts ? await chooseConflict(conflicts) : 'overwrite'
+  if (!strategy) return null
+  return prepared.map((entry) => entry.skip || entry.blocked ? entry : ({
+    ...entry,
+    skip: Boolean(entry.existing && strategy === 'skip'),
+    options: { ...entry.options, onConflict: strategy },
+  }))
 }
 
 /**

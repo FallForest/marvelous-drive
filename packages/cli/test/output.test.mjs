@@ -113,19 +113,21 @@ test('colours are only emitted for a TTY', () => {
   assert.equal(stripAnsi(tty.paint('x', 'green')), 'x');
   assert.notEqual(tty.paint('x', 'green'), 'x');
   const previous = { NO_COLOR: process.env.NO_COLOR, TERM: process.env.TERM };
-  process.env.NO_COLOR = '1';
-  assert.equal(colorEnabled({ isTTY: true }), false);
-  delete process.env.NO_COLOR;
-  process.env.TERM = 'dumb';
-  assert.equal(colorEnabled({ isTTY: true }), false);
-  if (previous.TERM === undefined) delete process.env.TERM;
-  else process.env.TERM = previous.TERM;
-  assert.equal(colorEnabled({ isTTY: false }), false);
-  assert.equal(colorEnabled({ isTTY: true }), true);
-  if (previous.NO_COLOR === undefined) delete process.env.NO_COLOR;
-  else process.env.NO_COLOR = previous.NO_COLOR;
-  if (previous.TERM === undefined) delete process.env.TERM;
-  else process.env.TERM = previous.TERM;
+  try {
+    process.env.NO_COLOR = '1';
+    assert.equal(colorEnabled({ isTTY: true }), false);
+    delete process.env.NO_COLOR;
+    process.env.TERM = 'dumb';
+    assert.equal(colorEnabled({ isTTY: true }), false);
+    process.env.TERM = 'xterm-256color';
+    assert.equal(colorEnabled({ isTTY: false }), false);
+    assert.equal(colorEnabled({ isTTY: true }), true);
+  } finally {
+    if (previous.NO_COLOR === undefined) delete process.env.NO_COLOR;
+    else process.env.NO_COLOR = previous.NO_COLOR;
+    if (previous.TERM === undefined) delete process.env.TERM;
+    else process.env.TERM = previous.TERM;
+  }
 });
 
 test('--json data is printed verbatim and suppresses tables', () => {

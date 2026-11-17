@@ -2,7 +2,8 @@
 
 Marvelous Drive is a single Node process with three faces: a JSON API, a static
 web client, and a CLI that speaks the same API. It stores bytes on disk and
-metadata in SQLite. There is no build step and no third-party runtime dependency.
+metadata in SQLite. There is no build step. Core storage uses the standard
+library; optional sharp/libheif codecs supply image representations.
 
 ## Processes and storage
 
@@ -20,8 +21,9 @@ mdrive ───┘                        │
 
 Why SQLite rather than PostgreSQL: a drive is one tree per account, the working
 set is small, and `node:sqlite` ships with Node 22+. `BEGIN IMMEDIATE`
-transactions give the same ordering guarantees the tree needs, and the file is
-trivially backed up (`data/`).
+transactions give the same ordering guarantees the tree needs. Online metadata
+snapshots use SQLite's transactional snapshot support; complete local backups
+require stopped writers so database references and blob bytes stay consistent.
 
 ## Module map (apps/server/src)
 
@@ -42,7 +44,10 @@ trivially backed up (`data/`).
 | `storage/s3.js`, `storage/tiered.js`, `storage/cluster.js`, `storage/node.js` | The other drivers and the node process |
 | `text/office.js`, `text/office-text.js`, `text/pdf-text.js` | Text extraction for OOXML and PDF |
 | `text/zip.js`, `text/zip-read.js` | Streaming ZIP writer and the bomb-capped reader |
+| `text/cpu-tasks.js`, `text/cpu-worker.js` | Bounded parsing/codec workers with timeout, input limits and per-task cleanup |
+| `ops/thumbnail.js`, `ops/preview-source.js` | Content-addressed thumbnail cache and bounded backend reads admitted with worker slots |
 | `ops/search-index.js` | FTS5 body index plus the `LIKE` merge, coverage, rebuild |
+| `ops/index-jobs.js` | Durable, versioned Office/PDF indexing jobs, replay, bounded retries and read-after-upload search barrier |
 | `ops/retention.js`, `ops/scrub.js`, `ops/audit.js`, `ops/access-log.js` | Scheduled and cross-cutting work |
 | `ops/locks.js`, `ops/quota.js`, `ops/rate-limit.js` | Edit locks, byte ceiling, login throttle |
 | `routes/*` | One module per resource: auth, nodes, files, uploads, shares, misc, office, maintenance, cluster |
@@ -107,7 +112,23 @@ blobs (hash PK, refs) is referenced by nodes.blob_hash and node_versions.blob_ha
   `refs = 0`.
 - **Concurrent overwrite**: `expectedVersion` on node updates and version
   restores turns the race into `409 VERSION_CONFLICT` instead of a lost write.
+- **Stale extraction**: search extraction checks the current blob/version again
+  before publishing; a slow old parse cannot resurrect deleted or replaced text.
+- **Interrupted document indexing**: Office/PDF writes persist a versioned job
+  before returning. One job runs at a time, interrupted work resumes on boot,
+  and three unsuccessful attempts remain visible as failed diagnostics. Content
+  searches wait at most 15 seconds for the caller's authorized pending work;
+  name-only searches and status reports remain immediate.
 - **Name races**: the partial unique index rejects the loser at commit time.
+
+The web client lists only the current directory, 100 rows at a time. A separate
+folders-only index supplies navigation and move destinations; it and statistics
+have a 30-second cache invalidated by mutations and session changes. Trash is
+requested only in the trash view. Unpaged node listings remain available to the
+CLI. Images are requested near the viewport with four concurrent client loads;
+the server admits at most two CPU jobs and 32 queued jobs, with a 30-second task
+deadline. Native thumbnails fit inside the requested square and are cached by
+blob hash and width. Original native image content remains the drawer source.
 
 ## Security posture
 

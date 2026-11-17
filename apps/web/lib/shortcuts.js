@@ -18,7 +18,7 @@ import { dialog, toast } from './ui.js';
 const STORAGE_KEY = 'mdrive-shortcuts';
 
 /** The single-character shortcuts the shell installs, as shown in the dialog. */
-export const SINGLE_KEY_SHORTCUTS = [
+const SINGLE_KEY_SHORTCUTS = [
   { key: '/', label: '聚焦搜索框' },
   { key: 'R', label: '刷新当前页面' },
 ];

@@ -8,10 +8,11 @@
  */
 
 import { h, raw, mount } from './dom.js';
-import { icon, fileKind, bytes, expiryLabel, kindIcon, formatDate } from './format.js';
+import { icon, fileKind, bytes, expiryLabel, kindIcon, formatDate, extension } from './format.js';
 import { dialog, toast, copyText, withBusy, confirmDialog } from './ui.js';
 import { renderSelect } from './select.js';
-import { api, request, fetchBlob, saveBlob, sharedInfoUrl } from './api.js';
+import { api, request, fetchBlob, sharedInfoUrl } from './api.js';
+import { renderOffice } from './office-preview.js';
 
 function absoluteShareUrl(share) {
   const raw = share && share.url ? String(share.url) : '';
@@ -75,6 +76,11 @@ export function shareArchiveUrl(token, password) {
   return '/shared/' + encodeURIComponent(token) + '/archive' + publicQuery(password);
 }
 
+/** Extracted Office content, gated by the same token/password and subtree. */
+export function shareOfficeUrl(token, password, nodeId) {
+  return '/shared/' + encodeURIComponent(token) + '/office' + (nodeId ? '/' + encodeURIComponent(nodeId) : '') + publicQuery(password);
+}
+
 /**
  * What a link may offer, derived from its permission.
  *
@@ -97,13 +103,17 @@ export function shareEntryMeta(entry) {
 /**
  * File kinds the public page can render without a download.
  *
- * Anything else (an archive, a video, a .docx) gets an honest "download to open"
+ * Anything else (an archive or a legacy Office file) gets a "download to open"
  * note instead of a broken frame, and the download button is the only action.
  */
-const PREVIEWABLE = new Set(['image', 'pdf', 'markdown', 'text', 'code']);
+const PREVIEWABLE = new Set(['image', 'pdf', 'markdown', 'text', 'code', 'audio', 'video']);
+const OFFICE_EXTENSIONS = new Set(['pptx', 'pptm', 'ppsx', 'ppsm', 'potx', 'potm', 'docx', 'docm', 'dotx', 'dotm', 'xlsx', 'xlsm', 'xltx', 'xltm']);
+const UNSUPPORTED_IMAGES = new Set(['heic', 'heif', 'tif', 'tiff', 'psd', 'jxl']);
 
 /** True when the public page has a renderer for this file. */
 export function canPreviewShared(mime, name) {
+  if (UNSUPPORTED_IMAGES.has(extension(name))) return false;
+  if (OFFICE_EXTENSIONS.has(extension(name))) return true;
   return PREVIEWABLE.has(fileKind(mime, name));
 }
 
@@ -371,36 +381,18 @@ export function renderShared(root, token, ctx) {
   }, raw(icon('link', 14)), '复制本页链接');
 
   /**
-   * One fetch-and-save button.
+   * One native attachment link.
    *
-   * A viewer is never handed one of these (the server answers 403), so the
-   * failure copy below only has to explain the states a real downloader meets:
-   * an expired link, an exhausted budget, or a transport problem.
+   * A viewer is never handed one of these (the server answers 403).
+   * Let the browser stream to disk and retain the real click gesture. Fetching
+   * the entire file into a Blob first both consumes its size in memory and
+   * relies on Blob-download support in mobile browsers.
    */
   const downloadButton = ({ label, url, filename, primary, iconName }) => {
-    const button = h('button', {
+    return h('a', {
       class: primary ? 'btn btn-primary' : 'btn btn-ghost',
-      attrs: { type: 'button' },
-      on: {
-        click: async () => {
-          withBusy(button, true);
-          try {
-            const blob = await fetchBlob(url);
-            saveBlob(blob, filename);
-          } catch (err) {
-            const message = err && err.code === 'SHARE_NOT_FOUND'
-              ? '链接已失效或达到下载上限。'
-              : err && err.code === 'FORBIDDEN'
-                ? '该链接只允许在线查看。'
-                : (err && err.message) || '下载失败。';
-            toast(message, { type: 'error' });
-          } finally {
-            withBusy(button, false);
-          }
-        },
-      },
+      attrs: { href: '/api/v1' + url, download: filename, rel: 'noopener', target: '_blank' },
     }, raw(icon(iconName || 'download', 14)), label);
-    return button;
   };
 
   /**
@@ -424,7 +416,7 @@ export function renderShared(root, token, ctx) {
           previewOpen = !previewOpen;
           mount(previewBtn, raw(icon('eye', 14)), previewOpen ? '收起预览' : '在线预览');
           previewBtn.setAttribute('aria-expanded', previewOpen ? 'true' : 'false');
-          if (!previewOpen) { previewHost.replaceChildren(); return; }
+          if (!previewOpen) { clearSharedPreview(previewHost); return; }
           await renderSharedPreview(previewHost, node, token, state.password, kind, sharePreviewUrl(token, state.password));
         },
       },
@@ -545,6 +537,7 @@ export function renderShared(root, token, ctx) {
     const openEntry = async (entry) => {
       const kind = fileKind(entry.mime, entry.name);
       if (!canPreviewShared(entry.mime, entry.name)) {
+        clearSharedPreview(previewHost);
         mount(previewHost, h('p', {
           class: 'public-note',
           text: caps.download ? entry.name + '：该格式不支持在线预览，请下载后查看。' : entry.name + '：该格式不支持在线预览。',
@@ -556,7 +549,7 @@ export function renderShared(root, token, ctx) {
 
     const openFolder = async (parentId) => {
       const requestId = ++openToken;
-      previewHost.replaceChildren();
+      clearSharedPreview(previewHost);
       mount(listHost, h('div', { class: 'empty' }, h('span', { class: 'spinner' }), h('p', { text: '正在读取文件夹…' })));
       try {
         const payload = await request(shareChildrenUrl(token, state.password, parentId), { auth: false });
@@ -639,7 +632,7 @@ export function renderShared(root, token, ctx) {
     destroy() {
       // Object URLs are per-document and live until revoked: a folder the visitor
       // browsed through would otherwise keep every previewed file in memory.
-      for (const element of root.querySelectorAll('[data-object-url]')) URL.revokeObjectURL(element.dataset.objectUrl);
+      for (const element of root.querySelectorAll('[data-shared-preview]')) clearSharedPreview(element);
       root.replaceChildren();
     },
   };
@@ -652,21 +645,63 @@ export function renderShared(root, token, ctx) {
  * the shared file itself goes through /preview, a file inside a folder share
  * through /file/:nodeId (which the server answers inline for a viewer).
  */
-async function renderSharedPreview(host, node, token, password, kind, url) {
-  // A folder share re-uses the same host for one preview after another: an
-  // object URL that is never revoked pins the whole previous file in memory.
+const previewRequests = new WeakMap();
+
+function clearSharedPreview(host) {
+  previewRequests.get(host)?.abort();
+  previewRequests.delete(host);
   if (host.dataset.objectUrl) {
     URL.revokeObjectURL(host.dataset.objectUrl);
     delete host.dataset.objectUrl;
   }
+  for (const media of host.querySelectorAll('audio, video')) {
+    media.pause();
+    media.removeAttribute('src');
+    media.load();
+  }
+  host.replaceChildren();
+}
+
+async function renderSharedPreview(host, node, token, password, kind, url) {
+  clearSharedPreview(host);
+  host.dataset.sharedPreview = 'true';
+  const controller = new AbortController();
+  previewRequests.set(host, controller);
+  const current = () => previewRequests.get(host) === controller && !controller.signal.aborted;
   mount(host, h('div', { class: 'empty' }, h('span', { class: 'spinner' }), h('p', { text: '正在载入预览…' })));
   const source = url || sharePreviewUrl(token, password);
   try {
-    const blob = await fetchBlob(source);
+    if (OFFICE_EXTENSIONS.has(extension(node.name))) {
+      const payload = await request(shareOfficeUrl(token, password, node.id), { auth: false, signal: controller.signal });
+      if (current()) mount(host, renderOffice(payload.office));
+      return;
+    }
+    if (kind === 'audio' || kind === 'video') {
+      // Native media requests stream and seek through Range; a multi-GB video
+      // must not be downloaded into a Blob before the visitor can press Play.
+      const media = h(kind, {
+        class: 'preview-media',
+        attrs: { controls: 'controls', preload: 'metadata', src: '/api/v1' + source, 'aria-label': node.name },
+        on: { error: () => {
+          if (!current()) return;
+          mount(host, h('p', { class: 'public-note', text: '浏览器无法播放该文件，可能不支持其编码。可下载后用本地播放器打开。' }));
+        } },
+      });
+      mount(host, media);
+      return;
+    }
+    const blob = await fetchBlob(source, { auth: false, signal: controller.signal });
+    if (!current()) return;
     if (kind === 'image' || kind === 'pdf') {
       const objectUrl = URL.createObjectURL(blob);
       host.dataset.objectUrl = objectUrl;
-      if (kind === 'image') mount(host, h('img', { class: 'preview-media', attrs: { alt: node.name, src: objectUrl } }));
+      if (kind === 'image') mount(host, h('img', {
+        class: 'preview-media',
+        attrs: { alt: node.name, src: objectUrl },
+        on: { error: () => {
+          if (current()) mount(host, h('p', { class: 'public-note', text: '浏览器无法解码这张图片，文件可能损坏或格式不受支持。' }));
+        } },
+      }));
       // The public card is a block, not a flex column, so a frame that relies on
       // `flex:1` would fall back to the 150px default and show one page corner.
       else mount(host, h('iframe', { class: 'preview-frame', attrs: { src: objectUrl, title: node.name, style: 'height:min(60vh,520px)' } }));
@@ -674,11 +709,13 @@ async function renderSharedPreview(host, node, token, password, kind, url) {
     }
     if (kind === 'markdown' || kind === 'text' || kind === 'code') {
       const body = await blob.text();
+      if (!current()) return;
       mount(host, h('pre', { class: 'preview-text', text: body }));
       return;
     }
     mount(host, h('p', { class: 'public-note', text: '该格式不支持在线预览，请下载后查看。' }));
   } catch (error) {
+    if (!current()) return;
     mount(host, h('p', { class: 'public-note', text: (error && error.message) || '预览载入失败。' }));
   }
 }
