@@ -61,6 +61,19 @@ same key or the same button retries exactly those. A ZIP reports success only
 after its fetch resolved, and its carrier node is deleted only then — a failed
 download leaves the archive in the list to be clicked again.
 
+Every download, single or batched, is a task in the download center: the topbar
+entry carries a count and a hairline of progress, the panel lists the tasks with
+their real percentage (or "total unknown" while packaging), and each task keeps
+its own cancel and retry. A canceled or failed task stays in the panel with its
+reason in visible text — a cancel is not a failure, so the batch summary counts
+the two apart.
+
+## Related regression checks
+
+Run `npm run download-check` and `npm run queue-panel-check` for the two panels:
+the download center under a throttled DevTools connection, and the upload queue
+folded, reopened and measured at 320px.
+
 ## Regression checks
 
 Run `npm run dnd-check`, `npm run interaction-check`, `npm run move-check` and

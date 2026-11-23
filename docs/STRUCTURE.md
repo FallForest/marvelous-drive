@@ -145,6 +145,8 @@ lib/
   image-fit.js    How big to decode: contain-fit, long-edge cap, pixel budget
   image-loader.js Route choice + createImageBitmap downsampling for one picture
   image-size.js   Reads width/height from a PNG/JPEG/GIF/WebP header
+  image-zoom.js   The picture viewer's zoom: stops, pan limits, wheel and drag rules
+  downloads.js    The download center: one topbar entry, one panel, retry, carriers
   sha256.js       Web Crypto hashing with a fallback for non-secure origins
   row-action.js   What a click means: action vs. selection (see the rules below)
   preview.js      Preview drawer: image, PDF, text, markdown, media, edit lock
@@ -176,6 +178,8 @@ styles/
   base.css        Reset, typography, shell geometry
   components.css  Buttons, inputs, dialogs, toasts, badges
   app.css         Drive-specific: sidebar, list/grid, preview, panel
+  downloads.css   The download center: topbar entry and its panel, own surface
+  photo-viewer.css  The full-viewport picture drawer, scoped under .photo-viewer
 ```
 
 Rules:
@@ -255,12 +259,16 @@ smoke.mjs            API-level checks against a running instance
 browser-check.mjs    the shell: login, list, preview, trash, share, mobile
 click-check.mjs      the click model: click opens, checkbox selects
 gallery-check.mjs    the picture browser: arrows, counter, cache, no upscale
+photo-viewer-check.mjs  the picture drawer: frame tracks, contain-fit, no upscale
+zoom-check.mjs       explicit zoom: fit / in / out, panning and reset per photo
+download-check.mjs   the download center under a throttled link: progress, cancel, retry
 heic-check.mjs       a HEIC upload becomes a picture a browser can show
 dnd-check.mjs        native mouse drags to list, grid, sidebar and breadcrumbs
 interaction-check.mjs grid fallbacks, nested buttons, multi-select Delete
 move-check.mjs       move picker: cancel, root, keyboard, nesting, conflicts
 feature-check.mjs    thumbnails, batch bar, draggable rows, duplicates drawer
 upload-check.mjs     picker, 9 MiB resumable session, batch bar, cancel
+queue-panel-check.mjs  the folded queue, visible fail reasons, 320px layout
 resume-check.mjs     a reloaded page claims its live session and can discard it
 folder-check.mjs     a dropped entry tree keeps folders, nesting and empty dirs
 directory-check.mjs  directory paging, continuation and server ordering

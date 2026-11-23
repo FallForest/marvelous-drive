@@ -106,7 +106,14 @@ export async function startMockServer(options = {}) {
     workspaceNodes: [],
     members: [{ id: IDS.user, email: 'owner@example.com', name: 'Ada Lovelace', role: 'admin', joinedAt: '2026-01-01T00:00:00.000Z' }],
     maxUploadBytes: options.maxUploadBytes ?? 2 * 1024 * 1024 * 1024,
-    conflictOn: options.conflictOn ?? null
+    conflictOn: options.conflictOn ?? null,
+    // Test-only seams. `hooks.onRequest` runs after a request is recorded and
+    // before it is answered, so a test can change the world at a deterministic
+    // point mid-command (the CLI is blocked waiting on the response).
+    hooks: { onRequest: options.onRequest ?? null },
+    // Corrupts a download body without touching the node metadata, which is how
+    // a server that lies about its content is simulated.
+    corrupt: options.corrupt ?? null
   };
 
   const projects = node({ id: IDS.projects, name: 'Projects', kind: 'folder' });
@@ -184,6 +191,10 @@ export async function startMockServer(options = {}) {
       body,
       bytes: raw.length
     });
+
+    if (typeof state.hooks.onRequest === 'function') {
+      await state.hooks.onRequest({ method, path, url, state });
+    }
 
     if (path === '/api/v1/auth/login' && method === 'POST') {
       if (body?.email === EMAIL && body?.password === PASSWORD) return json(res, 200, { token: TOKEN, user: USER });
@@ -497,7 +508,11 @@ export async function startMockServer(options = {}) {
       const entry = state.nodes.get(decodeURIComponent(contentMatch[1]));
       if (!entry) return fail(res, 404, 'NOT_FOUND', 'File not found.');
       if (entry.kind !== 'file') return fail(res, 400, 'NOT_A_FILE', 'Node is not a file.');
-      const data = state.content.get(entry.id) ?? Buffer.alloc(0);
+      let data = state.content.get(entry.id) ?? Buffer.alloc(0);
+      if (typeof state.corrupt === 'function') {
+        const replacement = state.corrupt(entry, data);
+        if (replacement !== undefined && replacement !== null) data = replacement;
+      }
       const range = req.headers.range;
       const headers = { 'content-type': entry.mime ?? 'application/octet-stream', 'accept-ranges': 'bytes' };
       if (url.searchParams.get('download') === '1') {

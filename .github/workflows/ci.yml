@@ -51,7 +51,7 @@ jobs:
 
   browser:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
         with:
@@ -63,7 +63,7 @@ jobs:
       - name: Browser regression checks with isolated data
         run: |
           export DRIVE_DATA_DIR="$(mktemp -d)"
-          node scripts/run-checks.mjs --server http://127.0.0.1:4488 --only browser-check,upload-check,share-check,preview-race-check,ui-regression-check,directory-check
+          node scripts/run-checks.mjs --server http://127.0.0.1:4488 --only browser-check,upload-check,share-check,preview-race-check,ui-regression-check,directory-check,download-check,photo-viewer-check,zoom-check,queue-panel-check
       - uses: actions/upload-artifact@v4
         if: failure()
         with:

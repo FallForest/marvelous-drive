@@ -12,6 +12,7 @@
 
 import { serverUrl, runBrowserCheck, signUpInPage, sleep } from './lib/browser.mjs'
 import { makePng } from './lib/png.mjs'
+import { PREVIEW_LONG_EDGE } from '../apps/web/lib/image-fit.js'
 
 const server = serverUrl()
 
@@ -195,8 +196,8 @@ process.exit(await runBrowserCheck({ title: 'Gallery / picture browser check', n
   })
   check('a big picture is decoded down, not at its native size',
     decoded !== null && decoded.width < 4000, JSON.stringify(decoded))
-  check('the decoded bitmap is not larger than the drawer needs',
-    decoded !== null && decoded.width <= 1120, JSON.stringify(decoded))
+  check('检查预览解码上限',
+    decoded !== null && Math.max(decoded.width, decoded.height) <= PREVIEW_LONG_EDGE, JSON.stringify(decoded))
 
   check('list pictures use the small thumbnail representation',
     imageRequests.some((url) => /\/thumbnail/.test(url)),

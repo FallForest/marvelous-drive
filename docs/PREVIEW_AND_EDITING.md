@@ -26,14 +26,29 @@ Sources:
 
 The swipe thresholds (44–96px, horizontal movement at least 1.5 times vertical
 movement, at most 1.2 seconds, 24px edge exclusion) are project choices, not
-dimensions prescribed by those references. Native pinch zoom remains available;
-the project does not implement a separate photo zoom/pan engine.
+dimensions prescribed by those references. Native pinch zoom remains available.
+A picture also has an explicit zoom layer of its own (`lib/image-zoom.js`):
+100% is the fitted picture, the stops are 150/200/300/400%, and the multiplier is
+applied to the decoded box rather than to a second, larger decode, so zooming a
+40 MP photograph costs no extra decode or re-fetch. One-finger panning belongs to
+the zoomed picture (`touch-action: pinch-zoom`), and the gallery swipe stays off
+while the multiplier is above fit, so a drag can never page the album by accident.
 
 ## Preview behavior
 
 - A photo can be switched by a deliberate single-finger horizontal swipe, the
   visible buttons or the existing desktop keys. A tap, vertical scroll, pinch or
   cancelled gesture does not navigate. One photo has no navigation controls.
+- A picture opens in a full-viewport drawer (`.photo-viewer`) instead of the
+  narrow reading panel: a picture is the one preview with no useful column
+  measure. PDF, text, folder and Office previews keep the narrow drawer.
+- Zoom is explicit and reversible: 缩小 / 适应窗口 / 放大 buttons, a plain wheel,
+  and a double click. Ctrl/Cmd+wheel and Shift+wheel are left to the browser, and
+  the visible multiplier is relative to fit. Moving to the next picture, or
+  reopening the drawer, always starts fitted again.
+- The zoom row and its multiplier are labelled for assistive tech: the buttons
+  are real `<button>`s, the ends use `aria-disabled` instead of `disabled` so the
+  keyboard is never dropped, and one settled sentence per gesture is announced.
 - Image responses carry a render revision. A late download/decode cannot paint
   an older photo over the current one. GIF and other potentially animated
   formats use a native image element instead of a single-frame bitmap.
@@ -80,10 +95,15 @@ Run these against a server with a disposable data directory:
 npm run mobile-preview-check -- --server http://127.0.0.1:4418
 npm run preview-race-check -- --server http://127.0.0.1:4418
 npm run editor-check -- --server http://127.0.0.1:4418
+npm run photo-viewer-check -- --server http://127.0.0.1:4418
+npm run zoom-check -- --server http://127.0.0.1:4418
 ```
 
 The touch check uses native Chromium touch events at 390×844 and generated
 image/audio/video fixtures. The race check delays actual bitmap decoding.
+`photo-viewer-check` measures the drawer's frame against the viewport;
+`zoom-check` drives the zoom row through the real buttons, a wheel and a drag,
+and asserts that a zoomed picture never pages the gallery.
 Editor browser checks exercise native keyboard saves, conflict/error paths,
 encoding protection and every guarded close entry point. Server tests also race
 a streaming upload against a competing write and check blob references.

@@ -1,7 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { CliError } from '../src/errors.js';
 import {
+  ApiClient,
   DEFAULT_CHUNK_SIZE,
   MAX_CHUNK_SIZE,
   MIN_CHUNK_SIZE,
@@ -105,4 +109,66 @@ test('error envelopes keep their code and status for callers', () => {
   assert.equal(error.code, 'CONFLICT');
   assert.equal(error.status, 409);
   assert.equal(error.exitCode, 1, 'every API failure exits 1 per the contract');
+});
+
+/* ── download staging ─────────────────────────────────────────────────── */
+
+/** A client whose fetchImpl answers with one fixed body (or throws mid-stream). */
+function clientWithBody(body, { failAfter = null } = {}) {
+  return new ApiClient({
+    server: 'http://127.0.0.1:4400',
+    token: 'test-token',
+    fetchImpl: async () => {
+      const stream = new ReadableStream({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode(body));
+          if (failAfter !== null) controller.error(new Error(failAfter));
+          else controller.close();
+        }
+      });
+      return new Response(stream, { status: 200, headers: { 'content-length': String(body.length) } });
+    }
+  });
+}
+
+test('download replaces the destination only after the body is fully written', async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), 'mdrive-http-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const destination = join(dir, 'a.txt');
+  await writeFile(destination, 'old');
+
+  const result = await clientWithBody('new body').download('/files/a/content', { destination });
+  assert.equal(result.path, destination);
+  assert.equal(await readFile(destination, 'utf8'), 'new body');
+  assert.deepEqual(await readdir(dir), ['a.txt'], 'no staging file survives a success');
+});
+
+test('a failed download leaves the destination untouched and removes the staging file', async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), 'mdrive-http-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const destination = join(dir, 'a.txt');
+  await writeFile(destination, 'old');
+
+  await assert.rejects(
+    clientWithBody('partial', { failAfter: 'connection reset' }).download('/files/a/content', { destination }),
+    /connection reset/
+  );
+  assert.deepEqual(await readdir(dir), ['a.txt'], 'a truncated transfer cleans up after itself');
+  assert.equal(await readFile(destination, 'utf8'), 'old');
+});
+
+test('download --resume leaves the partial destination in place until the range completes', async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), 'mdrive-http-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const destination = join(dir, 'a.txt');
+  await writeFile(destination, 'old');
+
+  // A resume that fails must not append garbage to the user's partial file: the
+  // copy used for the range request is discarded, the prefix survives.
+  await assert.rejects(
+    clientWithBody('tail', { failAfter: 'reset by peer' }).download('/files/a/content', { destination, resume: true }),
+    /reset by peer/
+  );
+  assert.equal(await readFile(destination, 'utf8'), 'old');
+  assert.deepEqual((await readdir(dir)).sort(), ['a.txt']);
 });

@@ -3,8 +3,8 @@ import { mkdir, realpath, stat } from 'node:fs/promises';
 import { CliError, EXIT, usageError } from '../errors.js';
 import { formatBytes, formatRelative } from '../output.js';
 import {
-  REASON_TEXT, baselinePath, executePlan, planSync, readBaseline, scanLocal, scanRemote,
-  summarize, writeBaseline,
+  DIRECTIONS, REASON_TEXT, baselinePath, executePlan, normalizeDirection, planSync, readBaseline,
+  restrictPlan, scanLocal, scanRemote, summarize, writeBaseline,
 } from '../sync.js';
 import { requirePositional, splitPath } from './support.js';
 
@@ -16,8 +16,6 @@ import { requirePositional, splitPath } from './support.js';
  * has to be readable before a single byte moves, because the one unrecoverable
  * mistake a sync can make is overwriting the version somebody wanted.
  */
-
-const ACTIONS = new Set(['upload', 'download', 'both', 'none']);
 
 export const syncCommand = {
   name: 'sync',
@@ -31,12 +29,14 @@ export const syncCommand = {
     'adopts what it finds and the second run is a no-op, which is how you verify it\n' +
     'before trusting it with 70 GB.\n\n' +
     'A path changed on both sides is reported as a conflict and left untouched.\n' +
-    'Deletions are never propagated unless --delete is given: a missing file is not\n' +
-    'the same statement as "delete it everywhere".',
+    '--direction up propagates uploads and remote deletions (local edits win);\n' +
+    '--direction down propagates downloads and local deletions (remote edits win).\n' +
+    'Deletions are never propagated unless --delete is also given: a missing file is\n' +
+    'not the same statement as "delete it everywhere".',
   flags: [
     { name: 'dry-run', kind: 'boolean', short: 'n', description: 'Print the plan and change nothing.' },
     { name: 'direction', value: 'MODE', description: 'up (local→remote), down (remote→local), or both (default).' },
-    { name: 'delete', kind: 'boolean', description: 'Propagate deletions in the chosen direction.' },
+    { name: 'delete', kind: 'boolean', description: 'Propagate deletions allowed by --direction.' },
     { name: 'rehash', kind: 'boolean', description: 'Re-hash every local file instead of trusting the size+mtime cache.' },
     { name: 'on-conflict', value: 'MODE', description: 'How an upload resolves a taken name: overwrite (default), rename, skip.' },
     { name: 'workspace', value: 'ID', description: 'Resolve REMOTE_PATH inside a shared workspace.' },
@@ -50,18 +50,26 @@ export const syncCommand = {
     'mdrive sync ./Photos /Photos --dry-run',
     'mdrive sync "C:\\Users\\me\\Pictures\\照片_已整理" /照片_已整理',
     'mdrive sync ./Photos /Photos --direction up --delete',
+    'mdrive sync ./Photos /Photos --direction down --dry-run',
     'mdrive sync ./Photos /Photos --rehash --dry-run'
   ],
   async handler(ctx) {
     const localArg = requirePositional(ctx, 0, 'LOCAL_DIR');
     const remoteRaw = requirePositional(ctx, 1, 'REMOTE_PATH');
-    const direction = ctx.flags.str('direction') ?? 'both';
-    if (!ACTIONS.has(direction)) throw usageError('--direction must be up, down or both.');
+    const requested = ctx.flags.str('direction');
+    const direction = normalizeDirection(requested);
+    // One validation for every spelling: a legacy alias must not become a wider
+    // mode than the value it stands for.
+    if (direction === undefined) {
+      throw usageError('--direction must be ' + DIRECTIONS.join(', ') +
+        (requested === undefined ? '.' : ', received "' + requested + '".'));
+    }
     const onConflict = ctx.flags.str('on-conflict');
     if (onConflict !== undefined && !['overwrite', 'rename', 'skip'].includes(onConflict)) {
       throw usageError('--on-conflict must be overwrite, rename or skip.');
     }
     const dryRun = ctx.flags.bool('dry-run');
+    const propagateDeletes = ctx.flags.bool('delete');
     const workspace = ctx.flags.str('workspace');
     const client = ctx.api();
 
@@ -97,13 +105,11 @@ export const syncCommand = {
 
     let ops = planSync({ local, remote: remote.files, baseline });
 
-    // Direction filters what is allowed to move; everything else is reported so
-    // the plan still explains the whole picture.
-    if (direction === 'up') {
-      ops = ops.map((op) => (op.action === 'download' ? { ...op, action: 'skipped', reason: 'direction=up' } : op));
-    } else if (direction === 'down') {
-      ops = ops.map((op) => (op.action === 'upload' ? { ...op, action: 'skipped', reason: 'direction=down' } : op));
-    }
+    // One restriction for both the printed plan and the executed one. Direction
+    // filters what is allowed to move; everything else is reported so the plan
+    // still explains the whole picture. Deletions are resolved here too, so a
+    // dry-run cannot promise a delete that the real run would only report.
+    ops = restrictPlan(ops, { direction, delete: propagateDeletes });
 
     const summary = summarize(ops);
     const interesting = ops.filter((op) => !['unchanged', 'forget'].includes(op.action));
@@ -112,17 +118,22 @@ export const syncCommand = {
       ctx.out.fields([
         ['local', localRoot],
         ['remote', remotePath],
+        ['direction', direction],
         ['baseline', store],
         ['files', String(local.size) + ' local / ' + remote.files.size + ' remote'],
         ['to upload', summary.upload + ' (' + formatBytes(summary.bytesUp) + ')'],
         ['to download', summary.download + ' (' + formatBytes(summary.bytesDown) + ')'],
         ['conflicts', String(summary.conflict)],
-        ['pending deletes', String((summary['remote-deleted'] ?? 0) + (summary['local-deleted'] ?? 0))],
+        ['pending deletes', String(summary['pending-delete'] ?? 0)],
+        ['deletes', propagateDeletes
+          ? String((summary['remote-deleted'] ?? 0) + (summary['local-deleted'] ?? 0))
+          : 'disabled without --delete'],
+        ['skipped', String(summary.skipped ?? 0)],
         ['unchanged', String(summary.unchanged)]
       ]);
     }
 
-    if (interesting.length) {
+    if (interesting.length && !ctx.out.json) {
       ctx.out.line('');
       const width = Math.min(72, Math.max(20, ...interesting.map((op) => op.rel.length)));
       for (const op of interesting.slice(0, 400)) {
@@ -135,12 +146,12 @@ export const syncCommand = {
       ctx.out.line('');
     }
 
-    if (summary.conflict > 0) {
+    if (summary.conflict > 0 && !ctx.out.json) {
       ctx.out.line(ctx.out.paint(summary.conflict + ' conflict(s) will be left untouched.', 'yellow'));
     }
 
     if (dryRun) {
-      if (ctx.out.data({ ok: true, command: 'sync', dryRun: true, local: localRoot, remote: remotePath, summary, plan: ops })) return 0;
+      if (ctx.out.data({ ok: true, command: 'sync', dryRun: true, local: localRoot, remote: remotePath, direction, summary, plan: ops })) return 0;
       ctx.out.note('--dry-run: nothing was written.');
       return 0;
     }
@@ -158,15 +169,20 @@ export const syncCommand = {
       ops, folders: remote.folders, localRoot,
       baselineEntries: baseline.entries ?? {},
       options: {
-        onConflict, delete: ctx.flags.bool('delete'), workspace,
+        onConflict, delete: propagateDeletes, workspace,
         onProgress: ctx.flags.bool('quiet') ? undefined : ctx.out.progress('sync'),
       },
       write,
-      log: ctx.flags.bool('quiet') ? () => {} : (line) => ctx.out.line('  ' + line),
+      // --json promises one document on stdout; per-file progress lines would
+      // corrupt it, so they are a human-mode feature only.
+      log: ctx.flags.bool('quiet') || ctx.out.json ? () => {} : (line) => ctx.out.line('  ' + line),
     });
 
     // The baseline only advances for paths that succeeded; a failed upload must be
-    // retried next run, not mistaken for "already in sync".
+    // retried next run, not mistaken for "already in sync". A path the chosen
+    // direction skipped, or a deletion held back for lack of --delete, keeps its
+    // old row inside executePlan: dropping it would turn "not propagated" into
+    // "no history" and make the next run adopt the wrong side.
     const nextCache = {};
     for (const [rel, entry] of local) nextCache[rel] = { size: entry.size, mtimeMs: entry.mtimeMs, sha256: entry.sha256 };
     await writeBaseline(store, {
@@ -199,8 +215,8 @@ export const syncCommand = {
 
     if (outcome.pendingDeletes.length) {
       ctx.out.line('');
-      ctx.out.line(ctx.out.paint(outcome.pendingDeletes.length + ' path(s) exist on one side only and were left alone.', 'yellow'));
-      ctx.out.note('They are listed above. Re-run with --delete to propagate them.');
+      ctx.out.line(ctx.out.paint(outcome.pendingDeletes.length +
+        ' path(s) exist on one side only and were left alone. Re-run with --delete to propagate them.', 'yellow'));
     }
     for (const conflict of outcome.conflicts) {
       ctx.out.line('  conflict ' + conflict.rel + ': ' + (REASON_TEXT[conflict.reason] ?? conflict.reason ?? ''));

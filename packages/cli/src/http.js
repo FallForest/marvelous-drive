@@ -296,19 +296,30 @@ export class ApiClient {
     }
     const write = createWriteStream(temporary, resumed ? { flags: 'a' } : {});
     let received = resumed ? start : 0;
-    if (response.body) {
-      const source = Readable.fromWeb(response.body);
-      if (typeof options.onProgress === 'function') {
-        source.on('data', chunk => {
-          received += chunk.length;
-          options.onProgress(received, total);
-        });
+    try {
+      if (response.body) {
+        const source = Readable.fromWeb(response.body);
+        if (typeof options.onProgress === 'function') {
+          source.on('data', chunk => {
+            received += chunk.length;
+            options.onProgress(received, total);
+          });
+        }
+        await pipeline(source, write);
+      } else {
+        write.end();
       }
-      await pipeline(source, write);
-    } else {
-      write.end();
+      await rename(temporary, options.destination);
+    } catch (error) {
+      // A truncated or aborted response must not leave its prefix behind: the
+      // destination is untouched, and the caller only sees the real failure.
+      // Wait for the handle to close before unlinking, or Windows answers EBUSY
+      // and the partial file survives the very cleanup meant to remove it.
+      write.destroy();
+      await new Promise((resolve) => (write.closed ? resolve() : write.once('close', resolve)));
+      await rm(temporary, { force: true }).catch(() => {});
+      throw error;
     }
-    await rename(temporary, options.destination);
     return { path: options.destination, bytes: received, status: response.status, resumed, total, headers: response.headers };
   }
 }

@@ -1,0 +1,137 @@
+/*
+ * downloads.css — the download center: one topbar entry and one floating panel.
+ *
+ * Owns its own surfaces so the drive stylesheet (.app.css) stays untouched while
+ * another change lands there. It is anchored under the topbar's entry rather than
+ * in the bottom-right corner, which is where the upload queue lives: the two
+ * panels then never compete for the same edge. On a phone both become full-width
+ * sheets, top and bottom, and the `:has()` rules below keep a visible upload
+ * queue and an open download panel from covering each other.
+ *
+ * Everything animates transform/opacity only, and every duration and curve is a
+ * token, so a retune of the motion layer reaches this panel too.
+ */
+
+/* ═══ topbar entry ══════════════════════════════════════════════ */
+.dl-entry{position:relative;overflow:visible}
+.dl-entry.is-active{color:var(--accent)}
+.dl-entry.has-error{color:var(--danger)}
+.dl-entry-count{
+  position:absolute;top:-2px;right:-3px;min-width:14px;height:14px;padding:0 3px;
+  display:inline-flex;align-items:center;justify-content:center;
+  border-radius:var(--radius-pill);
+  background:var(--accent-solid);color:var(--text-on-accent);
+  font-size:9px;font-weight:600;line-height:1;font-variant-numeric:tabular-nums;
+  pointer-events:none;
+}
+.dl-entry-count.is-error{background:var(--danger-solid)}
+/* The display rules above outrank the UA `[hidden]` default, so the attribute
+   has to hide the badge explicitly — otherwise a finished task leaves a "0". */
+.dl-entry-count[hidden]{display:none}
+/* A hairline of completion lives on the entry itself: with the panel closed the
+   user still sees that bytes are moving. */
+.dl-entry-bar{
+  position:absolute;left:3px;right:3px;bottom:1px;height:2px;border-radius:1px;
+  background:var(--surface-3);overflow:hidden;pointer-events:none;
+}
+.dl-entry-bar[hidden]{display:none}
+.dl-entry-bar i{display:block;height:100%;width:100%;background:var(--accent);transform-origin:left center;transition:transform var(--duration-base) var(--ease-decelerate)}
+.dl-entry-bar.is-indeterminate i{width:40%;animation:motion-indeterminate var(--duration-loop) var(--ease-linear) infinite}
+
+/* ═══ panel ═════════════════════════════════════════════════════
+ * The panel is a popup of the page, but it is also the answer to "where did my
+ * bytes go" while a preview drawer is open over it. A drawer's scrim sits at
+ * --z-modal (70), so a panel at --z-panel (40) was in the DOM and under the
+ * scrim: the click landed on the scrim and the progress was invisible. One step
+ * above the modal keeps the download in view and clickable there, while
+ * --z-menu (75) and --z-toast (80) still own the layers above it. */
+.downloads{
+  position:fixed;top:calc(var(--topbar-h) + 6px);right:16px;z-index:calc(var(--z-modal) + 1);
+  width:min(432px,calc(100vw - 32px));max-height:min(62vh,460px);
+  display:flex;flex-direction:column;
+  background:var(--surface-2);border:1px solid var(--border-strong);
+  border-radius:var(--radius-md);box-shadow:var(--shadow-modal);
+  overflow:hidden;
+  /* the panel is revealed by removing [hidden], so this runs once, on mount */
+  animation:motion-rise-in var(--duration-base) var(--ease-spring-snappy) backwards;
+}
+.downloads[hidden]{display:none}
+/* The same 46px header as the upload queue: icon, title, one flexible summary,
+   then the two global actions. */
+.dl-head{
+  display:flex;align-items:center;gap:9px;height:46px;padding:0 8px 0 14px;
+  border-bottom:1px solid var(--border);flex:0 0 auto;
+}
+.dl-head b{font-size:var(--fs-base);font-weight:600}
+/* The summary is the one flexible item: "3 个进行中" must truncate before it
+   squeezes 清空/关闭 out of the header at 320px. */
+.dl-head .dl-summary{font-size:var(--fs-sm);color:var(--text-muted);min-width:0;flex:0 1 auto;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.dl-head .push{margin-left:auto}
+.dl-head .icon-btn{flex:0 0 auto}
+.dl-head svg{color:var(--text-muted);flex:0 0 auto}
+.dl-list{flex:1 1 auto;overflow:auto;padding:6px;display:flex;flex-direction:column;gap:6px;min-height:0;overscroll-behavior:contain}
+.dl-empty{padding:18px 12px;text-align:center;font-size:var(--fs-sm);color:var(--text-muted)}
+
+/* ═══ one task row ══════════════════════════════════════════════
+ * Same two-column grid as .qitem in app.css: the readable sentence, the live
+ * actions, then a full-width 4px progress slot. minmax(0,1fr) is what lets a
+ * long filename wrap instead of widening the panel on a phone. */
+.dl-item{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:4px 8px;padding:8px 9px;border-radius:var(--radius-xs);transition:var(--transition-colors)}
+.dl-item:hover{background:var(--hover)}
+.dl-copy{min-width:0;display:flex;flex-direction:column;gap:3px}
+.dl-line{display:flex;align-items:baseline;gap:8px;min-width:0}
+/* Two lines, then clipped: a long name is more useful than an ellipsis at
+   character 20, and two lines cannot push the actions out of the row. */
+.dl-name{
+  flex:1 1 auto;min-width:0;font-size:var(--fs-base);color:var(--text);line-height:1.4;
+  overflow-wrap:anywhere;
+  display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;line-clamp:2;
+  overflow:hidden;
+}
+.dl-state{flex:0 0 auto;font-size:var(--fs-sm);color:var(--text-faint);white-space:nowrap;font-variant-numeric:tabular-nums}
+.dl-item[data-state="done"] .dl-state{color:var(--success)}
+.dl-item[data-state="failed"] .dl-state{color:var(--danger)}
+.dl-item[data-state="canceled"] .dl-state{color:var(--text-faint)}
+.dl-item[data-state="packaging"] .dl-state{color:var(--warning)}
+/* A failure reason is a sentence, not a number: it wraps and keeps the danger
+   colour, so "HTTP 500" is readable instead of a title tooltip on a phone. */
+.dl-meta{font-size:var(--fs-sm);color:var(--text-faint);font-variant-numeric:tabular-nums;line-height:1.5;overflow-wrap:anywhere}
+.dl-item[data-state="failed"] .dl-meta{color:var(--danger)}
+.dl-item[data-state="canceled"] .dl-meta{color:var(--text-muted)}
+/* The 4px slot: a transform fill, so a progress event never relayouts the row. */
+.dl-bar{height:4px;border-radius:2px;background:var(--surface-3);overflow:hidden;margin-top:2px}
+.dl-bar i{display:block;height:100%;width:100%;background:var(--accent);transform:scaleX(0);transform-origin:left center;transition:transform var(--duration-fast) var(--ease-standard)}
+.dl-item[data-state="done"] .dl-bar i{background:var(--success)}
+.dl-item[data-state="failed"] .dl-bar i{background:var(--danger)}
+/* No trustworthy total: a sweep, not a fake percentage. */
+.dl-bar.is-indeterminate i{width:38%;transform:none;animation:motion-indeterminate var(--duration-loop) var(--ease-linear) infinite;background:var(--text-faint)}
+.dl-item[data-state="packaging"] .dl-bar.is-indeterminate i{background:var(--warning)}
+.dl-actions{display:flex;align-items:center;gap:4px;flex-wrap:wrap;justify-content:flex-end;align-self:start}
+/* 24px targets with 4px between them: the same floor the upload queue uses,
+   so a touch screen can hit "cancel" and not "retry". */
+.dl-actions .icon-btn{width:24px;height:24px;min-width:24px;min-height:24px;flex:0 0 auto}
+.dl-actions .icon-btn svg{width:13px;height:13px}
+.dl-actions .icon-btn[hidden]{display:none}
+.dl-actions .icon-btn:focus-visible{outline:2px solid var(--focus-ring);outline-offset:1px}
+
+/* ═══ small screens ═════════════════════════════════════════════
+ * Full-width sheet under the topbar, inside a 10px (6px at 360px and below)
+ * safe edge. The upload queue owns the bottom edge, so the panel stays in the
+ * top band and shortens when the queue is on screen: the two can touch at the
+ * smallest heights but never overlap. A browser without `:has()` still gets the
+ * bounded default, which is the graceful degradation.
+ */
+@media (max-width:700px){
+  .downloads{left:10px;right:10px;width:auto;max-height:min(46vh,360px)}
+  body:has(> .queue:not([hidden])) .downloads{max-height:min(34vh,260px)}
+  .dl-actions .icon-btn{width:28px;height:28px;min-width:28px;min-height:28px}
+  .dl-actions .icon-btn svg{width:14px;height:14px}
+  .dl-head{padding:0 6px 0 12px}
+}
+@media (max-width:360px){
+  .downloads{left:6px;right:6px}
+  .dl-head{padding:0 4px 0 10px;height:44px}
+  .dl-list{padding:5px;gap:5px}
+  .dl-item{padding:7px 8px}
+  .dl-line{gap:6px}
+}

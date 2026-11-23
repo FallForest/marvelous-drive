@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
-import { aggregateTasks, summaryLabel, formatEta } from '../lib/upload-stats.js'
+import { aggregateTasks, summaryLabel, formatEta, taskRowStatus } from '../lib/upload-stats.js'
 
 /** The batch readout above the queue rows. Pure arithmetic, no DOM. */
 
@@ -35,6 +35,20 @@ describe('aggregateTasks', () => {
     // The batch bar must not jump backwards because one file died at 37%.
     assert.equal(stats.doneBytes, 3 * MiB)
     assert.equal(stats.remaining, 13 * MiB)
+  })
+
+  it('keeps a canceled task separate from a failed one', () => {
+    const stats = aggregateTasks([
+      { state: 'error', size: 8 * MiB, uploaded: 2 * MiB },
+      { state: 'canceled', size: 4 * MiB, uploaded: 1 * MiB },
+      { state: 'done', size: 2 * MiB },
+    ])
+    // A cancellation is a decision, not a fault: merging the two counts told
+    // the user three files had failed when one had merely been called off.
+    assert.equal(stats.failed, 1)
+    assert.equal(stats.canceled, 1)
+    assert.equal(stats.finished, 1)
+    assert.equal(stats.active, 0)
   })
 
   it('never lets an uploaded count exceed its own size', () => {
@@ -90,6 +104,21 @@ describe('summaryLabel', () => {
     assert.equal(summaryLabel(aggregateTasks([])), '0 个任务')
   })
 
+  it('names cancellations as cancellations, not as failures', () => {
+    const settled = summaryLabel(aggregateTasks([
+      { state: 'done', size: 1 },
+      { state: 'canceled', size: 1 },
+    ]))
+    assert.equal(settled, '1 个已完成 · 1 个已取消')
+    const mixed = summaryLabel(aggregateTasks([
+      { state: 'done', size: 1 },
+      { state: 'error', size: 1 },
+      { state: 'canceled', size: 1 },
+      { state: 'uploading', size: 1, speed: 0 },
+    ]))
+    assert.equal(mixed, '已完成 1/4 · 1 个失败 · 1 个已取消')
+  })
+
   it('stays quiet for a single file, whose row already says everything', () => {
     assert.equal(summaryLabel(aggregateTasks([{ state: 'uploading', size: 9, uploaded: 3, speed: 0 }])), '1 个进行中')
   })
@@ -107,5 +136,65 @@ describe('formatEta', () => {
     assert.equal(formatEta(null), '')
     assert.equal(formatEta(0), '')
     assert.equal(formatEta(-5), '')
+  })
+})
+
+describe('taskRowStatus', () => {
+  const MiB = 1024 * 1024
+
+  it('names each live state in one word', () => {
+    assert.equal(taskRowStatus({ state: 'queued' }).label, '排队中')
+    assert.equal(taskRowStatus({ state: 'hashing' }).label, '校验中')
+    assert.equal(taskRowStatus({ state: 'uploading' }).label, '上传中')
+    assert.equal(taskRowStatus({ state: 'finalizing' }).label, '服务端收尾')
+    assert.equal(taskRowStatus({ state: 'paused' }).label, '已暂停')
+    assert.equal(taskRowStatus({ state: 'done' }).label, '成功')
+    assert.equal(taskRowStatus({ state: 'error' }).label, '失败')
+    assert.equal(taskRowStatus({ state: 'canceled' }).label, '已取消')
+  })
+
+  it('puts bytes, speed and ETA on the upload line', () => {
+    const status = taskRowStatus({
+      state: 'uploading', size: 10 * MiB, uploaded: 6 * MiB, speed: 1 * MiB,
+    })
+    assert.equal(status.detail, '6.0 MB / 10 MB · 1.0 MB/s · 剩余 4s')
+  })
+
+  it('does not invent a speed or an ETA before one exists', () => {
+    const status = taskRowStatus({ state: 'uploading', size: 10 * MiB, uploaded: MiB, speed: 0 })
+    assert.equal(status.detail, '1.0 MB / 10 MB')
+    assert.ok(!/剩余|\/s/.test(status.detail))
+  })
+
+  it('never calls server finalisation a success or a 100%', () => {
+    const status = taskRowStatus({ state: 'finalizing', size: 9 * MiB, uploaded: 9 * MiB })
+    assert.equal(status.label, '服务端收尾')
+    assert.ok(!/成功|100%/.test(status.label + ' ' + status.detail))
+    assert.equal(status.detail, '9.0 MB / 9.0 MB')  })
+
+  it('carries the failure reason as readable text', () => {
+    const status = taskRowStatus({
+      state: 'error', size: 1024, uploaded: 512, error: { message: '存储配额已满，请清理回收站。' },
+    })
+    assert.equal(status.label, '失败')
+    assert.equal(status.detail, '存储配额已满，请清理回收站。')
+    assert.equal(status.tone, 'danger')
+  })
+
+  it('offers a way forward when the reason is missing', () => {
+    assert.equal(taskRowStatus({ state: 'error', size: 10, uploaded: 0 }).detail, '可以重试')
+    assert.equal(taskRowStatus({ state: 'paused', size: 10, uploaded: 5 }).detail, '已传 5 B / 10 B · 可以继续')
+    assert.equal(taskRowStatus({ state: 'canceled', size: 10, uploaded: 0 }).detail, '可以重试')
+  })
+
+  it('reports success by size, and a deduplicated hit by name', () => {
+    assert.equal(taskRowStatus({ state: 'done', size: 2048 }).detail, '2.0 KB')
+    assert.equal(taskRowStatus({ state: 'done', size: 2048, deduplicated: true }).detail, '秒传 · 2.0 KB')
+  })
+
+  it('survives a task with nothing in it', () => {
+    const status = taskRowStatus({})
+    assert.equal(status.state, 'queued')
+    assert.equal(status.detail, '')
   })
 })

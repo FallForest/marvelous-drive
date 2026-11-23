@@ -10,7 +10,7 @@
 
 import { h, raw } from './dom.js';
 import { icon, relativeTime } from './format.js';
-import { api, request, fetchBlob, contentUrl, downloadNode, saveBlob, clearToken } from './api.js';
+import { api, request, clearToken } from './api.js';
 import { toast, dialog, promptDialog, confirmDialog, copyText, drawer, openMenu } from './ui.js';
 import { beginInlineRename, toggleStar, renameNode, moveNode, createFolder, deleteNode, restoreNode, purgeNode } from './files.js';
 import { openPreview, showDetails } from './preview.js';
@@ -24,6 +24,7 @@ import { runtime } from './runtime.js';
 import { visibleNodes } from './views.js';
 import { moveRoots, planMoves } from './drag-move.js';
 import { openShortcutSettings } from './shortcuts.js';
+import { downloadCenter } from './downloads.js';
 
 /** Resolve a node id against the live tree and the current search page. */
 export function lookupNode(id) {
@@ -58,29 +59,54 @@ export function openPreviewFor(node) {
 }
 
 /**
- * Downloads one node and reports whether the bytes started.
+ * Downloads one node through the page's download center.
  *
- * The promise is the point: the archive flows have to know the download really
- * began before they delete the carrier node, and the old fire-and-forget helper
- * resolved immediately — so "已打包" was printed while nothing had downloaded.
- * A rejection is re-thrown for those callers, and a no-op catch is attached so
- * the fire-and-forget call sites (a row menu, the preview drawer) do not log an
- * unhandled rejection for a failed download they already toasted.
+ * The promise still means "the bytes reached the browser and the save was
+ * handed over", because the archive flows delete their carrier only after that.
+ * Every task, including a failed one, stays in the download panel, so a failure
+ * is never just a toast that scrolls away: it carries a retry there.
  */
 export function downloadOne(node, options) {
   const opts = options || {};
-  if (!node || node.kind !== 'file') return Promise.resolve();
-  const run = downloadNode(node).then(
-    () => {
-      if (!opts.quiet) toast('已开始下载 ' + node.name, { type: 'success', timeout: 2000 });
-    },
-    (error) => {
-      if (!opts.quiet) toast((error && error.message) || '下载失败。', { type: 'error' });
+  if (!node || node.kind !== 'file') return Promise.resolve(null);
+  const handle = downloadCenter().start({
+    node,
+    name: node.name,
+    kind: 'file',
+    // A ZIP carrier already exists before downloadOne() sees it, so no prepare.
+  });
+  const run = handle.done.then((result) => {
+    if (result.state !== 'done') {
+      if (!opts.quiet) {
+        // A cancel is something the user did, not something that went wrong:
+        // "下载失败" over a deliberate stop is the wrong word, and the toast has
+        // to say where the retry is. A real failure keeps the error tone and its
+        // own reason.
+        if (result.state === 'canceled') {
+          toast('已取消下载 ' + node.name + '。', { type: 'info', detail: '仍保留在下载面板中，可以重试。' });
+        } else {
+          toast(result.message || '下载失败。', { type: 'error' });
+        }
+      }
+      const error = result.error || new Error(result.message || '下载已取消。');
+      if (result.state === 'canceled' && !error.name) error.name = 'AbortError';
       throw error;
-    },
-  );
+    }
+    if (!opts.quiet) toast('已开始下载 ' + node.name, { type: 'success', timeout: 2000 });
+    return result;
+  });
+  // The fire-and-forget call sites (a row menu, the preview drawer) already see
+  // the failure in a toast and in the panel; this only stops the browser from
+  // logging an unhandled rejection for it.
   run.catch(() => {});
   return run;
+}
+
+/** Resolves a packaging response to its carrier node, or throws. */
+function archiveCarrier(payload) {
+  const archive = payload && payload.node;
+  if (!archive) throw new Error('服务器没有返回压缩包。');
+  return archive;
 }
 
 /**
@@ -88,7 +114,8 @@ export function downloadOne(node, options) {
  *
  * Only ever called after the download resolved: the node is the only handle on
  * those bytes, so removing it any earlier (the old `finally`) turned one failed
- * download into a lost archive.
+ * download into a lost archive. The download panel keeps the carrier too: a
+ * failed or canceled transfer can be retried without zipping the folder again.
  */
 function releaseArchive(archive) {
   if (!archive) return;
@@ -96,29 +123,52 @@ function releaseArchive(archive) {
   runtime.refreshData();
 }
 
+/**
+ * Report a ZIP task that did not deliver.
+ *
+ * The carrier is deliberately not released: it is still the only copy of the
+ * bytes, and the panel's retry reuses it. Both sentences name that fact, because
+ * "打包完成，但下载没有开始" without "保留在列表中" reads as "your archive is gone".
+ */
+function reportArchiveFailure(archive, result) {
+  const reason = (result && result.message) || '下载失败。';
+  if (result && result.state === 'canceled') {
+    toast('已取消下载压缩包。', {
+      type: 'info',
+      detail: '压缩包「' + archive.name + '」保留在列表和下载面板中，可以再点一次下载。',
+    });
+  } else {
+    toast('打包完成，但下载没有开始。', {
+      type: 'error',
+      detail: '压缩包「' + archive.name + '」保留在列表中，可以在下载面板重试：' + reason,
+    });
+  }
+  runtime.refreshData();
+}
+
 /** Zips whatever is selected and downloads it, then drops the carrier node. */
 export async function downloadSelectionArchive() {
   const selected = Array.from(store.state.selection).map(lookupNode).filter(Boolean);
   if (!selected.length) return;
-  let archive = null;
-  try {
-    const payload = await request('/nodes/archive', { method: 'POST', body: { ids: selected.map((node) => node.id) } });
-    archive = payload && payload.node;
-    if (!archive) throw new Error('服务器没有返回压缩包。');
-  } catch (error) {
-    toast((error && error.message) || '打包失败。', { type: 'error' });
+  const handle = downloadCenter().start({
+    name: selected.length > 1 ? selected.length + ' 个项目的压缩包' : (selected[0].name || '压缩包') + '.zip',
+    kind: 'archive',
+    prepare: async () => {
+      // Deliberately no abort signal: cutting a running archive build leaves the
+      // server with a half-written carrier and no way to name it. The cancel is
+      // honoured the moment packaging returns; the node is then kept, not lost.
+      const payload = await request('/nodes/archive', { method: 'POST', body: { ids: selected.map((node) => node.id) } });
+      return archiveCarrier(payload);
+    },
+  });
+  const result = await handle.done;
+  const archive = result.carrier;
+  if (!archive) {
+    // Packaging failed: nothing was created, so the panel's retry runs it again.
+    if (result.state !== 'canceled') toast(result.message || '打包失败。', { type: 'error' });
     return;
   }
-  try {
-    await downloadOne(archive, { quiet: true });
-  } catch (error) {
-    toast('打包完成，但下载没有开始。', {
-      type: 'error',
-      detail: '压缩包「' + archive.name + '」保留在列表中，可以再点一次下载：' + ((error && error.message) || '下载失败。'),
-    });
-    runtime.refreshData();
-    return;
-  }
+  if (result.state !== 'done') { reportArchiveFailure(archive, result); return; }
   toast('已打包 ' + selected.length + ' 项并开始下载。', { type: 'success' });
   releaseArchive(archive);
 }
@@ -126,25 +176,23 @@ export async function downloadSelectionArchive() {
 /** Zips one folder and downloads the archive, then deletes the carrier node. */
 export async function downloadFolderArchive(node) {
   if (!node || node.kind !== 'folder') return;
-  let archive = null;
-  try {
-    const payload = await request('/nodes/' + node.id + '/archive', { method: 'POST', body: {} });
-    archive = payload && payload.node;
-    if (!archive) throw new Error('服务器没有返回压缩包。');
-  } catch (error) {
-    toast((error && error.message) || '打包失败。', { type: 'error' });
+  const handle = downloadCenter().start({
+    name: (node.name || '文件夹') + '.zip',
+    kind: 'archive',
+    prepare: async () => {
+      // Same reasoning as the selection archive: let the build finish so the
+      // carrier can be named, then honour a cancel on the transfer.
+      const payload = await request('/nodes/' + node.id + '/archive', { method: 'POST', body: {} });
+      return archiveCarrier(payload);
+    },
+  });
+  const result = await handle.done;
+  const archive = result.carrier;
+  if (!archive) {
+    if (result.state !== 'canceled') toast(result.message || '打包失败。', { type: 'error' });
     return;
   }
-  try {
-    await downloadOne(archive, { quiet: true });
-  } catch (error) {
-    toast('打包完成，但下载没有开始。', {
-      type: 'error',
-      detail: '压缩包「' + archive.name + '」保留在列表中，可以再点一次下载：' + ((error && error.message) || '下载失败。'),
-    });
-    runtime.refreshData();
-    return;
-  }
+  if (result.state !== 'done') { reportArchiveFailure(archive, result); return; }
   toast('已生成「' + archive.name + '」并开始下载。', { type: 'success' });
   releaseArchive(archive);
 }
@@ -358,36 +406,49 @@ export async function deleteSelection(nodes) {
  * Downloads several files one at a time.
  *
  * Browsers throttle a burst of `<a download>` clicks, so the 260 ms gap stays.
- * The summary at the end counts what actually started: "已开始下载 N 个文件" even
- * when half of them failed was the misleading part, and a per-file toast alone
- * scrolls away before the batch is over.
+ * Each file is its own task in the same download panel, so the batch is visible
+ * while it runs and every failure has a retry that does not repeat the files
+ * that already went through. The summary at the end counts what actually
+ * started: "已开始下载 N 个文件" even when half of them failed was the
+ * misleading part, and a per-file toast alone scrolls away before the batch is
+ * over.
  */
 export async function downloadSelection(nodes) {
   const files = (nodes || []).filter((node) => node.kind === 'file');
   if (!files.length) { toast('选择的项目中没有可下载的文件。', { type: 'warning' }); return; }
   const failures = [];
   let started = 0;
+  let first = true;
   for (const node of files) {
-    try {
-      const blob = await fetchBlob(contentUrl(node.id, { download: true }));
-      saveBlob(blob, node.name);
-      started += 1;
+    const handle = downloadCenter().start({ node, name: node.name, kind: 'file', reveal: first });
+    first = false;
+    const result = await handle.done;
+    // A canceled file is not a failure of the batch: the panel still offers it.
+    if (result.state === 'done') started += 1;
+    else if (result.state === 'failed') failures.push({ name: node.name, reason: result.message || '下载失败' });
+    if (result.state === 'done' || result.state === 'canceled') {
       await new Promise((resolve) => setTimeout(resolve, 260));
-    } catch (error) {
-      failures.push({ name: node.name, reason: (error && error.message) || '下载失败' });
     }
   }
   const total = files.length;
-  const details = failures.slice(0, 3).map((entry) => entry.name + '：' + entry.reason).join('；');
   if (!failures.length) {
-    toast('已开始下载 ' + total + ' 个文件。', { type: 'success' });
+    const canceled = total - started;
+    if (!started) { toast('已取消下载。', { type: 'info' }); return; }
+    toast(canceled ? '已下载 ' + started + ' 个，' + canceled + ' 个已取消。' : '已开始下载 ' + total + ' 个文件。', {
+      type: canceled ? 'warning' : 'success',
+      detail: canceled ? '已取消的文件仍在下载面板中，可以重试。' : '',
+    });
     return;
   }
+  const details = failures.slice(0, 3).map((entry) => entry.name + '：' + entry.reason).join('；');
   if (!started) {
-    toast('没有文件下载成功。', { type: 'error', detail: details });
+    toast('没有文件下载成功。', { type: 'error', detail: details + '。可在下载面板重试。' });
     return;
   }
-  toast('已下载 ' + started + ' 个，' + failures.length + ' 个失败。', { type: 'warning', detail: details });
+  toast('已下载 ' + started + ' 个，' + failures.length + ' 个失败。', {
+    type: 'warning',
+    detail: details + '。可在下载面板重试。',
+  });
 }
 
 export function startRestore(node) {

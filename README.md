@@ -39,6 +39,9 @@ snapshot, or a complete local archive after writers are stopped.
   8 MiB chunks, per-chunk retry, digest verification on completion.
 - **Downloads** — `Range` support (`206`, `Content-Range`, `Accept-Ranges`),
   inline preview for images/PDF/text, `?download=1` for attachment disposition.
+  A **download center** in the topbar lists every single file, batch and ZIP with
+  real progress, a cancel, and a retry that keeps what already happened; an
+  archive whose transfer failed keeps its carrier node instead of losing it.
 - **Sharing** — public links with optional password, expiry, download budget, and
   a public page at `/s/<token>`.
 - **Search, stats, trash** — case-insensitive name search, **full-text search over
@@ -62,8 +65,10 @@ snapshot, or a complete local archive after writers are stopped.
   image detail.
 - **Activity log** — every mutation is recorded and readable from the account
   menu, newest first and grouped by day.
-- **File browsing and editing** — photo previews support left/right swipes on
-  touchscreens, previous/next buttons and keyboard navigation in list order.
+- **File browsing and editing** — a picture opens in a full-viewport viewer at
+  original detail, with explicit 缩小 / 适应窗口 / 放大 controls, wheel and
+  double-click zoom, and panning that never turns into a photo change. Swipes,
+  previous/next buttons and keyboard navigation still walk the album.
   Text and Markdown files up to 2 MiB can be explicitly edited, with version-
   checked saves, history and unsaved-draft protection. Read-only previews leave
   edit locks alone; entering the editor takes an advisory lock. See
@@ -175,6 +180,10 @@ node scripts/smoke.mjs            # 20 API checks against a running instance
 node scripts/browser-check.mjs    # 15 checks: login, list, preview, trash, share, mobile
 node scripts/feature-check.mjs    #  9 checks: thumbnails, batch bar, drag, duplicates
 node scripts/dnd-check.mjs        # native mouse drags, thumbnails, groups and destinations
+node scripts/gallery-check.mjs    # the picture browser, counter, cache and no upscale
+node scripts/photo-viewer-check.mjs # the picture drawer: contain-fit, no upscale
+node scripts/zoom-check.mjs       # explicit zoom: fit / in / out, pan, reset per photo
+node scripts/download-check.mjs   # throttled progress, cancel, retry, the download panel
 node scripts/mobile-preview-check.mjs # native phone swipes, touch controls, audio/video
 node scripts/preview-race-check.mjs # late image decodes and GIF previews
 node scripts/editor-check.mjs     # saves, conflicts, encodings and unsaved drafts
@@ -188,6 +197,7 @@ node scripts/storage-check.mjs    # 10 checks: ZIP menu, selection archive, brea
 node scripts/folder-check.mjs     # dropped tree, incremental merge and version history
 node scripts/share-check.mjs      # anonymous Unicode previews and real downloads
 node scripts/upload-check.mjs     # 10 checks: picker, 9 MiB session, cancel
+node scripts/queue-panel-check.mjs # folded queue, visible fail reasons, 320px layout
 node scripts/feel-check.mjs       # 30 checks: press, stagger cap, VT flag, drawer
 node scripts/office-check.mjs --sample DIR   # pptx/docx/xlsx extraction + drawer
 node scripts/s3-check.mjs                    # the whole server on DRIVE_STORAGE=s3

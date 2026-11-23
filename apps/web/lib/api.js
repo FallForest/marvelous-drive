@@ -154,9 +154,41 @@ export function contentUrl(id, options) {
 }
 export function sharedInfoUrl(token) { return API_BASE + '/shared/' + encodeURIComponent(token); }
 
+/** A cancellation the download panel can show exactly as it happened. */
+function downloadAborted() {
+  const error = new Error('已取消下载。');
+  error.name = 'AbortError';
+  error.code = 'ABORTED';
+  return error;
+}
+
+/**
+ * The response length we are allowed to promise the user, or null.
+ *
+ * `Content-Length` is only the size of the blob when it describes the bytes the
+ * stream hands us. A `Content-Encoding` response advertises the COMPRESSED
+ * length while the stream is decoded, and a chunked response has no length at
+ * all; in both cases a percentage would eventually pass 100%. Reporting "unknown"
+ * makes the panel show received bytes on an indeterminate bar instead.
+ */
+function trustedByteTotal(response) {
+  const encoding = (response.headers.get('content-encoding') || '').trim().toLowerCase();
+  if (encoding && encoding !== 'identity') return null;
+  const header = response.headers.get('content-length');
+  if (header === null || header === '') return null;
+  const total = Number(header);
+  return Number.isFinite(total) && total >= 0 ? total : null;
+}
+
 /**
  * Authenticated URL for links/images: fetching binary content through fetch
  * keeps the bearer header, so blobs are turned into object URLs by the caller.
+ *
+ * `onProgress(loaded, total)` is optional. The body is counted through a
+ * TransformStream and re-wrapped as a Response, so the blob is still accumulated
+ * by the browser and the client never keeps an unbounded chunk array. When
+ * `total` is null the response gave no trustworthy length (chunked, compressed,
+ * or a synthetic test stream): callers must show an indeterminate bar.
  */
 export async function fetchBlob(path, options) {
   const opts = options || {};
@@ -180,7 +212,57 @@ export async function fetchBlob(path, options) {
     if (response.status === 401 && auth && token) { clearToken(); fireUnauthorized(); }
     throw new ApiError(message, { status: response.status, code });
   }
-  return response.blob();
+  // The old contract — no listener, no wrapper — stays byte-for-byte the same.
+  if (typeof opts.onProgress !== 'function') return response.blob();
+
+  const total = trustedByteTotal(response);
+  const report = (loaded) => {
+    try { opts.onProgress(loaded, total); } catch { /* a broken listener must not stop the bytes */ }
+  };
+  report(0);
+
+  if (!response.body || typeof TransformStream !== 'function') {
+    try {
+      const blob = await response.blob();
+      report(blob.size);
+      return blob;
+    } catch (error) {
+      if (opts.signal && opts.signal.aborted) throw downloadAborted();
+      throw error;
+    }
+  }
+
+  let received = 0;
+  const counter = new TransformStream({
+    transform(chunk, controller) {
+      received += chunk && typeof chunk.byteLength === 'number' ? chunk.byteLength : 0;
+      report(received);
+      controller.enqueue(chunk);
+    },
+  });
+  try {
+    // Response(stream).blob() lets the browser accumulate the bytes. Holding the
+    // chunks in an array here would double a 2 GiB download in JS memory.
+    const streamed = response.body.pipeThrough(counter);
+    const wrapped = new Response(streamed, {
+      status: response.status,
+      statusText: response.statusText,
+      headers: response.headers,
+    });
+    const blob = await wrapped.blob();
+    if (opts.signal && opts.signal.aborted) throw downloadAborted();
+    // A trusted Content-Length is a promise about the body. A proxy that drops
+    // the socket can close the stream early; saving that short blob as the file
+    // would silently truncate it.
+    if (total !== null && received !== total) throw new ApiError('下载中断，请重新下载。', { code: 'NETWORK_ERROR' });
+    if (received !== blob.size && total === null) report(blob.size);
+    return blob;
+  } catch (error) {
+    if (opts.signal && opts.signal.aborted) throw downloadAborted();
+    if (error && error.name === 'AbortError') throw error;
+    if (error instanceof ApiError) throw error;
+    throw new ApiError('下载中断，请重新下载。', { code: 'NETWORK_ERROR' });
+  }
 }
 
 /** Save a Blob under a filename without leaking the object URL. */
@@ -196,11 +278,9 @@ export function saveBlob(blob, filename) {
   setTimeout(() => URL.revokeObjectURL(url), 20000);
 }
 
-/** Download an authenticated file through the API (adds the bearer header). */
-export async function downloadNode(node) {
-  const blob = await fetchBlob(contentUrl(node.id, { download: true }));
-  saveBlob(blob, node.name);
-}
+/* The one-shot downloadNode() helper is gone: every download now goes through
+   lib/downloads.js, which owns the task, its progress and its retry. A second
+   fire-and-forget path would be a second set of rules for the same bytes. */
 
 /**
  * XHR raw upload: fetch has no upload progress events, so the two PUT flows

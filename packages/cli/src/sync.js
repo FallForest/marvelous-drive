@@ -1,6 +1,6 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { createReadStream } from 'node:fs';
-import { mkdir, readdir, readFile, rename, stat, unlink, writeFile } from 'node:fs/promises';
+import { mkdir, readdir, readFile, rename, rm, stat, unlink, writeFile } from 'node:fs/promises';
 import { dirname, join, posix, relative, sep } from 'node:path';
 import { CliError, EXIT } from './errors.js';
 import { configDirectory } from './config.js';
@@ -102,6 +102,9 @@ export async function scanLocal(root, { cache = {}, rehash = false, onProgress }
       // Symlinks are skipped rather than followed: following one can walk out of
       // the tree, and on Windows a junction can loop.
       if (!entry.isFile()) continue;
+      // A staging file left behind by a killed run is not user data; uploading it
+      // would duplicate a download under a hidden name.
+      if (isSyncStagingName(entry.name)) continue;
       const info = await stat(absolute);
       const cached = cache[rel];
       let sha256;
@@ -258,15 +261,126 @@ export function planSync({ local, remote, baseline }) {
   return ops;
 }
 
+/* ── direction ─────────────────────────────────────────────────────────── */
+
+/**
+ * The only three directions the CLI actually implements.
+ *
+ * Direction names the side a change may be *written to*: `up` writes to the
+ * remote (uploads, and deleting a remote node because its local copy is gone),
+ * `down` writes to the local tree (downloads, and deleting a local file because
+ * its remote node is gone), `both` allows either.
+ *
+ * Deletion still needs its own `--delete`, because direction says *where* a
+ * change may travel, not *whether* an absence is meant as a deletion. A deletion
+ * that belongs to the other direction is skipped rather than performed — that is
+ * exactly how "mdrive sync --direction upload --delete" used to delete a local
+ * file when the remote copy disappeared.
+ */
+export const DIRECTIONS = Object.freeze(['up', 'down', 'both']);
+
+/**
+ * Legacy spellings, mapped onto the restricted modes they always claimed to be.
+ *
+ * `upload` was accepted before `up` existed and then skipped the filter, so a
+ * run that said "upload only" also downloaded (and, with `--delete`, deleted
+ * locally). It is kept only because scripts exist; it now means exactly `up`
+ * and `download` means exactly `down`.
+ */
+const DIRECTION_ALIASES = new Map([
+  ['upload', 'up'],
+  ['download', 'down'],
+]);
+
+/** Canonical direction, or undefined for a value the CLI does not implement. */
+export function normalizeDirection(value) {
+  const raw = value === undefined ? 'both' : String(value).trim().toLowerCase();
+  const canonical = DIRECTION_ALIASES.get(raw) ?? raw;
+  return DIRECTIONS.includes(canonical) ? canonical : undefined;
+}
+
+/**
+ * Restricts a plan to the requested direction and resolves deletions.
+ *
+ * Shared by `--dry-run` and the real run on purpose: the printed plan has to be
+ * the plan that executes, including "would delete" versus "reports only". A
+ * dry-run that promises a download the real run skips is worse than no dry-run.
+ *
+ * A direction never changes bytes in the other direction: a skipped operation is
+ * reported (so the operator sees the whole picture) and leaves no baseline row
+ * to be mistaken for convergence.
+ */
+export function restrictPlan(ops, { direction = 'both', delete: allowDelete = false } = {}) {
+  const canUpload = direction !== 'down';
+  const canDownload = direction !== 'up';
+  return ops.map((op) => {
+    if (op.action === 'upload' && !canUpload) {
+      return { ...op, action: 'skipped', reason: 'direction-down' };
+    }
+    if (op.action === 'download' && !canDownload) {
+      return { ...op, action: 'skipped', reason: 'direction-up' };
+    }
+    // A local deletion is an upload-direction change (it removes the remote
+    // node). A remote deletion is a download-direction change (it removes the
+    // local file). Getting these two swapped is the bug that let `up --delete`
+    // delete a local file after its remote copy disappeared.
+    if (op.action === 'local-deleted' && !canUpload) {
+      return { ...op, action: 'skipped', reason: 'direction-down' };
+    }
+    if (op.action === 'remote-deleted' && !canDownload) {
+      return { ...op, action: 'skipped', reason: 'direction-up' };
+    }
+    if ((op.action === 'remote-deleted' || op.action === 'local-deleted') && !allowDelete) {
+      return { ...op, action: 'pending-delete' };
+    }
+    return op;
+  });
+}
+
 /** Counts the plan into the summary the CLI prints before doing anything. */
 export function summarize(ops) {
-  const summary = { unchanged: 0, upload: 0, download: 0, conflict: 0, 'remote-deleted': 0, 'local-deleted': 0, forget: 0, bytesUp: 0, bytesDown: 0 };
+  const summary = { unchanged: 0, upload: 0, download: 0, conflict: 0, 'remote-deleted': 0, 'local-deleted': 0, 'pending-delete': 0, skipped: 0, forget: 0, bytesUp: 0, bytesDown: 0 };
   for (const op of ops) {
     summary[op.action] = (summary[op.action] ?? 0) + 1;
     if (op.action === 'upload') summary.bytesUp += op.size ?? 0;
     if (op.action === 'download') summary.bytesDown += op.size ?? 0;
   }
   return summary;
+}
+
+const SYNC_STAGING_PREFIX = '.mdrive-sync-';
+const SYNC_STAGING_SUFFIX = '.sync-part';
+// Fully anchored on the exact prefix and a UUID: a name this module did not
+// create is never ignored. Matching loosely on the suffix alone would hide a
+// user's own `...<uuid>.sync-part` (or any long file) from the scan, which is
+// silent data loss on the remote side — worse than uploading a leftover.
+// The optional tail also matches the transfer layer's own
+// `<staging>.<pid>.part`, so a killed run cannot leave either file looking
+// like user data on the next scan.
+const SYNC_STAGING_PATTERN = /^\.mdrive-sync-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.sync-part(?:\.\d+\.part)?$/;
+
+/**
+ * A staging path in the *same directory* as the final file.
+ *
+ * Same directory is required for the rename to be atomic (a rename across
+ * volumes is a copy, and a crash mid-copy is the partial file this whole dance
+ * exists to avoid). A random UUID rather than a constant one, so two syncs of
+ * sibling paths — or a leftover from a killed run — cannot collide.
+ *
+ * The name is a constant length and does not embed the destination's basename:
+ * NTFS caps a *single* path component at 255 characters, and a legal 221-char
+ * file name plus a basename copy, a UUID and a suffix is 268, so every download
+ * of a long-named file failed with ENOENT before writing a byte. Keeping the
+ * staging name short and constant also means the transfer layer's own
+ * `.<pid>.part` tail can never push it over that limit.
+ */
+export function temporaryPathFor(destination) {
+  return join(dirname(destination), SYNC_STAGING_PREFIX + randomUUID() + SYNC_STAGING_SUFFIX);
+}
+
+/** True for a name this module creates while staging a download. */
+export function isSyncStagingName(name) {
+  return SYNC_STAGING_PATTERN.test(name);
 }
 
 /* ── execution ─────────────────────────────────────────────────────────── */
@@ -345,6 +459,8 @@ export async function executePlan(client, {
     }
     if (op.action === 'forget') { delete next[op.rel]; continue; }
     if (op.action === 'conflict') { result.conflicts.push(op); continue; }
+    if (op.action === 'skipped') continue; // out of the chosen direction: nothing moved, nothing recorded
+    if (op.action === 'pending-delete') { result.pendingDeletes.push(op); continue; }
 
     // A remote file whose version moved since the baseline is exactly the
     // "someone else wrote here" case. Refusing now is the only non-destructive
@@ -392,16 +508,30 @@ export async function executePlan(client, {
       if (op.action === 'download') {
         const destination = join(localRoot, ...op.rel.split('/'));
         await mkdir(dirname(destination), { recursive: true });
-        await client.download('/files/' + encodeURIComponent(op.remoteId) + '/content', { destination });
-        const sha256 = await hashFile(destination);
-        if (op.remoteSha && sha256 !== op.remoteSha) {
-          throw new CliError('Downloaded ' + op.rel + ' does not hash to the remote digest; the file on disk may be truncated.',
-            EXIT.ERROR, { code: 'CHECKSUM_MISMATCH' });
+        // Download next to the destination, never onto it. The response is
+        // unverified bytes until the hash is checked, so publishing it first and
+        // hashing the destination afterwards would let a corrupt body destroy a
+        // good local file — the exact failure this staging step prevents.
+        const temporary = temporaryPathFor(destination);
+        try {
+          await client.download('/files/' + encodeURIComponent(op.remoteId) + '/content', { destination: temporary });
+          const sha256 = await hashFile(temporary);
+          if (op.remoteSha && sha256 !== op.remoteSha) {
+            throw new CliError('Downloaded ' + op.rel + ' does not hash to the remote digest; the existing local file was left untouched.',
+              EXIT.ERROR, { code: 'CHECKSUM_MISMATCH' });
+          }
+          // Same-filesystem rename: either the old file or the verified new one
+          // is visible at `destination`, never a partial response.
+          await rename(temporary, destination);
+          next[op.rel] = { sha256: sha256 ?? op.remoteSha, size: op.size, remoteId: op.remoteId, version: op.remoteVersion };
+          result.downloaded += 1;
+          result.bytesDown += op.size ?? 0;
+          log('down ' + op.rel + '  (' + (op.reason ?? 'changed') + ')');
+        } finally {
+          // Covers the mismatch, a failed request, and a failed rename. Best
+          // effort: a leftover staging file must not mask the real error.
+          await rm(temporary, { force: true }).catch(() => {});
         }
-        next[op.rel] = { sha256: sha256 ?? op.remoteSha, size: op.size, remoteId: op.remoteId, version: op.remoteVersion };
-        result.downloaded += 1;
-        result.bytesDown += op.size ?? 0;
-        log('down ' + op.rel + '  (' + (op.reason ?? 'changed') + ')');
         continue;
       }
 
@@ -416,7 +546,14 @@ export async function executePlan(client, {
         if (op.action === 'remote-deleted') {
           // Unchanged locally, gone remotely → the remote deletion wins.
           const absolute = join(localRoot, ...op.rel.split('/'));
-          await unlink(absolute).catch(() => {});
+          try {
+            await unlink(absolute);
+          } catch (error) {
+            // Already absent is convergence; anything else (EACCES, EBUSY, a
+            // directory where a file used to be) is a real failure and must not
+            // be counted as deleted or recorded as synced.
+            if (error?.code !== 'ENOENT') throw error;
+          }
           result.deletedLocal += 1;
           log('del  local  ' + op.rel);
         } else {
@@ -449,6 +586,8 @@ export const REASON_TEXT = {
   'deleted-remotely-but-changed-locally': 'deleted remotely, edited locally',
   'deleted-locally-but-changed-remotely': 'deleted locally, edited remotely',
   'remote-version-moved': 'remote version moved during the run',
+  'direction-up': 'not propagated: --direction up only moves local→remote',
+  'direction-down': 'not propagated: --direction down only moves remote→local',
   'gone-remotely': 'missing remotely',
   'gone-locally': 'missing locally',
 };

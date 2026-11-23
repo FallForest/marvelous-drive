@@ -327,6 +327,9 @@ body.is-moving .frow,body.is-moving .gcard{cursor:grabbing}
 .preview-nav{display:flex;align-items:center;gap:2px;flex:0 0 auto}
 .preview-gesture-hint{display:none}
 .preview-body.is-gallery{touch-action:pan-y pinch-zoom;overscroll-behavior-x:contain}
+/* While the picture is enlarged, a finger pans the picture — not the drawer.
+   pinch-zoom stays: the browser's own two-finger page zoom is never removed. */
+.preview-body.is-zoomed{touch-action:pinch-zoom;overscroll-behavior:contain}
 .preview-body.is-page-zoomed{touch-action:auto}
 /* The control stays focusable at the ends (no `disabled`) so the keyboard never
    loses its place; this is the visual half of that decision. */
@@ -345,6 +348,46 @@ body.is-moving .frow,body.is-moving .gcard{cursor:grabbing}
   max-width:100%;max-height:100%;width:auto;height:auto;object-fit:contain;
   display:block;border-radius:var(--radius-sm);
   animation:motion-fade-in var(--duration-fast) var(--ease-standard) backwards;
+}
+/* ── picture zoom ────────────────────────────────────────────────
+ * 100% is the fitted picture; the zoom layer only multiplies that box, so the
+ * decoded bitmap is never re-fetched or re-decoded at a larger size. At fit the
+ * picture keeps the gallery's pan-y/pinch-zoom contract; once zoomed the frame
+ * owns one-finger panning (touch-action:none) and the gallery swipe is disabled
+ * in JS, so a drag can never page the gallery by accident. pinch-zoom is NOT
+ * removed, so the browser's own two-finger page zoom keeps working.
+ */
+.preview-zoom{
+  flex:none;display:flex;align-items:center;justify-content:center;gap:6px;flex-wrap:wrap;
+  padding:8px 12px;border-top:1px solid var(--border-soft);background:var(--surface);
+}
+.preview-zoom[hidden]{display:none}
+.preview-zoom .btn{height:26px;min-width:44px;padding:0 8px}
+.preview-zoom .btn svg{width:13px;height:13px}
+.preview-zoom .zoom-fit{min-width:auto}
+.preview-zoom .zoom-step[aria-disabled="true"]{opacity:.35;cursor:default}
+.zoom-value{
+  min-width:44px;text-align:center;font-size:var(--fs-xs);color:var(--text-muted);
+  font-variant-numeric:tabular-nums;
+}
+.picture-frame{cursor:grab}
+/* While zoomed the frame owns one-finger panning, so the browser must not also
+   pan the page — but pinch-zoom stays allowed: the browser's own two-finger page
+   zoom is a promise this viewer keeps at every multiplier. */
+.picture-frame.is-zoomed{cursor:grab;touch-action:pinch-zoom}
+.picture-frame.is-panning{cursor:grabbing}
+.picture-frame.is-zoomed .picture-canvas,
+.picture-frame.is-zoomed .preview-media{
+  /* The fitted box is the base: scale is applied inline. Transform origin stays
+     centred so the pan limits are symmetric on both axes. No permanent
+     will-change: a scale change is already compositor-friendly, and promoting a
+     photograph for the whole session costs memory the drawer does not have. */
+  transform-origin:center center;
+}
+@media (prefers-reduced-motion:reduce){
+  /* Panning is direct manipulation, not decoration: no easing either way. */
+  .picture-frame.is-zoomed .picture-canvas,
+  .picture-frame.is-zoomed .preview-media{transition:none}
 }
 /* The 96px row thumbnail, stretched and blurred: free (already in the row
    cache) and it gives the eye the right colours while the picture decodes. */
@@ -392,10 +435,17 @@ body.is-moving .frow,body.is-moving .gcard{cursor:grabbing}
 .preview-meta dt{color:var(--text-faint)}
 .preview-meta dd{margin:0;color:var(--text-secondary);overflow:hidden;text-overflow:ellipsis}
 
-/* ═══ upload queue ═════════════════════════════════════════════ */
+/* ═══ upload queue ═════════════════════════════════════════════
+ * The upload queue and the download center (styles/downloads.css) are the same
+ * surface in two places: one task per row, a name at reading size, a state and
+ * detail line one step below it, one 4px progress slot, and a 46px header that
+ * holds the batch summary. The expanded panel is 432px wide on a desktop —
+ * enough for a batch line without becoming a dialog — and drops to the viewport
+ * (minus 6–10px of edge) on a phone. Keeping the two files in step is what
+ * makes a download and an upload read as the same kind of task. */
 .queue{
   position:fixed;right:16px;bottom:34px;z-index:calc(var(--z-panel) + 1);
-  width:min(330px,calc(100vw - 32px));
+  width:min(432px,calc(100vw - 32px));
   display:flex;flex-direction:column;
   background:var(--surface-2);border:1px solid var(--border-strong);
   border-radius:var(--radius-md);box-shadow:var(--shadow-modal);
@@ -404,29 +454,61 @@ body.is-moving .frow,body.is-moving .gcard{cursor:grabbing}
   animation:motion-rise-in var(--duration-base) var(--ease-spring-snappy) backwards;
 }
 .queue[hidden]{display:none}
-.queue-head{display:flex;align-items:center;gap:8px;height:32px;padding:0 6px 0 10px;border-bottom:1px solid var(--border)}
-.queue-head b{font-size:var(--fs-sm);font-weight:600}
-.queue-head span{font-size:var(--fs-xs);color:var(--text-muted)}
-.queue-total{display:flex;flex-direction:column;gap:5px;padding:7px 10px 8px;border-bottom:1px solid var(--border-soft)}
+.queue-head{display:flex;align-items:center;gap:9px;height:46px;padding:0 8px 0 14px;border-bottom:1px solid var(--border)}
+.queue-head b{font-size:var(--fs-base);font-weight:600}
+.queue-head span{font-size:var(--fs-sm);color:var(--text-muted)}
+/* The summary is the one flexible item in the header: a long batch line ("已完成
+   3/8 · 1 个失败") must truncate, never squeeze the three icon buttons out of the
+   panel. 320px is the width this rule exists for. */
+.queue-head .qsummary{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:0 1 auto}
+.queue-head .push{margin-left:auto}
+.queue-head .icon-btn{flex:0 0 auto}
+.queue-total{display:flex;flex-direction:column;gap:6px;padding:9px 14px 10px;border-bottom:1px solid var(--border-soft)}
 .queue-total[hidden]{display:none}
-.qmeta{font-size:10px;color:var(--text-faint);font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-/* The batch bar sits above the rows and is thicker than a row bar: it is the
-   only element that answers "how far along is the whole drop". */
-.qbar.qbar-total{grid-column:auto;height:3px;margin-top:0}
-.queue-list{max-height:min(38vh,290px);overflow:auto;padding:4px;display:flex;flex-direction:column;gap:2px}
-.qitem{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:4px 8px;padding:6px 7px;border-radius:var(--radius-xs);transition:var(--transition-colors)}
+.qmeta{font-size:var(--fs-sm);color:var(--text-faint);font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+/* The batch bar sits above the rows and is the same 4px slot as a row bar: it is
+   the only element that answers "how far along is the whole drop". */
+.qbar.qbar-total{grid-column:auto;height:4px;margin-top:0}
+.queue-list{max-height:min(40vh,320px);overflow:auto;padding:6px;display:flex;flex-direction:column;gap:6px;overflow-x:hidden;overscroll-behavior:contain}
+/* Two columns: the readable sentence, then the live actions. The progress bar is
+   the full-width row underneath. minmax(0,1fr) is what lets the name and the
+   reason line wrap instead of widening the panel at 320px. */
+.qitem{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:4px 8px;padding:8px 9px;border-radius:var(--radius-xs);transition:var(--transition-colors)}
 .qitem:hover{background:var(--hover)}
-.qitem .qname{font-size:var(--fs-xs);color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.qitem .qstate{font-size:10px;color:var(--text-faint);font-variant-numeric:tabular-nums;white-space:nowrap}
-.qitem .qstate.is-error{color:var(--danger)}
-.qitem .qstate.is-done{color:var(--success)}
-.qbar{grid-column:1/-1;height:2px;border-radius:1px;background:var(--surface-3);overflow:hidden;margin-top:3px}
+.qitem .qmain{min-width:0;display:flex;flex-direction:column;gap:3px}
+/* A real filename is often longer than 432px, and a truncated one is the same
+   three characters for every file in the folder. It gets two lines and then
+   stops, so one pathological name cannot push the actions out of reach. */
+.qitem .qname{
+  font-size:var(--fs-base);color:var(--text);line-height:1.4;
+  overflow-wrap:anywhere;
+  display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;line-clamp:2;
+  overflow:hidden;
+}
+/* State + reason share one wrapping line. On a wide panel it reads as
+   "上传中 · 3.2 MB / 9.0 MB · 1.2 MB/s · 剩余 4s"; on 320px the reason simply
+   moves under the state word. */
+.qitem .qline{display:flex;flex-wrap:wrap;align-items:baseline;gap:3px 8px;min-width:0}
+.qitem .qstate{font-size:var(--fs-sm);color:var(--text-muted);font-variant-numeric:tabular-nums;white-space:nowrap;flex:0 0 auto}
+.qitem .qdetail{
+  font-size:var(--fs-sm);color:var(--text-faint);font-variant-numeric:tabular-nums;
+  min-width:0;overflow-wrap:anywhere;line-height:1.5;
+}
+.qitem .qstate.is-error,.qitem .qdetail.is-error{color:var(--danger)}
+.qitem .qstate.is-done,.qitem .qdetail.is-done{color:var(--success)}
+.qitem .qstate.is-warning,.qitem .qdetail.is-warning{color:var(--warning)}
+.qitem .qdetail.is-muted{color:var(--text-faint)}
+.qbar{grid-column:1/-1;height:4px;border-radius:2px;background:var(--surface-3);overflow:hidden;margin-top:2px}
 /* Progress is a transform, not a width: a bar that animates width relayouts
    the row on every progress event (several per second during an upload).
    transform-origin:left + scaleX keeps the 1px radius honest at 100%. */
 .qbar i{display:block;height:100%;width:100%;background:var(--accent);transform:scaleX(0);transform-origin:left center;transition:transform var(--duration-fast) var(--ease-standard)}
 .qitem.is-error .qbar i{background:var(--danger)}
 .qitem.is-done .qbar i{background:var(--success)}
+.qitem.is-canceled .qbar i{background:var(--text-faint);opacity:.5}
+/* Transfer finished, node not committed yet: the accent gives way to warning so
+   a full bar cannot read as success while the server is still closing. */
+.qitem.is-finalizing .qbar i{background:var(--warning)}
 .qitem.is-resumable .qbar i{background:var(--warning);opacity:.7}
 .qitem .qstate.is-resumable{color:var(--warning)}
 /* 24px, not 18: the queue row carries three or four actions side by side and
@@ -441,7 +523,32 @@ body.is-moving .frow,body.is-moving .gcard{cursor:grabbing}
 /* gap:4px is the floor that keeps centre-to-centre at 24+4, not the old 18+1;
    the ring stays visible because the extra padding is real, not clipped. */
 .qactions{display:flex;align-items:center;gap:4px;flex-wrap:wrap;justify-content:flex-end;row-gap:4px}
+.qactions[hidden]{display:none}
 .qitem .qactions .icon-btn:focus-visible{outline:2px solid var(--focus-ring);outline-offset:1px}
+
+/* The folded entrance. Firefox's downloads button is a single small control
+   that only says "come back", and that is exactly the job here: it sits where
+   the panel sits, is 44px tall (a touch target, not a 24px chip) and stays as
+   narrow as its icon + one truncated line allow. The full batch summary needs
+   the expanded panel's width, not this corner — the label is clipped rather
+   than allowed to stretch the chip across the viewport. */
+.queue-launcher{
+  position:fixed;right:16px;bottom:34px;z-index:calc(var(--z-panel) + 1);
+  display:inline-flex;align-items:center;gap:7px;max-width:min(224px,calc(100vw - 32px));
+  min-height:44px;padding:0 10px 0 12px;
+  background:var(--surface-2);border:1px solid var(--border-strong);
+  border-radius:var(--radius-md);box-shadow:var(--shadow-modal);
+  color:var(--text-secondary);font-size:var(--fs-sm);
+  transition:var(--transition-surface);
+}
+.queue-launcher[hidden]{display:none}
+.queue-launcher:hover{background:var(--surface-3);color:var(--text);border-color:var(--control-border)}
+.queue-launcher:focus-visible{outline:2px solid var(--focus-ring);outline-offset:2px}
+.queue-launcher svg{flex:0 0 auto;color:var(--text-muted)}
+.queue-launcher .qlaunch-text{
+  min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+  font-variant-numeric:tabular-nums;
+}
 
 /* ═══ move picker ═════════════════════════════════════════════ */
 .move-list{display:flex;flex-direction:column;gap:1px;max-height:min(44vh,340px);overflow:auto;padding:4px;border:1px solid var(--border);border-radius:var(--radius-sm);background:var(--surface-2)}
@@ -505,6 +612,11 @@ body.is-moving .frow,body.is-moving .gcard{cursor:grabbing}
   .preview-drawer .drawer-foot{flex-wrap:wrap;padding-bottom:max(10px,env(safe-area-inset-bottom));padding-left:max(12px,env(safe-area-inset-left));padding-right:max(12px,env(safe-area-inset-right))}
   .preview-drawer .drawer-foot .btn{min-height:44px}
   .preview-gesture-hint:not([hidden]){display:block;flex:none;text-align:center;padding:8px 12px;margin:0;color:var(--text-muted);font-size:var(--fs-xs)}
+  /* The zoom row is a touch surface on a phone: 44px targets, and the row may
+     wrap rather than push the drawer wider than the screen. */
+  .preview-zoom{padding:6px 10px;justify-content:space-between}
+  .preview-zoom .btn{min-height:44px;min-width:44px;padding:0 12px}
+  .preview-zoom .zoom-fit{min-height:44px;flex:1 1 auto}
   .nav-toggle{display:inline-flex}
   /* two columns on small screens: name + a compact meta line, no star column
      (starring stays available from the row menu and the grid card) */
@@ -522,7 +634,7 @@ body.is-moving .frow,body.is-moving .gcard{cursor:grabbing}
   .toolbar .seg-label{display:none}
   .list{padding:0 4px 24px}
   .grid{padding:10px 12px 28px;grid-template-columns:repeat(auto-fill,minmax(132px,1fr))}
-  .queue{right:10px;bottom:32px}
+  .queue{right:10px;bottom:32px;width:min(432px,calc(100vw - 20px))}
   .toast-stack{right:10px;bottom:32px}
   .drawer{width:100vw}
 }
@@ -535,7 +647,14 @@ body.is-moving .frow,body.is-moving .gcard{cursor:grabbing}
   .statusbar{gap:10px;font-size:10px}
   .statusbar span:last-child{display:none}
   .hint-card{display:none}
-  .queue{left:10px;right:10px;width:auto}
+  .queue{left:10px;right:10px;width:auto;bottom:max(24px,env(safe-area-inset-bottom))}
+  /* Touch widths get the same 28px row actions the download panel uses: 24px
+     is a pointer floor, not a fingertip target. */
+  .qitem .icon-btn{width:28px;height:28px;min-width:28px;min-height:28px}
+  .qitem .icon-btn svg{width:14px;height:14px}
+  /* The folded entry stays a corner chip, not a bar: it exists to bring the
+     panel back, and the batch summary belongs inside the panel it opens. */
+  .queue-launcher{right:10px;left:auto;max-width:min(200px,calc(100vw - 20px));bottom:max(24px,env(safe-area-inset-bottom))}
 }
 /* ── 320px phones (and anything narrower than 360) ──────────────
  * The old stylesheet pinned the page to 360px, so a 320px viewport scrolled
@@ -570,7 +689,22 @@ body.is-moving .frow,body.is-moving .gcard{cursor:grabbing}
   .frow .more svg{width:15px;height:15px}
   .grid{padding:8px 8px 24px;grid-template-columns:repeat(auto-fill,minmax(112px,1fr));gap:8px}
   .section-head{padding:12px 10px 4px}
-  .queue{left:6px;right:6px}
+  .queue{left:6px;right:6px;bottom:max(18px,env(safe-area-inset-bottom))}
+  /* 320px: the panel spans the screen inside the 6px safe edge; the folded chip
+     keeps to the corner, gives the zoom row its own line, and never widens the
+     viewport. */
+  .queue-launcher{left:auto;right:6px;max-width:min(184px,calc(100vw - 12px));bottom:max(18px,env(safe-area-inset-bottom))}
+  .queue-list{max-height:min(34vh,240px)}
+  .queue-head{padding:0 6px 0 10px}
+  .queue-total{padding:8px 10px 9px}
+  .qitem{padding:7px 8px}
+  .qitem .icon-btn{width:28px;height:28px;min-width:28px;min-height:28px}
+  .qitem .icon-btn svg{width:14px;height:14px}
+  .qactions{gap:5px}
+  .preview-zoom{gap:4px;padding:6px 6px}
+  .preview-zoom .btn{min-width:44px;padding:0 6px}
+  .preview-zoom .zoom-fit{flex:1 1 auto;min-height:44px}
+  .zoom-value{min-width:40px}
   .toast-stack{left:6px;right:6px;max-width:none;align-items:stretch}
   .toast{min-width:0}
   .auth-shell{padding:16px}

@@ -516,5 +516,18 @@ because they decide whether data survives:
 - **The baseline advances only for successes**, so a failed path is retried rather
   than remembered as "in sync".
 
-`--direction up|down|both` restricts which side may move; `--dry-run` prints the
-plan and writes nothing; `--rehash` ignores the local size+mtime cache.
+`--direction up|down|both` names the side a change may be written to, and every
+other operation is reported as `SKIPPED` rather than performed:
+
+- `up` uploads and deletes remote nodes whose local copy is gone;
+- `down` downloads and deletes local files whose remote node is gone;
+- `both` (the default) does either.
+
+Direction does not imply deletion: `--delete` is still required, and a deletion
+that belongs to the other direction is never performed. `--dry-run` prints the
+plan and writes nothing, and it is the same plan the real run executes;
+`--rehash` ignores the local size+mtime cache.
+
+A download is staged in a temporary file next to its destination and renamed into
+place only after its sha256 matches the remote `blobHash`, so a corrupt response
+leaves the previous local file and the baseline untouched.

@@ -94,7 +94,21 @@ this the same photo".
 | Gone locally, unchanged remotely | reported; only deleted with `--delete` |
 
 Every upload re-checks the remote version first, so a file that moved under the
-run becomes a conflict instead of a silent overwrite. The baseline lives in
+run becomes a conflict instead of a silent overwrite. Every download is staged
+in a temporary file in the target directory and renamed into place only after its
+sha256 matches the remote digest: a corrupt or truncated response leaves the
+previous local file and the baseline untouched, and the next run retries it.
+
+`--direction up` writes to the drive only (uploads, plus deleting a remote node
+whose local copy is gone); `--direction down` writes to the local folder only
+(downloads, plus deleting a local file whose remote node is gone); `both` is the
+default. Operations in the other direction are reported as `SKIPPED`, never
+performed, and `--dry-run` prints exactly the plan that would execute.
+`--delete` is still required for either deletion — direction only says where a
+change may travel. `--direction upload` and `--direction download` are legacy
+aliases for `up` and `down` and are restricted identically.
+
+The baseline lives in
 `~/.config/mdrive/sync/<key>.json` (one per server + local folder + remote path)
 and only advances for paths that actually succeeded — a failed upload is retried
 next run, never mistaken for "in sync".

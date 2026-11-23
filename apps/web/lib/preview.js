@@ -21,6 +21,7 @@ import {
 import { createImageCache } from './image-cache.js';
 import { imageRequestUrl, loadPicture } from './image-loader.js';
 import { attachGallerySwipe } from './gallery-gesture.js';
+import { createImageZoom } from './image-zoom.js';
 import { canEditText, openTextEditor } from './text-editor.js';
 
 const TEXT_PREVIEW_LIMIT = 2 * 1024 * 1024; // 2 MiB of text is plenty for a peek
@@ -87,6 +88,8 @@ export function openPreview(node, options) {
   let disposed = false;
   let paintRevision = 0;
   let swipe = null;
+  /** True only while the body holds a picture whose zoom may be used. */
+  let zoomable = false;
   /** Pending picture requests: { controller, targetIndex }. See cancelPrefetch(). */
   const inflight = new Set();
   const track = (controller, targetIndex) => {
@@ -129,10 +132,86 @@ export function openPreview(node, options) {
   }, raw(icon('pencil', 14)), '编辑文本');
   const gestureHint = h('p', { class: 'preview-gesture-hint', text: '左右滑动切换照片，也可点按上方箭头' });
 
+  /*
+   * Zoom controls.
+   *
+   * Three explicit verbs and a visible multiplier: 缩小 / 适应窗口 / 放大. The
+   * multiplier is relative to the fitted picture (100% = fit), so the number
+   * means the same thing on a phone and on a wide drawer. aria-disabled is used
+   * at the ends instead of `disabled`: a disabled button loses focus and the
+   * keyboard user is stranded. The real <button>s keep these operable by
+   * keyboard for free.
+   */
+  const zoomOutBtn = h('button', {
+    class: 'btn btn-sm zoom-step',
+    attrs: { type: 'button', 'aria-label': '缩小图片', title: '缩小' },
+    on: { click: () => zoom.zoomOut() },
+  }, raw(icon('minus', 13)));
+  const zoomFitBtn = h('button', {
+    class: 'btn btn-sm zoom-fit',
+    attrs: { type: 'button', 'aria-label': '适应窗口', title: '适应窗口' },
+    on: { click: () => zoom.reset() },
+  }, '适应窗口');
+  const zoomInBtn = h('button', {
+    class: 'btn btn-sm zoom-step',
+    attrs: { type: 'button', 'aria-label': '放大图片', title: '放大' },
+    on: { click: () => zoom.zoomIn() },
+  }, raw(icon('plus', 13)));
+  const zoomValue = h('span', {
+    class: 'zoom-value',
+    // The visible number is the state; the live region below speaks a change
+    // once, so dragging a wheel does not narrate every intermediate stop.
+    attrs: { 'aria-hidden': 'true' },
+    text: '100%',
+  });
+  const zoomAnnounce = h('span', { class: 'visually-hidden zoom-announce', attrs: { role: 'status', 'aria-live': 'polite' } });
+  let zoomAnnounceTimer = 0;
+  const zoomBar = h('div', {
+    class: 'preview-zoom', attrs: { hidden: 'hidden', role: 'group', 'aria-label': '图片缩放' },
+  }, zoomOutBtn, zoomFitBtn, zoomInBtn, zoomValue);
+
+  const zoom = createImageZoom({
+    onChange: (state) => {
+      if (disposed) return;
+      const usable = zoomable && state.ready;
+      if (usable) zoomBar.removeAttribute('hidden');
+      else zoomBar.setAttribute('hidden', 'hidden');
+      zoomValue.textContent = state.label;
+      const atFit = !state.zoomed;
+      zoomOutBtn.setAttribute('aria-disabled', atFit ? 'true' : 'false');
+      zoomOutBtn.classList.toggle('is-disabled', atFit);
+      const atMax = state.scale >= 4 - 1e-3;
+      zoomInBtn.setAttribute('aria-disabled', atMax ? 'true' : 'false');
+      zoomInBtn.classList.toggle('is-disabled', atMax);
+      body.classList.toggle('is-zoomed', usable && state.zoomed);
+      // The wheel fires dozens of changes a second; one settled sentence per
+      // gesture is useful, forty intermediate multipliers are noise. The live
+      // region sits outside the zoom bar so folding the bar cannot mute it.
+      if (zoomAnnounceTimer) clearTimeout(zoomAnnounceTimer);
+      zoomAnnounceTimer = setTimeout(() => {
+        zoomAnnounceTimer = 0;
+        if (!disposed && usable) zoomAnnounce.textContent = state.label;
+      }, 320);
+    },
+    // A drag or a wheel is not a photo change. Cancelling the pending swipe at
+    // the moment the gesture starts is what keeps a pan from paging the gallery.
+    onInteract: () => swipe?.cancel(),
+  });
+
+  // A picture is the one preview with no reading measure, so it asks for the
+  // viewport-sized layout in styles/photo-viewer.css. The decision comes from
+  // the node that OPENED the drawer: a gallery of pictures stays a picture
+  // viewer while arrowing, and a PDF, text, folder or Office drawer keeps the
+  // narrow reading panel. Single pictures and animated formats share the
+  // `image` kind, so a lone PNG and a GIF get the same treatment.
+  const photoClass = current.kind !== 'folder' && fileKind(current.mime, current.name) === 'image'
+    ? ' photo-viewer'
+    : '';
+
   const handle = drawer({
     title: current.name,
     sub: counted ? positionLabel(index, list.length) : '',
-    className: 'preview-drawer',
+    className: 'preview-drawer' + photoClass,
     headActions: [nav, h('button', downloadBtn())],
     // The stage is a flex column so the body can claim the leftover height: as a
     // plain block, `flex:1` on .preview-body is inert and a short picture sits
@@ -143,6 +222,8 @@ export function openPreview(node, options) {
       // aria-hidden decoration next to it.
       h('div', { class: 'visually-hidden preview-announce', attrs: { role: 'status', 'aria-live': 'polite' } }),
       body,
+      zoomBar,
+      zoomAnnounce,
       gestureHint,
     ),
     footer: [
@@ -167,6 +248,10 @@ export function openPreview(node, options) {
       for (const { controller } of inflight) controller.abort();
       inflight.clear();
       swipe?.destroy();
+      zoom.destroy();
+      if (zoomAnnounceTimer) clearTimeout(zoomAnnounceTimer);
+      zoomAnnounceTimer = 0;
+      zoomable = false;
       // Removing media nodes stops playback before their object URLs go away.
       for (const media of body.querySelectorAll('video,audio')) media.pause();
       body.replaceChildren();
@@ -187,7 +272,13 @@ export function openPreview(node, options) {
     event.preventDefault();
     step(delta);
   });
-  swipe = attachGallerySwipe(body, { enabled: () => !disposed && counted && isGalleryImage(current), onStep: step });
+  // A zoomed picture owns the horizontal gesture: one finger pans the enlarged
+  // photo, so the gallery swipe must stay off for as long as the multiplier is
+  // above fit. Resetting restores normal paging (see the is-zoomed gate).
+  swipe = attachGallerySwipe(body, {
+    enabled: () => !disposed && counted && isGalleryImage(current) && !zoom.zoomed,
+    onStep: step,
+  });
 
   function onFileChanged(updated) {
     if (disposed) return;
@@ -271,7 +362,12 @@ export function openPreview(node, options) {
     const revision = ++paintRevision;
     const gone = () => disposed || revision !== paintRevision;
     swipe?.cancel();
-    body.classList.remove('centered');
+    // A new picture starts fitted: 300% of the previous photo is meaningless
+    // here, and the controls must disappear while the next one loads.
+    zoom.detach();
+    zoomable = false;
+    zoomBar.setAttribute('hidden', 'hidden');
+    body.classList.remove('centered', 'is-zoomed');
     body.style.padding = '';
     const kind = current.kind === 'folder' ? 'folder' : fileKind(current.mime, current.name);
 
@@ -286,7 +382,20 @@ export function openPreview(node, options) {
       return;
     }
     if (kind === 'image') {
-      loadImage(current, body, { disposed: gone, objectUrls, track, untrack });
+      loadImage(current, body, {
+        disposed: gone,
+        objectUrls,
+        track,
+        untrack,
+        // The zoom layer binds to the frame only once a picture is actually
+        // painted, so a spinner, an error card or a non-picture never offers
+        // controls that cannot work.
+        onFrame: (frame) => {
+          if (!frame) { zoomable = false; zoom.detach(); return; }
+          zoomable = true;
+          zoom.attach(frame);
+        },
+      });
       prefetchNeighbours();
       return;
     }
@@ -396,6 +505,13 @@ async function loadImage(node, body, context) {
   // flight, and a captured boolean would always read "not closed".
   const gone = () => (typeof context.disposed === 'function' ? context.disposed() : !!context.disposed);
   const { objectUrls } = context;
+  // Every successful paint reports its frame so the zoom controls can bind to
+  // the element that is actually on screen; a failure reports null and the
+  // controls stay hidden. Never announced for a stale revision.
+  const painted = (frame) => {
+    if (gone()) return;
+    if (typeof context.onFrame === 'function') context.onFrame(frame);
+  };
 
   // An animated picture must NOT go through createImageBitmap(): a bitmap is a
   // single frame, so a GIF, an APNG or an animated WebP would be drawn once and
@@ -411,19 +527,24 @@ async function loadImage(node, body, context) {
       if (gone() || controller.signal.aborted) return;
       // No cache entry: a Blob held for an animation would pin the whole file,
       // and re-fetching a GIF is answered by the HTTP cache anyway.
-      mount(body, legacyImage(node, blob, objectUrls));
+      const frame = legacyImage(node, blob, objectUrls);
+      mount(body, frame);
+      painted(frame);
     } catch (error) {
       context.untrack(tracked);
       if (error && error.name === 'AbortError') return;
       if (gone()) return;
       mount(body, notice('无法载入图片。', (error && error.message) || '请重试。', 'file-image'));
+      painted(null);
     }
     return;
   }
 
   const cached = imageCache.get(pictureKey(node));
   if (cached) {
-    mount(body, pictureFrame(node, cached));
+    const frame = pictureFrame(node, cached);
+    mount(body, frame);
+    painted(frame);
     return;
   }
 
@@ -454,16 +575,21 @@ async function loadImage(node, body, context) {
     }
     if (bitmap) {
       storeBitmap(node, bitmap, blob ? blob.size : 0);
-      mount(body, pictureFrame(node, bitmap));
+      const frame = pictureFrame(node, bitmap);
+      mount(body, frame);
+      painted(frame);
       return;
     }
     // No createImageBitmap (or an undecodable format): the bytes are still here.
-    mount(body, legacyImage(node, blob, objectUrls));
+    const frame = legacyImage(node, blob, objectUrls);
+    mount(body, frame);
+    painted(frame);
   } catch (error) {
     context.untrack(tracked);
     if (error && error.name === 'AbortError') return;
     if (gone()) return;
     mount(body, notice('无法载入图片。', (error && error.message) || '请重试。', 'file-image'));
+    painted(null);
   }
 }
 

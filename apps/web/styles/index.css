@@ -6,6 +6,7 @@
  *   base    reset, page frame, shell geometry, auth screens
  *   components  buttons, fields, dialogs, drawers, menus, toasts
  *   app     drive surfaces: sidebar, list, preview, uploads, share page
+ *   downloads  the download center: topbar entry + its panel
  *
  * Each layer may only reference the ones above it. A component that needs a
  * new duration, curve or colour adds a token in tokens.css first — that is what
@@ -17,3 +18,4 @@
 @import './components.css';
 @import './app.css';
 @import './updates.css';
+@import './downloads.css';

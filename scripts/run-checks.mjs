@@ -24,6 +24,8 @@ const CHECKS = [
   ['browser-check', 'the shell: login, list, preview, trash, share, mobile'],
   ['click-check', 'the click model: click opens, checkbox selects'],
   ['gallery-check', 'the picture browser: arrows, counter, cache, no upscale'],
+  ['photo-viewer-check', 'the picture drawer geometry: frame, containment, no upscale'],
+  ['zoom-check', 'explicit picture zoom: fit / in / out, panning, reset on move'],
   ['mobile-preview-check', 'native touch photo navigation, mobile controls and media playback'],
   ['preview-race-check', 'late image decodes and animated picture rendering'],
   ['editor-check', 'explicit text editing, version conflicts and unsaved draft protection'],
@@ -41,7 +43,9 @@ const CHECKS = [
   ['storage-check', 'ZIP menu entry, storage breakdown, archives'],
   ['folder-check', 'a dropped entry tree keeps nesting and empty dirs'],
   ['share-check', 'anonymous Unicode previews, password links and completed downloads'],
+  ['download-check', 'the download center under a throttled link: progress, cancel, retry'],
   ['upload-check', 'picker, 9 MiB resumable session, batch bar, cancel'],
+  ['queue-panel-check', 'the folded queue, readable fail reasons and 320px layout'],
   ['resume-check', 'a reloaded page claims its live session and can discard it'],
   ['feel-check', 'runtime motion: press, stagger cap, VT flag'],
 ]

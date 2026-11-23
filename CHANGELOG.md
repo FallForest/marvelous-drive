@@ -6,6 +6,121 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.27.0] - 2026-11-24
+
+Downloads become a place, and a picture becomes a viewer.
+
+A click on a 2 GiB file used to give nothing back for minutes: the browser kept
+the bytes, the page kept nothing, and a failed or canceled transfer was a toast
+that scrolled away. Every transfer is now a task in one download center — a
+topbar entry with a count and a hairline of progress, a panel listing single
+files, batches and ZIP archives, and a retry per task that reuses the packaging
+work already done. In the same pass a photo stopped living in a 560px reading
+drawer: it opens a full-viewport viewer at original detail, with explicit zoom,
+and the upload queue stopped losing the user's 收起 on the next progress event.
+
+### Added
+
+- **A download center** (`apps/web/lib/downloads.js`). One topbar entry, one
+  panel, one queue shared by the row menu, the batch bar, the preview drawer and
+  both ZIP flows. A task reports what it actually knows — 正在打包 / 准备下载 /
+  正在传输 / 正在交给浏览器保存 — with a real percentage only when the response
+  carried a trustworthy length; a chunked or compressed body shows received bytes
+  on an indeterminate bar instead of a number that would pass 100%. Cancel aborts
+  the transport; retry runs again from the panel, and a settled task never
+  disappears into a toast.
+- **Progress on `fetchBlob`.** `apps/web/lib/api.js` counts the body through a
+  `TransformStream` and re-wraps it as a `Response`, so the blob is still
+  accumulated by the browser and the page never holds a chunk array (a 2 GiB ZIP
+  in JS memory would be a second copy of itself). A `Content-Length` is treated as
+  a promise: a proxy that closes the socket early raises a readable
+  `下载中断，请重新下载` instead of saving a truncated file.
+- **`apps/web/lib/image-zoom.js` and `styles/photo-viewer.css`.** The picture
+  drawer is now full-viewport and the zoom layer multiplies the *fitted* box:
+  100% = fit, stops at 150/200/300/400%, plain-wheel and double-click shortcuts,
+  Ctrl/Meta+wheel left to the browser. Drag pans within `panLimit()`, and the
+  gallery swipe is disabled while zoomed, so a pan can never page the album. A
+  bad or still-loading picture offers no controls; the next photo always opens
+  fitted.
+- **`scripts/download-check.mjs`, `photo-viewer-check.mjs`, `zoom-check.mjs`,
+  `queue-panel-check.mjs`** — 19, 52, 35 and 26 browser assertions. The download
+  check throttles the real connection with CDP network emulation instead of
+  mocking `fetch`, so the intermediate percentage is a measurement, not a claim.
+- **`taskRowStatus()` in `upload-stats.js`** — one honest sentence per upload row,
+  including the failure reason as visible text. `aggregateTasks` gained a
+  `canceled` count, so a canceled file is settled without being called a failure.
+
+### Changed
+
+- **The upload queue can be folded, and stays folded.** 收起 swaps the panel for
+  a 44px launcher that keeps the batch counts on screen; a later progress or
+  state event repaints the header but never re-opens the panel behind the user.
+  Rows are now a name, a wrapping state-plus-detail line and one 4px progress
+  slot, which is also what makes the 320px layout readable. `finalizing` reads
+  `服务端收尾`, never `100%` or `成功`: every byte is on the server, but the node
+  does not exist yet.
+- **The two panels are one surface in two places.** `queue.js` and `downloads.js`
+  share the row anatomy and the header geometry (432px on a desktop, viewport
+  minus the edge on a phone), and the download panel anchors under the topbar so
+  it never competes with the upload queue for the bottom-right corner.
+- **A picture asks for the viewport, not the reading measure.** `preview.js`
+  decides from the node that opened the drawer, so a gallery of pictures stays a
+  picture viewer while arrowing, and PDF/text/folder/Office drawers keep the
+  narrow panel.
+- **`scripts/gallery-check.mjs` asserts `PREVIEW_LONG_EDGE`** instead of a 1120px
+  literal, so the decode cap is checked against the one place that decides it.
+
+### Fixed
+
+- **A failed or canceled ZIP keeps its carrier node.** `releaseArchive()` runs
+  only after the transfer resolved, and the panel keeps the carrier so a retry
+  re-downloads the archive without zipping the folder again. Cancel asks for a
+  cancel *after* packaging returns, because an aborted build would leave a
+  half-written carrier with no name to point at.
+- **A batch summary counts a cancel as a cancel.** `downloadSelection()` reports
+  "已下载 N 个，M 个已取消" and points at the panel; a canceled file no longer
+  inflates the failure count or claims the whole batch failed.
+- **A download panel never outlives its account.** Signing out cancels live
+  transfers, empties the list and rebuilds the hidden DOM, so the next login
+  cannot read the previous account's file names.
+- **`mdrive sync` no longer publishes an unverified download.** The response body
+  was written straight onto the destination and hashed afterwards, so a body that
+  did not match the remote digest had already replaced a good local file by the
+  time `CHECKSUM_MISMATCH` was raised. Downloads now stage into a
+  constant-length `.mdrive-sync-<uuid>.sync-part` file in the target directory,
+  named independently of the destination so a legal long file name can no longer
+  push the staging name past a filesystem's per-component limit; the bytes are
+  hashed there and replace the destination with an atomic rename only on a match.
+  A failure keeps the previous file, removes the staging file and leaves the
+  baseline at the last agreed state. Later scans ignore only names matching that
+  exact prefix-and-UUID shape — never a normal long file or a user's own
+  `...<uuid>.sync-part` — and the transfer layer (`ApiClient#download`) now cleans
+  its own partial file when a response is truncated.
+- **`--direction` accepts the documented `up`/`down` values and actually enforces
+  them.** The accepted set was `upload|download|both|none`, so the documented
+  one-way modes exited 2 while the undocumented `upload` fell through the filter
+  and ran a full two-way sync — `--direction upload --delete` deleted local files
+  when the remote copy was gone. `up` now writes to the drive only (uploads, and
+  remote-node deletions), `down` writes locally only (downloads, and local
+  deletions), `both` stays the default, `--delete` is still required for either
+  deletion, and `upload`/`download` remain only as aliases of the same restricted
+  modes. `--dry-run` and the real run share one restriction table, so the printed
+  plan is the plan that executes.
+- **A failed local deletion is a failure, not a silent success.** `sync --delete`
+  swallowed every `unlink` error and counted the path as deleted; only `ENOENT`
+  is convergence now, and any other error lands in `failed`, keeps the path's
+  baseline row and exits 1.
+- **`mdrive sync --json` prints one document.** Per-file `down…`/`del…` lines went
+  to stdout next to the JSON payload; they are now a human-mode feature, and the
+  `sync` summary carries `direction`, `skipped` and `pending deletes` so a
+  restricted run is visible in its own report.
+
+### Removed
+
+- **`downloadNode()`** — the fire-and-forget helper in `api.js`. Every download
+  goes through the center now; a second path would have been a second set of rules
+  for the same bytes, and its promise resolved before anything was transferred.
+
 ## [0.26.0] - 2026-11-17
 
 Derived images, background work, and the wiring that makes both survivable.

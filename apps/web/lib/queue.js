@@ -4,6 +4,17 @@
  * so a progress event only touches the row it belongs to (no full re-render,
  * no flicker).
  *
+ * Two rules shape the shell around those rows:
+ *
+ *   1. A folded panel is still an entrance. Collapsing is a user decision, so it
+ *      swaps the panel for a small launcher that keeps the batch counts on
+ *      screen. Progress events must never re-open the panel behind the user's
+ *      back — that was the old behaviour and it made 收起 useless.
+ *   2. A row is one readable sentence. The state word says 排队中 / 校验中 /
+ *      上传中 / 服务端收尾 / 成功 / 失败 / 已取消 / 可继续, and the detail line
+ *      carries bytes, speed, ETA or the actual failure reason as text (not only
+ *      as a title attribute, which a 320px touch screen can never read).
+ *
  * The header owns the two global controls: 全部暂停 / 全部继续 and 清空已完成.
  * Rows whose source is a stored history record are marked read-only, because a
  * refreshed page cannot rebuild a File object.
@@ -11,8 +22,8 @@
 
 import { h, raw, mount } from './dom.js';
 import { icon, bytes } from './format.js';
-import { transferLabel, formatSpeed } from './upload.js';
-import { aggregateTasks, summaryLabel, formatEta } from './upload-stats.js';
+import { aggregateTasks, summaryLabel, taskRowStatus, formatEta } from './upload-stats.js';
+import { formatSpeed } from './upload.js';
 
 /* The two transport controls the queue owns; the shared icon set stays untouched. */
 function glyph(body, size) {
@@ -29,8 +40,15 @@ const playIcon = (size) => glyph(PLAY_GLYPH, size);
 export function createQueuePanel(options) {
   const opts = options || {};
   const rows = new Map();
+  const panelId = 'queue-panel-' + Math.random().toString(36).slice(2, 8);
   const list = h('div', { class: 'queue-list' });
-  const summary = h('span', { text: '0 个任务' });
+  const summary = h('span', { class: 'qsummary', text: '0 个任务' });
+  // State changes are announced here; byte progress is not. The region lives
+  // outside the panel so folding the panel cannot also mute it.
+  const announcer = h('div', {
+    class: 'visually-hidden queue-announce',
+    attrs: { role: 'status', 'aria-live': 'polite', 'aria-atomic': 'true' },
+  });
   // The batch readout. A queue of 200 files cannot be read from 200 rows: the
   // header owns one bar for the whole batch and the numbers behind it.
   const totalBar = h('i', { style: { transform: 'scaleX(0)' } });
@@ -43,6 +61,9 @@ export function createQueuePanel(options) {
   let paused = false;
   let totalsTimer = 0;
   let lastTotalsAt = 0;
+  let visible = false;
+  /** Set only by the user's 收起. No progress event may clear it. */
+  let collapsed = false;
 
   const pauseBtn = h('button', {
     class: 'icon-btn',
@@ -56,10 +77,15 @@ export function createQueuePanel(options) {
     html: icon('trash', 13),
     on: { click: () => { if (opts.onClearFinished) opts.onClearFinished(); } },
   });
+  const collapseBtn = h('button', {
+    class: 'icon-btn', attrs: { type: 'button', 'aria-label': '收起上传队列', title: '收起', 'aria-expanded': 'true', 'aria-controls': panelId },
+    html: icon('chevron-down', 13),
+    on: { click: () => fold() },
+  });
 
   const panel = h('section', {
     class: 'queue',
-    attrs: { 'aria-label': '上传队列', hidden: 'hidden' },
+    attrs: { id: panelId, 'aria-label': '上传队列', hidden: 'hidden' },
   },
     h('header', { class: 'queue-head' },
       raw(icon('upload', 14)),
@@ -68,27 +94,66 @@ export function createQueuePanel(options) {
       h('span', { class: 'push' }),
       pauseBtn,
       clearBtn,
-      h('button', {
-        class: 'icon-btn', attrs: { type: 'button', 'aria-label': '收起上传队列', title: '收起' },
-        html: icon('chevron-down', 13),
-        on: { click: () => hide() },
-      }),
+      collapseBtn,
     ),
     totals,
     list,
   );
-  document.body.appendChild(panel);
 
-  let visible = false;
-  function show() {
+  /* The folded entrance: always in the DOM, only painted while folded. */
+  const launcherLabel = h('span', { class: 'qlaunch-text', text: '上传' });
+  const launcher = h('button', {
+    class: 'queue-launcher',
+    attrs: {
+      type: 'button', hidden: 'hidden', 'aria-label': '展开上传队列',
+      'aria-expanded': 'false', 'aria-controls': panelId,
+    },
+    on: { click: () => show() },
+  }, raw(icon('upload', 13)), launcherLabel, raw(icon('chevron-up', 13)));
+
+  document.body.appendChild(launcher);
+  document.body.appendChild(panel);
+  document.body.appendChild(announcer);
+
+  function open() {
     if (visible) return;
     visible = true;
     panel.removeAttribute('hidden');
+    launcher.setAttribute('hidden', 'hidden');
+    launcher.setAttribute('aria-expanded', 'false');
+    collapseBtn.setAttribute('aria-expanded', 'true');
   }
-  function hide() {
+
+  function close() {
     if (!visible) return;
     visible = false;
     panel.setAttribute('hidden', 'hidden');
+  }
+
+  /** User-facing expand: clears the fold so future tasks keep the panel open. */
+  function show() {
+    collapsed = false;
+    open();
+  }
+
+  /** User-facing fold: hide the panel, keep the launcher. */
+  function fold() {
+    collapsed = true;
+    close();
+    launcher.removeAttribute('hidden');
+    launcher.setAttribute('aria-expanded', 'true');
+    collapseBtn.setAttribute('aria-expanded', 'false');
+    collapseBtn.focus?.({ preventScroll: true });
+  }
+
+  function hide() {
+    close();
+    launcher.setAttribute('hidden', 'hidden');
+  }
+
+  /** Who is still working: paused files are unfinished, settled ones are not. */
+  function isSettled(state) {
+    return state === 'done' || state === 'canceled';
   }
 
   /**
@@ -107,18 +172,30 @@ export function createQueuePanel(options) {
     const live = tasks.filter((row) => !row.history && !row.resumable);
     const resumable = tasks.filter((row) => row.resumable).length;
     const stats = aggregateTasks(live.map((row) => row.task));
-    summary.textContent = paused && active
+    const label = paused && active
       ? '已暂停 · ' + active + ' 个待继续'
       : (paused ? '已暂停' : (stats.files ? summaryLabel(stats) : resumable ? resumable + ' 个可继续' : summaryLabel(stats)));
+    summary.textContent = label;
+    launcherLabel.textContent = label;
     pauseBtn.setAttribute('aria-label', paused ? '全部继续' : '全部暂停');
     pauseBtn.setAttribute('title', paused ? '全部继续' : '全部暂停');
     pauseBtn.innerHTML = paused ? playIcon(13) : pauseIcon(13);
     pauseBtn.classList.toggle('is-active', paused);
     if (!tasks.length) {
       hide();
+      // The fold belonged to the batch that just went away; a brand new drop
+      // must announce itself like the first one did.
+      collapsed = false;
       return;
     }
-    if (!visible) show();
+    // The fold is the user's: a progress tick reaches this line and stops.
+    if (collapsed) {
+      close();
+      launcher.removeAttribute('hidden');
+      launcher.setAttribute('aria-expanded', 'true');
+    } else {
+      open();
+    }
     paintTotals(stats, immediate === true);
   }
 
@@ -151,18 +228,20 @@ export function createQueuePanel(options) {
     if (eta) parts.push(eta);
     else if (stats.hashing > 0 && stats.hashing === stats.active) parts.push('校验中');
     if (stats.failed) parts.push(stats.failed + ' 个失败');
+    if (stats.canceled) parts.push(stats.canceled + ' 个已取消');
     meta.textContent = parts.join(' · ');
   }
 
-  const STATE_LABEL = {
-    queued: '等待中', hashing: '校验中', uploading: '上传中', finalizing: '收尾中',
-    paused: '已暂停', done: '已完成', error: '失败', canceled: '已取消',
-  };
-
   function ensureRow(task) {
     if (rows.has(task.id)) return rows.get(task.id);
-    const name = h('span', { class: 'qname', attrs: { title: task.name }, text: task.name });
-    const state = h('span', { class: 'qstate' });
+    const name = h('span', { class: 'qname', attrs: { title: task.name } });
+    name.textContent = String(task.name || '');
+    const stateWord = h('span', { class: 'qstate' });
+    const detail = h('span', { class: 'qdetail' });
+    // One flex line that may wrap: at 320px the state word and the reason stack
+    // instead of overflowing the panel sideways.
+    const line = h('span', { class: 'qline' }, stateWord, detail);
+    const main = h('div', { class: 'qmain' }, name, line);
     const bar = h('i', { style: { transform: 'scaleX(0)' } });
     const progress = h('div', { class: 'qbar', attrs: { role: 'progressbar', 'aria-valuemin': '0', 'aria-valuemax': '100', 'aria-valuenow': '0', 'aria-label': '上传进度：' + task.name } }, bar);
     const retryBtn = h('button', {
@@ -185,16 +264,14 @@ export function createQueuePanel(options) {
       html: icon('x', 11),
       on: { click: () => task.cancel() },
     });
-    const row = h('div', { class: 'qitem', dataset: { id: task.id } },
-      name,
-      state,
-      progress,
-      h('span', { class: 'qactions', style: { gridColumn: '1/-1', justifyContent: 'flex-end', marginTop: '2px' } },
-        retryBtn, pauseBtnRow, resumeBtnRow, cancelBtn),
-    );
+    const actions = h('span', { class: 'qactions' }, retryBtn, pauseBtnRow, resumeBtnRow, cancelBtn);
+    const row = h('div', { class: 'qitem', dataset: { id: task.id } }, main, actions, progress);
     const entry = {
-      task, row, state, bar, progress, retryBtn, pauseBtn: pauseBtnRow, resumeBtn: resumeBtnRow, cancelBtn,
+      task, row, state: stateWord, detail, bar, progress, actions,
+      retryBtn, pauseBtn: pauseBtnRow, resumeBtn: resumeBtnRow, cancelBtn,
       history: task.history === true,
+      resumable: task.state === 'resumable',
+      announcedState: '',
     };
     rows.set(task.id, entry);
     list.appendChild(row);
@@ -213,46 +290,60 @@ export function createQueuePanel(options) {
     // event, and there are several per second while a file is uploading.
     entry.bar.style.transform = 'scaleX(' + (pct / 100).toFixed(3) + ')';
     entry.progress.setAttribute('aria-valuenow', String(pct));
+    const status = taskRowStatus(task);
     entry.row.classList.toggle('is-error', task.state === 'error');
     entry.row.classList.toggle('is-done', task.state === 'done');
+    entry.row.classList.toggle('is-canceled', task.state === 'canceled');
     entry.row.classList.toggle('is-paused', task.state === 'paused');
-    entry.state.className = 'qstate' + (task.state === 'error' ? ' is-error' : task.state === 'done' ? ' is-done' : '');
-    const show = (el, visible) => {
-      if (visible) el.removeAttribute('hidden');
+    entry.row.classList.toggle('is-finalizing', task.state === 'finalizing');
+    entry.state.className = 'qstate' + (status.tone ? ' is-' + status.tone : '');
+    entry.state.textContent = status.label;
+    entry.detail.className = 'qdetail' + (status.tone ? ' is-' + status.tone : '');
+    entry.detail.textContent = detailFor(entry, status);
+    const show = (el, on) => {
+      if (on) el.removeAttribute('hidden');
       else el.setAttribute('hidden', 'hidden');
     };
-    if (task.state === 'done') {
-      entry.state.textContent = (task.deduplicated ? '秒传 · ' : '') + bytes(task.size);
-      show(entry.cancelBtn, false);
-      show(entry.retryBtn, false);
-      show(entry.pauseBtn, false);
-      show(entry.resumeBtn, false);
-    } else if (task.state === 'error') {
-      entry.state.textContent = '失败';
-      entry.state.setAttribute('title', task.error && task.error.message ? task.error.message : '');
-      show(entry.cancelBtn, false);
-      show(entry.retryBtn, !entry.history);
-      show(entry.pauseBtn, false);
-      show(entry.resumeBtn, false);
-    } else if (task.state === 'canceled') {
-      entry.state.textContent = '已取消';
-      show(entry.cancelBtn, false);
-      show(entry.retryBtn, !entry.history);
-      show(entry.pauseBtn, false);
-      show(entry.resumeBtn, false);
-    } else if (task.state === 'paused') {
-      entry.state.textContent = '已暂停' + (pct ? ' ' + pct + '%' : '');
-      show(entry.cancelBtn, true);
-      show(entry.retryBtn, false);
-      show(entry.pauseBtn, false);
-      show(entry.resumeBtn, true);
-    } else {
-      entry.state.textContent = (STATE_LABEL[task.state] || '') + ' · ' + transferLabel(task);
-      show(entry.cancelBtn, true);
-      show(entry.retryBtn, false);
-      show(entry.pauseBtn, task.state === 'uploading' || task.state === 'hashing' || task.state === 'finalizing');
-      show(entry.resumeBtn, false);
+    const live = !entry.history && !entry.resumable;
+    const state = task.state;
+    const canRetry = live && (state === 'error' || state === 'canceled');
+    const canResume = live && state === 'paused';
+    const canPause = live && (state === 'uploading' || state === 'hashing' || state === 'finalizing' || state === 'queued');
+    const canCancel = live && state !== 'done' && state !== 'error' && state !== 'canceled' && state !== 'paused';
+    show(entry.retryBtn, canRetry);
+    show(entry.resumeBtn, canResume);
+    show(entry.pauseBtn, canPause);
+    show(entry.cancelBtn, canCancel);
+    entry.actions.hidden = !(canRetry || canResume || canPause || canCancel);
+    announce(entry, status);
+  }
+
+  /** A history row cannot retry, so its detail must not promise that it can. */
+  function detailFor(entry, status) {
+    if (!entry.history) return status.detail;
+    if (status.state === 'error') return '上次未完成';
+    if (status.state === 'canceled') return '上次已取消';
+    return status.detail;
+  }
+
+  /**
+   * One announcement per state change, none per byte.
+   *
+   * The live region is quiet for progress on purpose: a screen reader reading
+   * "42%" forty times turns the queue into noise, and the row's own progressbar
+   * is available on demand. Only the transitions a user acts on are spoken.
+   */
+  function announce(entry, status) {
+    if (entry.announcedState === status.state) return;
+    const first = !entry.announcedState;
+    entry.announcedState = status.state;
+    if (first) return; // the row's arrival is not a change worth speaking
+    if (status.state === 'uploading' || status.state === 'hashing') {
+      announcer.textContent = String(entry.task.name || '') + '：' + status.label;
+      return;
     }
+    const detail = detailFor(entry, status);
+    announcer.textContent = String(entry.task.name || '') + '：' + status.label + (detail ? '，' + detail : '');
   }
 
   /** Track a task that has not been started yet. */
@@ -265,7 +356,8 @@ export function createQueuePanel(options) {
     task.on('done', () => {
       paint(entry);
       updateSummary(true);
-      // Auto-collapse once everything finished, keeping the rows for retry.
+      // Auto-settle the header once everything finished. It repaints the counts
+      // but never re-opens a folded panel (updateSummary honours the fold).
       setTimeout(() => {
         const all = Array.from(rows.values());
         if (all.every((row) => isSettled(row.task.state))) updateSummary();
@@ -289,7 +381,10 @@ export function createQueuePanel(options) {
     const key = 'resume-' + (session.id || session.name);
     if (rows.has(key)) return rows.get(key);
     const name = h('span', { class: 'qname', attrs: { title: session.name || '' }, text: session.name || '未命名' });
-    const state = h('span', { class: 'qstate' });
+    const state = h('span', { class: 'qstate is-warning' });
+    const detail = h('span', { class: 'qdetail' });
+    const line = h('span', { class: 'qline' }, state, detail);
+    const main = h('div', { class: 'qmain' }, name, line);
     const bar = h('i', { style: { transform: 'scaleX(0)' } });
     const progress = h('div', {
       class: 'qbar',
@@ -305,22 +400,23 @@ export function createQueuePanel(options) {
       html: icon('x', 11),
       on: { click: () => { if (typeof item.onDiscard === 'function') item.onDiscard(); } },
     });
-    const row = h('div', { class: 'qitem is-resumable', dataset: { id: key } },
-      name,
-      state,
-      progress,
-      h('span', { class: 'qactions', style: { gridColumn: '1/-1', justifyContent: 'flex-end', marginTop: '2px' } },
-        resumeBtn, discardBtn),
-    );
+    const actions = h('span', { class: 'qactions' }, resumeBtn, discardBtn);
+    const row = h('div', { class: 'qitem is-resumable', dataset: { id: key } }, main, actions, progress);
     const ratio = Math.max(0, Math.min(1, item.ratio || 0));
     const pct = Math.round(ratio * 100);
     bar.style.transform = 'scaleX(' + ratio.toFixed(3) + ')';
     progress.setAttribute('aria-valuenow', String(pct));
-    state.className = 'qstate is-resumable';
-    state.textContent = item.label || (pct ? '可继续 · 已传 ' + pct + '%' : '可继续');
+    state.textContent = '可继续';
+    const label = item.label && String(item.label).replace(/^可继续\s*·?\s*/, '');
+    detail.textContent = label || (pct ? '已传 ' + pct + '%' : '选择文件后可继续');
     // Not history: a history row is something that ended. This one is pending,
     // so it must keep the panel open and be counted in the header.
-    const entry = { task: { id: key, name: session.name, size: session.size, state: 'resumable', progress: ratio, uploaded: 0, speed: 0 }, row, state, bar, progress, history: false, resumable: true };
+    const entry = {
+      task: { id: key, name: session.name, size: session.size, state: 'resumable', progress: ratio, uploaded: 0, speed: 0 },
+      row, state, detail, bar, progress, actions,
+      retryBtn: null, pauseBtn: null, resumeBtn, cancelBtn: discardBtn,
+      history: false, resumable: true, announcedState: 'resumable',
+    };
     rows.set(key, entry);
     list.appendChild(row);
     row.classList.add('motion-rise');
@@ -369,14 +465,27 @@ export function createQueuePanel(options) {
     updateSummary();
   }
 
+  function destroy() {
+    if (totalsTimer) clearTimeout(totalsTimer);
+    totalsTimer = 0;
+    rows.clear();
+    mount(list, []);
+    panel.remove();
+    launcher.remove();
+    announcer.remove();
+    visible = false;
+  }
+
   return {
     panel,
+    launcher,
     track,
     trackHistory,
     trackResumable,
     dropResumable,
     show,
     hide,
+    fold,
     rows,
     /** Header switches to 全部继续 and the summary says 已暂停. */
     setPaused(value) {
@@ -397,9 +506,6 @@ export function createQueuePanel(options) {
       mount(list, []);
       updateSummary();
     },
+    destroy,
   };
-}
-
-function isSettled(state) {
-  return state === 'done' || state === 'canceled';
 }

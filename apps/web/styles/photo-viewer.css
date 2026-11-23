@@ -1,0 +1,130 @@
+/*
+ * photo-viewer.css — the picture drawer as a full-viewport viewer.
+ *
+ * Loaded from index.html after index.css, and deliberately kept out of app.css
+ * and index.css: another change is in flight in those two files. Every rule is
+ * scoped under `.photo-viewer`, the extra class preview.js puts on a drawer
+ * opened for an image, so a PDF, a text file, a folder or an Office document
+ * keeps the narrow reading drawer it has always had.
+ *
+ * What it fixes, and why the old layout was wrong:
+ *
+ *   .picture-frame was `display:grid;place-items:center` with NO declared
+ *   tracks, so its implicit row and column were `auto` — sized by the picture's
+ *   intrinsic size. A 500x4600 GIF therefore produced a 4600px-tall grid row
+ *   inside an 867px frame and `overflow:hidden` cropped it; `max-height:100%` on
+ *   the child had no definite box to resolve against. Declaring each track as
+ *   `minmax(0,1fr)` pins it to the frame's real size, which is what makes the
+ *   contain-fit work on both axes.
+ *
+ *   The panel itself was `--drawer-w` (min(560px,94vw)), so a 1440px desktop
+ *   left a 4000px photograph a 559px-wide stage. A picture is the one preview
+ *   with no useful column measure, so its drawer claims the viewport the way
+ *   Dropbox's full-browser viewer and Apple Photos do, while the chrome stays
+ *   one quiet title row plus the actions the drawer already owns.
+ */
+
+/* ── the panel: the whole available viewport ─────────────────────
+ * Pinned to all four sides with auto width/height, so the box is the viewport
+ * itself. Not 100vw: on a desktop that is wider than the client area once a
+ * scrollbar exists and the fixed layer would add horizontal overflow; not
+ * 100dvh either, because a fixed box already tracks the visual viewport on a
+ * phone whose URL bar collapses.
+ */
+.photo-viewer.drawer{
+  inset:0;
+  width:auto;
+  max-width:none;
+  height:auto;
+  max-height:none;
+  border-left:0;
+  overflow:hidden;
+  background:var(--bg);
+}
+
+/* The stage is exactly the leftover height between header, picture and the
+ * zoom row; it must never be allowed to grow with its content. */
+.photo-viewer .preview-stage{min-height:0;background:var(--bg)}
+
+/* ── the picture box ─────────────────────────────────────────────
+ * One track per axis, each `minmax(0,1fr)`: the track is the frame's real box
+ * and never the picture's intrinsic size. `place-items:center` keeps the
+ * letterboxing symmetrical, and width/height:auto leaves a picture that is
+ * already smaller than the frame at its own size — a small screenshot is not
+ * blown up just because the viewer is large.
+ */
+.photo-viewer .preview-body{min-width:0;min-height:0}
+/* Only the picture body goes edge to edge; a notice an image could not be
+   shown under keeps the .centered padding it always had. */
+.photo-viewer .preview-body:not(.centered){
+  padding:0;
+  overflow:hidden;
+}
+.photo-viewer .picture-frame{
+  display:grid;
+  grid-template-columns:minmax(0,1fr);
+  grid-template-rows:minmax(0,1fr);
+  place-items:center;
+  width:100%;
+  min-width:0;
+  min-height:0;
+}
+.photo-viewer .picture-frame .picture-canvas,
+.photo-viewer .picture-frame .preview-media{
+  max-width:100%;
+  max-height:100%;
+  width:auto;
+  height:auto;
+  object-fit:contain;
+  border-radius:var(--radius-sm);
+  box-shadow:var(--shadow-modal);
+}
+
+/* The blurred 96px row thumbnail still backs the frame, but stretched over a
+ * whole screen it is a wall of colour: soften it so the photograph stays the
+ * subject and the viewer keeps the drive's near-black tone. */
+.photo-viewer .picture-backdrop{
+  opacity:.3;
+  filter:blur(28px) saturate(1.05);
+}
+
+/* ── chrome: one quiet title row, one compact action row ───────── */
+/* Height is left to app.css: 44px on a desktop, the taller two-line head on a
+ * phone (56px). Only the horizontal padding and the flat surface are set here. */
+.photo-viewer .drawer-head{
+  padding-left:max(14px,env(safe-area-inset-left));
+  padding-right:max(8px,env(safe-area-inset-right));
+  background:var(--surface);
+}
+.photo-viewer .drawer-head h2{flex:1 1 auto}
+.photo-viewer .drawer-head .sub{color:var(--text-faint)}
+/* The footer keeps the notch inset: this viewer is a full-screen surface, so
+   the bottom safe area is the difference between "details" and the home bar. */
+.photo-viewer .drawer-foot{
+  padding:8px max(14px,env(safe-area-inset-right)) max(8px,env(safe-area-inset-bottom)) max(14px,env(safe-area-inset-left));
+  background:var(--surface);
+}
+
+/* ── short viewports ─────────────────────────────────────────────
+ * A landscape phone, or a 390x300 window, has height to spare for nothing:
+ * the swipe hint goes, the action rows stay single-line, and the stage keeps
+ * the rest. Heights and touch targets from app.css are left alone on a touch
+ * screen — only a precise pointer gets the compact rows, where 44px would eat
+ * a third of the window.
+ */
+@media (max-height:560px){
+  .photo-viewer .preview-gesture-hint{display:none}
+  .photo-viewer .preview-zoom{padding:4px 10px;flex-wrap:nowrap}
+  .photo-viewer .drawer-foot{
+    flex-wrap:nowrap;
+    padding-top:6px;
+    padding-bottom:max(6px,env(safe-area-inset-bottom));
+    overflow-x:auto;
+    scrollbar-width:none;
+  }
+}
+@media (max-height:560px) and (pointer:fine){
+  .photo-viewer .preview-zoom .btn{min-height:0;height:26px}
+  .photo-viewer .preview-zoom .zoom-fit{min-height:0}
+  .photo-viewer .drawer-foot .btn{min-height:0;height:32px}
+}

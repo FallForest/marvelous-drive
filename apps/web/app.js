@@ -36,6 +36,7 @@ import {
   openPreviewFor, lookupNode, startRename, startDelete, startPurge, deleteSelection, moveSelection,
   downloadSelection, downloadSelectionArchive, downloadFolderArchive,
 } from './lib/actions.js';
+import { downloadEntry, downloadCenter } from './lib/downloads.js';
 import { captureFocusAddress, focusRouteContent, restoreFocusAddress } from './lib/focus.js';
 import { shortcutsEnabled } from './lib/shortcuts.js';
 import { attachDropZone } from './lib/dnd.js';
@@ -308,6 +309,9 @@ function mountAuth() {
   session.shellEls = null;
   session.selectionSlot = null;
   session.paintedToken = null;
+  // Download rows carry file names from the account that just signed out; the
+  // panel is closed and emptied so the next login never sees them.
+  downloadCenter().reset();
   if (session.authHandle && session.authHandle.destroy) session.authHandle.destroy();
   session.authHandle = renderAuth(root, {
     onSuccess: async (user) => {
@@ -529,6 +533,11 @@ function topbarContent(ctx) {
     }),
     renderBreadcrumb(ctx),
     h('div', { class: 'top-actions' },
+      // The download entry sits in the global chrome: a download keeps running
+      // while the user moves between folders, so its one control must not be
+      // owned by a route. app.js only mounts the button; the list lives in
+      // lib/downloads.js so every entry point shares one queue.
+      downloadEntry(),
       h('button', {
         class: 'icon-btn', attrs: { type: 'button', 'aria-label': '刷新', title: '刷新 (R)' },
         html: icon('refresh', 15),
@@ -727,4 +736,9 @@ handleRoute();
 
 window.addEventListener('pagehide', () => { uploader.markInterrupted(); });
 
-window.mdrive = { store, navigate, refresh: refreshData, uploadFiles: (files) => uploadFiles(uploader, files), uploader };
+window.mdrive = {
+  store, navigate, refresh: refreshData, uploadFiles: (files) => uploadFiles(uploader, files), uploader,
+  // Exposed for the browser checks: they drive a real download through the same
+  // center the topbar entry opens, instead of rebuilding the panel's markup.
+  downloads: downloadCenter(),
+};

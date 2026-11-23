@@ -11,6 +11,9 @@
   <!-- absolute asset URLs: the SPA also serves nested routes such as /s/<token>,
        where "./app.js" would resolve to /s/app.js and 404 -->
   <link rel="stylesheet" href="/styles/index.css" />
+  <!-- picture viewer: full-viewport layout, scoped to .photo-viewer; loaded
+       separately so the drawer work in app.css/index.css is not disturbed -->
+  <link rel="stylesheet" href="/styles/photo-viewer.css" />
 </head>
 <body>
   <div id="app"></div>

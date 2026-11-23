@@ -1,12 +1,13 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, writeFile, mkdir, readFile, stat } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import { mkdtemp, readdir, readFile, rm, stat, writeFile, mkdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { after, before, describe, it } from 'node:test';
 
 import {
-  REASON_TEXT, baselinePath, executePlan, hashFile, planSync, readBaseline,
-  scanLocal, summarize, writeBaseline,
+  REASON_TEXT, baselinePath, executePlan, hashFile, isSyncStagingName, planSync, readBaseline,
+  restrictPlan, scanLocal, summarize, temporaryPathFor, writeBaseline,
 } from '../src/sync.js';
 
 /**
@@ -216,6 +217,43 @@ describe('scanLocal', () => {
     await mkdir(join(root, 'only-dirs', 'deeper'), { recursive: true });
     const files = await scanLocal(root);
     assert.equal(files.size, 0);
+  });
+
+  it('ignores a leftover download staging file', async () => {
+    const root = join(workspace, 'staging-leftover');
+    await mkdir(root, { recursive: true });
+    await writeFile(join(root, 'photo.jpg'), 'real');
+    const staging = temporaryPathFor(join(root, 'photo.jpg'));
+    await writeFile(staging, 'partial');
+    // The transfer layer stages once more inside that path (`<staging>.<pid>.part`).
+    await writeFile(staging + '.4242.part', 'partial');
+    assert.equal(isSyncStagingName(staging.split(/[\\/]/).pop()), true);
+    const files = await scanLocal(root);
+    assert.deepEqual([...files.keys()], ['photo.jpg'], 'a half-downloaded staging file is not user data');
+  });
+
+  it('keeps the staging name constant and never ignores a look-alike user file', async () => {
+    const longName = join(workspace, 'a'.repeat(217) + '.txt');
+    const staging = temporaryPathFor(longName);
+    const stagingName = staging.split(/[\\/]/).pop();
+    const shortStaging = temporaryPathFor(join(workspace, 'a.txt'));
+    // NTFS caps one path component at 255 characters; a legal 221-character name
+    // plus a basename copy, a UUID and a suffix was 268 and every download of it
+    // failed with ENOENT.
+    assert.ok(stagingName.length < 255, 'the staging name fits in one component');
+    assert.ok(stagingName.length <= 80, 'the staging name does not grow with the destination');
+    assert.equal(dirname(staging), dirname(longName), 'staging stays next to the destination for an atomic rename');
+    assert.equal(shortStaging.length, staging.length, 'the length does not depend on the destination name');
+    assert.notEqual(temporaryPathFor(longName), temporaryPathFor(longName), 'each staging path is unique');
+    assert.equal(isSyncStagingName(stagingName), true);
+    // The transfer layer's own `<staging>.<pid>.part` tail is covered too.
+    assert.equal(isSyncStagingName(stagingName + '.4242.part'), true);
+
+    // A long ordinary file and a name the user made up are data, not staging.
+    assert.equal(isSyncStagingName('a'.repeat(217) + '.txt'), false);
+    assert.equal(isSyncStagingName('report.123e4567-e89b-12d3-a456-426614174000.sync-part'), false);
+    assert.equal(isSyncStagingName('mdrive-sync-123e4567-e89b-12d3-a456-426614174000.sync-part'), false);
+    assert.equal(isSyncStagingName('.mdrive-sync-not-a-uuid.sync-part'), false);
   });
 });
 
@@ -449,5 +487,151 @@ describe('executePlan', () => {
     });
     assert.equal(outcome.failed.length, 1);
     assert.equal(outcome.entries['bad.jpg'], undefined, 'a failed path must be retried next run, not marked synced');
+  });
+
+  it('keeps the old file and drops the staging file when the body does not match its digest', async () => {
+    const root = join(workspace, 'staged-bad');
+    await mkdir(root, { recursive: true });
+    const destination = join(root, 'photo.jpg');
+    await writeFile(destination, 'good local bytes');
+    const existing = await readFile(destination);
+
+    // A client that answers the request with the *wrong* bytes, which is what a
+    // corrupt or truncated response looks like to the caller.
+    const client = {
+      ...fakeClient(),
+      async download(path, options) { await writeFile(options.destination, 'corrupt payload'); return { path: options.destination }; },
+    };
+    const outcome = await executePlan(client, {
+      ops: [{ rel: 'photo.jpg', action: 'download', reason: 'remote-changed', size: 16, remoteId: 'node-photo', remoteSha: 'a'.repeat(64), remoteVersion: 2 }],
+      folders: new Map([['', 'root-id']]),
+      localRoot: root,
+      baselineEntries: { 'photo.jpg': { sha256: 'f'.repeat(64), size: 16, remoteId: 'node-photo', version: 1 } },
+      options: {},
+      write: async () => null,
+      log: () => {},
+      transfers: noTransfers,
+    });
+
+    assert.equal(outcome.failed.length, 1);
+    assert.match(outcome.failed[0].message, /does not hash/);
+    assert.deepEqual(await readFile(destination), existing, 'the good local file survives a corrupt response');
+    assert.equal(outcome.downloaded, 0);
+    assert.deepEqual(
+      (await readdir(root)).sort(),
+      ['photo.jpg'],
+      'no staging file is left behind'
+    );
+    assert.equal(outcome.entries['photo.jpg'].version, 1, 'the baseline stays at the last agreed state');
+  });
+
+  it('publishes a verified download by replacing the existing file', async () => {
+    const root = join(workspace, 'staged-good');
+    await mkdir(root, { recursive: true });
+    const destination = join(root, 'photo.jpg');
+    await writeFile(destination, 'old bytes');
+    const body = 'new bytes';
+    const sha = createHash('sha256').update(body).digest('hex');
+
+    const seen = [];
+    const client = {
+      ...fakeClient(),
+      async download(path, options) {
+        seen.push(options.destination);
+        await writeFile(options.destination, body);
+        return { path: options.destination };
+      },
+    };
+    const outcome = await executePlan(client, {
+      ops: [{ rel: 'photo.jpg', action: 'download', reason: 'remote-changed', size: body.length, remoteId: 'node-photo', remoteSha: sha, remoteVersion: 2 }],
+      folders: new Map([['', 'root-id']]),
+      localRoot: root,
+      baselineEntries: {},
+      options: {},
+      write: async () => null,
+      log: () => {},
+      transfers: noTransfers,
+    });
+
+    assert.equal(outcome.failed.length, 0);
+    assert.equal(outcome.downloaded, 1);
+    assert.equal(await readFile(destination, 'utf8'), body);
+    assert.notEqual(seen[0], destination, 'the response never lands on the destination first');
+    assert.deepEqual((await readdir(root)), ['photo.jpg'], 'the staging file is renamed away');
+    assert.equal(outcome.entries['photo.jpg'].sha256, sha);
+  });
+
+  it('counts an already missing local file as converged but fails a real unlink error', async () => {
+    const root = join(workspace, 'unlink');
+    await mkdir(join(root, 'gone-as-dir'), { recursive: true });
+    await writeFile(join(root, 'gone.jpg'), 'x');
+    const client = fakeClient();
+
+    // A directory at the path of a file that was deleted remotely: unlink cannot
+    // remove it on any platform, which is a deterministic, controlled failure.
+    // `already-absent.jpg` never existed locally, so unlink answers ENOENT and
+    // that is convergence, not a failure.
+    const outcome = await executePlan(client, {
+      ops: [
+        { rel: 'gone.jpg', action: 'remote-deleted', size: 0, remoteId: 'node-gone' },
+        { rel: 'already-absent.jpg', action: 'remote-deleted', size: 0, remoteId: 'node-absent' },
+        { rel: 'gone-as-dir', action: 'remote-deleted', size: 0, remoteId: 'node-dir' },
+      ],
+      folders: new Map([['', 'root-id']]),
+      localRoot: root,
+      baselineEntries: {
+        'gone.jpg': { sha256: 'a', size: 1, remoteId: 'node-gone', version: 1 },
+        'already-absent.jpg': { sha256: 'c', size: 1, remoteId: 'node-absent', version: 1 },
+        'gone-as-dir': { sha256: 'b', size: 1, remoteId: 'node-dir', version: 1 },
+      },
+      options: { delete: true },
+      write: async () => null,
+      log: () => {},
+      transfers: noTransfers,
+    });
+
+    assert.equal(outcome.deletedLocal, 2, 'the removed file and the already-absent one both count as converged');
+    assert.equal(outcome.failed.length, 1);
+    assert.equal(outcome.failed[0].rel, 'gone-as-dir');
+    assert.equal(await stat(join(root, 'gone-as-dir')).then((info) => info.isDirectory()), true);
+    assert.equal(outcome.entries['gone.jpg'], undefined);
+    assert.equal(outcome.entries['already-absent.jpg'], undefined, 'ENOENT converges, so the row is dropped');
+    assert.ok(outcome.entries['gone-as-dir'], 'a failed deletion keeps its baseline row so it is retried');
+    assert.equal(outcome.entries['gone-as-dir'].version, 1);
+  });
+});
+
+describe('restrictPlan: one direction table for the plan and the run', () => {
+  const ops = () => ([
+    { rel: 'up-only.jpg', action: 'upload', size: 1 },
+    { rel: 'down-only.jpg', action: 'download', size: 1, remoteId: 'n1', remoteSha: 'x' },
+    { rel: 'remote-gone.jpg', action: 'remote-deleted', size: 0, remoteId: 'n2' },
+    { rel: 'local-gone.jpg', action: 'local-deleted', size: 0, remoteId: 'n3' },
+  ]);
+
+  it('up permits uploads and the deletion of a local file from the remote tree', () => {
+    // A local deletion is an *upload-direction* change: it removes the remote
+    // node. A remote deletion would have to delete the local file, which only the
+    // down direction may do — that is the data-loss case this pins.
+    const planned = restrictPlan(ops(), { direction: 'up', delete: true });
+    assert.deepEqual(planned.map((op) => op.action), ['upload', 'skipped', 'skipped', 'local-deleted']);
+  });
+
+  it('down permits downloads and the deletion of a remote file from the local tree', () => {
+    const planned = restrictPlan(ops(), { direction: 'down', delete: true });
+    assert.deepEqual(planned.map((op) => op.action), ['skipped', 'download', 'remote-deleted', 'skipped']);
+  });
+
+  it('both permits every transfer', () => {
+    const planned = restrictPlan(ops(), { direction: 'both', delete: true });
+    assert.deepEqual(planned.map((op) => op.action), ['upload', 'download', 'remote-deleted', 'local-deleted']);
+  });
+
+  it('deletions stay pending without --delete when their direction allows them', () => {
+    const pending = (direction) => restrictPlan(ops(), { direction, delete: false })
+      .filter((op) => op.action === 'pending-delete').map((op) => op.rel).sort();
+    assert.deepEqual(pending('up'), ['local-gone.jpg'], 'only the deletion up owns is even reported');
+    assert.deepEqual(pending('down'), ['remote-gone.jpg']);
+    assert.deepEqual(pending('both'), ['local-gone.jpg', 'remote-gone.jpg']);
   });
 });
