@@ -2,9 +2,10 @@ import { readdir, rm, unlink } from 'node:fs/promises'
 import { join } from 'node:path'
 import { db, nowIso } from '../db.js'
 import { config } from '../config.js'
-import { backend } from '../storage/backend.js'
+import { releaseBlob } from '../storage/blobs.js'
 import { dropVersions } from '../versions.js'
 import { pruneAudit } from './audit.js'
+import { sweepArchiveDownloads } from './archive-downloads.js'
 
 /**
  * Trash retention.
@@ -52,17 +53,10 @@ async function purgeNodes(userId, ids) {
 
   let freed = 0
   for (const row of nodeBlobs) {
-    const current = db.prepare('SELECT refs FROM blobs WHERE hash=?').get(row.blob_hash)
-    if (!current) continue
-    const remaining = current.refs - 1
-    if (remaining > 0) {
-      db.prepare('UPDATE blobs SET refs=? WHERE hash=?').run(remaining, row.blob_hash)
-      continue
-    }
-    db.prepare('DELETE FROM blobs WHERE hash=?').run(row.blob_hash)
-    // Through the backend: a remote tier has nothing to unlink.
-    await backend.remove(row.blob_hash)
-    freed += 1
+    // One node row owns one reference. `releaseBlob` serializes against an
+    // adoption of the same hash, so a purge cannot race a concurrent upload
+    // into leaving a row that points at deleted bytes.
+    if (await releaseBlob(row.blob_hash)) freed += 1
   }
   return { nodes: targets.length, bytes, blobs: freed }
 }
@@ -74,10 +68,17 @@ async function purgeNodes(userId, ids) {
  * the maintenance route. Returns a per-run summary for the log.
  */
 export async function sweepExpiredTrash(now = Date.now()) {
-  const cutoff = new Date(now - config.trashRetentionDays * DAY_MS).toISOString()
-  const roots = db.prepare(`SELECT id, user_id FROM nodes
+  // 0 disables trash auto-purge (the UI promises exactly that). Anything
+  // non-finite is treated the same way rather than becoming a 1970 cutoff.
+  // Only the cutoff and this SELECT are gated: audit pruning, expired upload
+  // sessions and temporary archive downloads still run on the same timer.
+  const trashPurgeEnabled = Number.isFinite(config.trashRetentionDays) && config.trashRetentionDays > 0
+  const cutoff = trashPurgeEnabled
+    ? new Date(now - config.trashRetentionDays * DAY_MS).toISOString()
+    : null
+  const roots = trashPurgeEnabled ? db.prepare(`SELECT id, user_id FROM nodes
     WHERE deleted_at IS NOT NULL AND deleted_at < ?
-      AND (parent_id IS NULL OR parent_id NOT IN (SELECT id FROM nodes WHERE deleted_at IS NOT NULL))`).all(cutoff)
+      AND (parent_id IS NULL OR parent_id NOT IN (SELECT id FROM nodes WHERE deleted_at IS NOT NULL))`).all(cutoff) : []
   let nodes = 0
   let bytes = 0
   let blobs = 0
@@ -91,10 +92,16 @@ export async function sweepExpiredTrash(now = Date.now()) {
   // housekeeping instead of a second scheduler nobody remembers.
   const audit = pruneAudit(now)
   const sessions = await sweepExpiredSessions(now)
+  // Expired archive downloads are reaped on the same clock as the rest. The
+  // sweep always returns { removed, failed }; the summary keeps the count and
+  // the failure count as plain numbers so callers never re-derive them.
+  const { removed: archiveDownloads, failed: archiveDownloadErrors } = await sweepArchiveDownloads(now)
   return {
     roots: roots.length, nodes, bytes, blobs, cutoff, at: nowIso(),
     auditRemoved: audit.removed,
     sessions: sessions.sessions, orphanSessions: sessions.orphans,
+    archiveDownloads,
+    archiveDownloadFailures: archiveDownloadErrors.length,
   }
 }
 

@@ -8,6 +8,9 @@
  * webkitdirectory FileList can never contain an empty directory, so the entry
  * tree is the one path that can prove empty folders end to end.
  *
+ * A repeat drop that both collides on content and needs new directories must
+ * ask BEFORE it creates them: cancelling the question must leave no trace.
+ *
  *   node scripts/folder-check.mjs [--server URL]
  */
 
@@ -47,15 +50,20 @@ process.exit(await runBrowserCheck({ title: 'Folder drop check', network: true }
         }
       },
     })
-    window.__dropFolderFixture = (extra = false, changed = false) => {
+    window.__dropFolderFixture = (extra = false, changed = false, newFolder = false) => {
     const tree = makeDirEntry('项目资料', [
-      makeFileEntry('README.md', changed ? '# 变更\n' : '# 顶层\n'),
+      // Every variant is the same byte length: only the hash can tell them apart,
+      // and 'again' differs from what the overwrite step above left on the server.
+      makeFileEntry('README.md', changed === 'again' ? '# 再次\n' : changed ? '# 变更\n' : '# 顶层\n'),
       makeDirEntry('文档', [
         makeFileEntry('计划.md', '# 计划\n'),
         makeDirEntry('归档', [makeFileEntry('旧.txt', 'old\n')]),
       ]),
       makeDirEntry('空目录', []),
       ...(extra ? [makeFileEntry('新增.txt', 'new\n')] : []),
+      // A repeat-only branch: a folder the server has never seen, with an
+      // empty child, so the plan needs mkdir work of its own.
+      ...(newFolder ? [makeDirEntry('新目录', [makeDirEntry('空子目录', [])])] : []),
     ])
     const item = { kind: 'file', webkitGetAsEntry: () => tree }
     const dataTransfer = { items: [item], files: [], types: ['Files'], dropEffect: 'copy' }
@@ -89,19 +97,25 @@ process.exit(await runBrowserCheck({ title: 'Folder drop check', network: true }
   })
   const original = await snapshot()
   const transfers = []
+  // Mutations, not reads: a cancelled repeat must leave the server untouched,
+  // so a folder create and a content write are recorded as they are sent.
+  const folderCreates = []
   const previousHandler = page.onEvent.bind(page)
   page.onEvent = (message) => {
     const request = message.params?.request
     if (message.method === 'Network.requestWillBeSent' && request?.method === 'PUT'
       && /\/api\/v1\/(uploads|files\/[^/]+\/content)/.test(request.url)) transfers.push(request.url)
+    if (message.method === 'Network.requestWillBeSent' && request?.method === 'POST'
+      && /\/api\/v1\/nodes(\?|$)/.test(request.url)) folderCreates.push(request.url)
     return previousHandler(message)
   }
-  const dropAgain = async (extra, changed = false) => {
+  const dropAgain = async (extra, changed = false, newFolder = false) => {
     transfers.length = 0
-    await page.run((add, modify) => {
+    folderCreates.length = 0
+    await page.run((add, modify, addDirs) => {
       document.querySelectorAll('.toast').forEach((toast) => toast.remove())
-      window.__dropFolderFixture(add, modify)
-    }, extra, changed)
+      window.__dropFolderFixture(add, modify, addDirs)
+    }, extra, changed, newFolder)
   }
   const waitForCompletion = () => page.waitFor(
     "[...document.querySelectorAll('.toast.is-success .toast-text')].some(el => el.textContent.includes('项目资料'))",
@@ -143,6 +157,34 @@ process.exit(await runBrowserCheck({ title: 'Folder drop check', network: true }
     return (await (await fetch('/api/v1/files/' + id + '/versions', { headers })).json()).versions
   }, beforeReadme.id)
   check('the original content remains in version history', history.length === 1)
+
+  // A repeat that BOTH collides on a modified same-length file and needs
+  // brand-new directories (one of them empty) must ask before it writes
+  // anything. The question is not permission to leave a folder behind when the
+  // answer is cancel — the prompt used to arrive only after mkdir had run.
+  const beforeCancel = await snapshot()
+  await dropAgain(false, 'again', true)
+  await page.waitFor(
+    "document.querySelector('.dialog:not(.is-closing) input[name=mdrive-upload-conflict]')",
+    { timeout: 10000, label: 'repeat drop conflict decision' },
+  )
+  check('the conflict is asked before any folder is created', folderCreates.length === 0, JSON.stringify(folderCreates))
+  check('the conflict is asked before any content is sent', transfers.length === 0, JSON.stringify(transfers))
+  await page.run(() => {
+    const foot = document.querySelector('.dialog:not(.is-closing) .dialog-foot')
+    ;[...foot.querySelectorAll('button')].find((button) => button.textContent.includes('取消上传')).click()
+  })
+  await page.waitFor("!document.querySelector('.dialog:not(.is-closing)')", { timeout: 10000, label: 'cancelled conflict dialog' })
+  await sleep(900)
+  check('cancelling the repeat creates no folder', folderCreates.length === 0, JSON.stringify(folderCreates))
+  check('cancelling the repeat sends no upload request', transfers.length === 0, JSON.stringify(transfers))
+  const afterCancel = await snapshot()
+  const signature = (nodes) => nodes
+    .map((node) => [node.id, node.name, node.kind, node.parentId || 'root', node.version].join(':'))
+    .sort()
+  check('cancelling leaves node ids, versions and the tree exactly as before',
+    JSON.stringify(signature(afterCancel)) === JSON.stringify(signature(beforeCancel)),
+    JSON.stringify(signature(afterCancel)))
   page.onEvent = previousHandler
 
   await page.shot('folder-drop')

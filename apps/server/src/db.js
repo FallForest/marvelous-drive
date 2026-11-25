@@ -59,13 +59,18 @@ db.exec(`
     blob_hash  TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
-    deleted_at TEXT
+    deleted_at TEXT,
+    -- One id per soft-deletion run: every live node that run actually trashed
+    -- shares it, so restore can follow this branch and not an unrelated one.
+    trash_batch_id TEXT
   );
   CREATE INDEX IF NOT EXISTS nodes_parent ON nodes(user_id, parent_id);
   CREATE INDEX IF NOT EXISTS nodes_live ON nodes(user_id, deleted_at);
   CREATE INDEX IF NOT EXISTS nodes_blob ON nodes(blob_hash);
   CREATE UNIQUE INDEX IF NOT EXISTS nodes_unique_name
     ON nodes(user_id, IFNULL(parent_id,''), name)
+    WHERE deleted_at IS NULL;
+  CREATE INDEX IF NOT EXISTS nodes_live_parent ON nodes(parent_id)
     WHERE deleted_at IS NULL;
 
   CREATE TABLE IF NOT EXISTS blobs (
@@ -110,6 +115,21 @@ db.exec(`
     created_at   TEXT NOT NULL
   );
 
+  -- Temporary archive downloads: a ZIP that exists only until its owner is done
+  -- with it. The row owns one blob reference (never a node), so expiry can free
+  -- the bytes without touching the tree. released_at is the owner saying "done";
+  -- NULL means still downloadable until expires_at.
+  CREATE TABLE IF NOT EXISTS archive_downloads (
+    id          TEXT PRIMARY KEY,
+    user_id     TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    name        TEXT NOT NULL,
+    blob_hash   TEXT NOT NULL,
+    size        INTEGER NOT NULL,
+    expires_at  TEXT NOT NULL,
+    released_at TEXT
+  );
+  CREATE INDEX IF NOT EXISTS archive_downloads_expiry ON archive_downloads(expires_at);
+
   CREATE TABLE IF NOT EXISTS shares (
     id            TEXT PRIMARY KEY,
     node_id       TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
@@ -123,6 +143,10 @@ db.exec(`
     created_at    TEXT NOT NULL
   );
   CREATE INDEX IF NOT EXISTS shares_node ON shares(node_id);
+  -- The owner's management list: every link this account created, across the
+  -- whole drive, newest first. Matches the query's ORDER BY exactly so SQLite
+  -- answers it from the index instead of sorting the account's shares per page.
+  CREATE INDEX IF NOT EXISTS shares_owner ON shares(user_id, created_at DESC, id DESC);
 
   CREATE TABLE IF NOT EXISTS audit_log (
     id         TEXT PRIMARY KEY,
@@ -367,9 +391,26 @@ export function dropRetiredTables() {
   return dropped
 }
 
+/**
+ * Adds the trash batch id to a database created before it existed.
+ *
+ * No rewrite and no backfill: an existing trashed row keeps a NULL batch and
+ * restore falls back to its `deleted_at`, which is how those old rows were
+ * grouped anyway. The column is what keeps two deletions made in the same
+ * millisecond apart from then on.
+ */
+function migrateTrashBatches() {
+  const columns = new Set(db.prepare('PRAGMA table_info(nodes)').all().map((row) => row.name))
+  if (!columns.has('trash_batch_id')) db.exec('ALTER TABLE nodes ADD COLUMN trash_batch_id TEXT')
+  db.exec(
+    'CREATE INDEX IF NOT EXISTS nodes_trashed_parent_batch ON nodes(parent_id, trash_batch_id, deleted_at) WHERE deleted_at IS NOT NULL',
+  )
+}
+
 // Runs after every declaration it needs: `nowIso` is a const, so calling the
 // migration earlier hits the temporal dead zone.
 migrateWorkspaces()
+migrateTrashBatches()
 // Keep the merge policy and snapshot across reload/resume. Old sessions retain
 // the original overwrite behaviour until explicitly supplied by their client.
 if (!db.prepare('PRAGMA table_info(upload_sessions)').all().some((column) => column.name === 'options')) {

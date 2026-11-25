@@ -79,12 +79,27 @@ export function requireFile(userId, id) {
   return row
 }
 
-function assertNameFree(userId, parentId, name, exceptId) {
-  const clash = db.prepare(`SELECT id FROM nodes n
+/**
+ * The live node called `name` in `parentId` that the caller's namespace already
+ * holds, or null.
+ *
+ * One query for assertNameFree, uniqueName and restore, so the three can never
+ * disagree about what "already exists" means: inside a folder that is every
+ * live sibling the folder's workspace can see; at the root it is the caller's
+ * own namespace, which is why restore passes the row's owner when a member
+ * restores someone else's root node.
+ */
+function nameClash(userId, parentId, name, exceptId) {
+  return db.prepare(`SELECT id FROM nodes n
     WHERE IFNULL(parent_id,'')=IFNULL(?,'') AND name=? AND deleted_at IS NULL AND id<>?
       AND (user_id=? OR (? IS NOT NULL AND EXISTS (SELECT 1 FROM memberships m WHERE m.user_id=? AND m.workspace_id=n.workspace_id)))`)
-    .get(parentId, name, exceptId || '', userId, parentId, userId)
-  if (clash) throw fail(409, 'CONFLICT', `"${name}" already exists in this folder.`)
+    .get(parentId ?? null, name, exceptId || '', userId, parentId ?? null, userId) || null
+}
+
+function assertNameFree(userId, parentId, name, exceptId) {
+  if (nameClash(userId, parentId, name, exceptId)) {
+    throw fail(409, 'CONFLICT', `"${name}" already exists in this folder.`)
+  }
 }
 
 /** Every descendant id of `id`, including itself, at any depth. */
@@ -234,33 +249,91 @@ export function updateNode(userId, id, { name, parentId, expectedVersion }) {
   return getNode(userId, id)
 }
 
-/** Soft-deletes `id` and every live descendant. Returns the affected ids. */
+/**
+ * Soft-deletes `id` and every live descendant, as one labelled batch.
+ *
+ * The recursive walk only follows live edges inside the root's workspace, so an
+ * independently trashed child (and its whole branch) is neither retagged nor
+ * counted, and a subtree is never walked across a workspace boundary. One
+ * statement does the whole update and RETURNING reports the rows that really
+ * changed, which is what the route audits and de-indexes.
+ */
 export function trashNode(userId, id) {
   const row = requireNode(userId, id)
   if (row.deleted_at) throw fail(404, 'NOT_FOUND', 'File or folder was not found.')
-  const ids = subtreeIds(userId, id)
   const timestamp = nowIso()
-  const statement = db.prepare('UPDATE nodes SET deleted_at=?, updated_at=? WHERE id=? AND deleted_at IS NULL')
-  transaction(() => { for (const nodeId of ids) statement.run(timestamp, timestamp, nodeId) })
-  return ids
+  // A random id, not the timestamp: two deletions started in the same
+  // millisecond are still two different batches, and restore can say so.
+  const batchId = randomId()
+  const rows = db.prepare(`WITH RECURSIVE sub(id) AS (
+      SELECT n.id FROM nodes n
+        WHERE n.id=? AND n.workspace_id IS ? AND n.deleted_at IS NULL
+      UNION
+      -- Join direction is the plan: walk from the recursive parent set into the
+      -- parent-id index once, instead of rescanning the workspace per level.
+      SELECT n.id FROM sub s CROSS JOIN nodes n ON n.parent_id=s.id
+        WHERE n.workspace_id IS ? AND n.deleted_at IS NULL
+    )
+    UPDATE nodes SET deleted_at=?, updated_at=?, trash_batch_id=?
+      WHERE id IN (SELECT id FROM sub) AND deleted_at IS NULL
+    RETURNING id`).all(id, row.workspace_id, row.workspace_id, timestamp, timestamp, batchId)
+  return rows.map((updated) => updated.id)
 }
 
-/** Restores `id` and the trashed descendants that belong to its subtree. */
+/**
+ * Restores `id` and the trashed descendants that belong to its deletion batch.
+ *
+ * The batch is the operation, not the time: a child that was deleted on its own
+ * earlier carries another batch id (or, for rows older than the column, another
+ * `deleted_at`) and is not touched — restore never walks across it into rows
+ * that were trashed later. Legacy rows have no batch id, so connected rows with
+ * the same original `deleted_at` stand in for it; nothing is backfilled.
+ *
+ * Root and descendants are restored in one transaction, and the exact rows are
+ * returned so the route can reindex only the files that actually came back.
+ *
+ * The name a restored node takes is resolved in the caller-visible namespace of
+ * its folder — the same one `assertNameFree`/`uniqueName` enforce, so a shared
+ * folder cannot end up with two identical-looking names. At the root that
+ * namespace is the row owner's, not the caller's: a member restoring someone
+ * else's root node must rename against *that* drive, or the restore would either
+ * collide with the owner's existing file or silently steal a name the owner can
+ * see and the member cannot.
+ */
 export function restoreNode(userId, id) {
   const row = requireNode(userId, id)
   if (!row.deleted_at) throw fail(404, 'NOT_FOUND', 'This item is not in the trash.')
   const parent = row.parent_id ? getNode(userId, row.parent_id) : null
   if (parent && parent.deleted_at) throw fail(400, 'INVALID_PARENT', 'Restore the parent folder first.')
-  const ids = subtreeIds(userId, id)
+  const groupSql = row.trash_batch_id ? 'n.trash_batch_id=?' : 'n.trash_batch_id IS NULL AND n.deleted_at=?'
+  const groupValue = row.trash_batch_id ?? row.deleted_at
   const timestamp = nowIso()
-  let name = row.name
-  const clash = db.prepare(`SELECT id FROM nodes WHERE user_id=? AND IFNULL(parent_id,'')=IFNULL(?,'') AND name=? AND deleted_at IS NULL AND id<>?`)
-    .get(userId, row.parent_id ?? null, name, id)
-  if (clash) name = uniqueName(userId, row.parent_id, `${name} (restored)`)
-  db.prepare('UPDATE nodes SET deleted_at=NULL, name=?, version=version+1, updated_at=? WHERE id=?').run(name, timestamp, id)
-  const statement = db.prepare(`UPDATE nodes SET deleted_at=NULL, updated_at=? WHERE id=? AND deleted_at IS NOT NULL`)
-  transaction(() => { for (const nodeId of ids) if (nodeId !== id) statement.run(timestamp, nodeId) })
-  return getNode(userId, id)
+  // Lookup and mutation sit in the same transaction: a sibling created between
+  // them must not be able to claim the name we just checked.
+  return transaction(() => {
+    const namespaceUserId = row.parent_id ? userId : row.user_id
+    let name = row.name
+    if (nameClash(namespaceUserId, row.parent_id, name, id)) {
+      name = uniqueName(namespaceUserId, row.parent_id, `${name} (restored)`)
+    }
+    // RETURNING * hands back the rows themselves, so the route gets the actual
+    // blobs/versions to reindex without a getNode per id.
+    const descendants = db.prepare(`WITH RECURSIVE sub(id) AS (
+        SELECT n.id FROM nodes n INDEXED BY nodes_trashed_parent_batch
+          WHERE n.parent_id=? AND n.workspace_id IS ? AND n.deleted_at IS NOT NULL AND ${groupSql}
+        UNION
+        -- Forced index: legacy equal-timestamp rows fall back to a workspace
+        -- range scan, so recurse parent-first through the partial index instead.
+        SELECT n.id FROM sub s CROSS JOIN nodes n INDEXED BY nodes_trashed_parent_batch ON n.parent_id=s.id
+          WHERE n.workspace_id IS ? AND n.deleted_at IS NOT NULL AND ${groupSql}
+      )
+      UPDATE nodes SET deleted_at=NULL, trash_batch_id=NULL, updated_at=?
+        WHERE id IN (SELECT id FROM sub)
+      RETURNING *`).all(id, row.workspace_id, groupValue, row.workspace_id, groupValue, timestamp)
+    const root = db.prepare('UPDATE nodes SET deleted_at=NULL, trash_batch_id=NULL, name=?, version=version+1, updated_at=? WHERE id=? RETURNING *')
+      .get(name, timestamp, id)
+    return { root, files: [root, ...descendants].filter((restored) => restored.kind === 'file') }
+  })
 }
 
 /** Splits `x.txt` into `x` + `.txt`; a dotfile or a long tail stays whole. */
@@ -286,12 +359,9 @@ export function uniqueName(userId, parentId, candidate, { keepExtension = false 
   let counter = 1
   // eslint-disable-next-line no-constant-condition
   while (true) {
-    // Same namespace as assertNameFree: a shared folder must not grow two "x.txt".
-    const clash = db.prepare(`SELECT id FROM nodes
-      WHERE IFNULL(parent_id,'')=IFNULL(?,'') AND name=? AND deleted_at IS NULL
-        AND (user_id=? OR (? IS NOT NULL AND EXISTS (SELECT 1 FROM memberships m WHERE m.user_id=? AND m.workspace_id=nodes.workspace_id)))`)
-      .get(parentId ?? null, name, userId, parentId ?? null, userId)
-    if (!clash) return name
+    // Same namespace as assertNameFree (and restore): a shared folder must not
+    // grow two "x.txt".
+    if (!nameClash(userId, parentId, name)) return name
     const suffix = ` (${counter++})`
     name = base.slice(0, NAME_LIMIT - suffix.length - ext.length) + suffix + ext
   }

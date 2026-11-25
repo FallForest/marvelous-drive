@@ -307,4 +307,262 @@ describe('incremental folder merge', () => {
     assert.equal(questions, 1);
     assert.equal(result, null);
   });
+
+  it('never lists or hashes a pending destination and still carries the absence guard', async () => {
+    const result = await prepareFolderFiles([
+      { file: local('new', 'c.txt'), parentId: undefined, pendingDestination: true },
+    ], {
+      listFiles: async () => { throw new Error('a pending folder cannot be listed'); },
+      hashFile: async () => { throw new Error('a new file has nothing to compare'); },
+      chooseConflict: async () => { throw new Error('no conflict'); },
+    });
+    assert.equal(result[0].pendingDestination, true);
+    assert.equal(result[0].options.expectedVersion, 0);
+    assert.equal(result[0].options.expectedNodeId, undefined);
+    assert.equal(result[0].options.onConflict, 'overwrite');
+    assert.equal(result[0].skip, false);
+  });
+});
+
+describe('folder merge preflight', () => {
+  // A tiny cloud: `Docs/` already exists with one changed same-named file.
+  // Everything else in the local tree below is new, including an empty folder
+  // and a nested branch. This is the reported browser case, scaled down.
+  const changed = () => new File(['new'], 'a.txt');
+  const nested = () => new File(['nest'], 'c.txt');
+  const localPlan = async () => {
+    const plan = planFromFileList([
+      Object.assign(changed(), { webkitRelativePath: 'Docs/a.txt' }),
+      Object.assign(nested(), { webkitRelativePath: 'Docs/branch/nested/c.txt' }),
+    ]);
+    // An empty directory only exists in a real DataTransfer/handle walk; the
+    // plan shape is the same, so the fixture adds it directly.
+    plan.dirs.add('Docs/new-empty');
+    return plan;
+  };
+
+  function cloud() {
+    const children = new Map([
+      ['root', [{ id: 'docs', parentId: 'root', kind: 'folder', name: 'Docs' }]],
+      ['docs', [{ id: 'fa', parentId: 'docs', kind: 'file', name: 'a.txt', size: 3, version: 3, blobHash: null }]],
+    ]);
+    const calls = { lookups: [], lists: [], creates: [], uploads: [], hashes: [], events: [] };
+    const add = (parentId, node) => {
+      const key = parentId || 'root';
+      if (!children.has(key)) children.set(key, []);
+      children.get(key).push(node);
+    };
+    const find = (parentId, name) => (children.get(parentId || 'root') || [])
+      .find((node) => node.kind === 'folder' && node.name === name) || null;
+    return {
+      children, calls,
+      lookupFolder: async (parentId, name) => {
+        calls.lookups.push((parentId || 'root') + '/' + name);
+        return find(parentId, name);
+      },
+      listFiles: async (parentId) => {
+        calls.lists.push(parentId || 'root');
+        return children.get(parentId || 'root') || [];
+      },
+      createFolder: async (parentId, name) => {
+        calls.creates.push((parentId || 'root') + '/' + name);
+        calls.events.push('create');
+        const node = { id: 'new:' + name, parentId, kind: 'folder', name };
+        add(parentId, node);
+        return node;
+      },
+      uploadFile: async (file, parentId, options) => {
+        calls.uploads.push({ name: file.name, parentId, options });
+        calls.events.push('upload');
+      },
+      hashFile: async (file) => {
+        calls.hashes.push(file.name);
+        calls.events.push('hash:' + file.name);
+        return sha256(file);
+      },
+    };
+  }
+
+  async function changedBlobHash() {
+    return sha256(new File(['old'], 'a.txt'));
+  }
+
+  it('cancels after hashing with zero directories or files created', async () => {
+    const plan = await localPlan();
+    const fake = cloud();
+    fake.children.get('docs')[0].blobHash = await changedBlobHash();
+    let questions = 0;
+    const summary = await uploadPlan(plan, {
+      parentId: 'root',
+      lookupFolder: fake.lookupFolder,
+      createFolder: fake.createFolder,
+      uploadFile: fake.uploadFile,
+      prepareFiles: (entries) => prepareFolderFiles(entries, {
+        listFiles: fake.listFiles,
+        hashFile: fake.hashFile,
+        chooseConflict: async (count) => {
+          questions += 1;
+          fake.calls.events.push('ask');
+          assert.equal(count, 1);
+          // Every comparison is done and nothing has been mutated yet: the
+          // dialog is the last read-only step before a decision.
+          assert.deepEqual(fake.calls.creates, []);
+          return null;
+        },
+      }),
+    });
+    assert.equal(questions, 1);
+    assert.deepEqual(fake.calls.hashes, ['a.txt']);
+    assert.equal(fake.calls.events.includes('create'), false);
+    assert.deepEqual(fake.calls.creates, []);
+    assert.deepEqual(fake.calls.uploads, []);
+    assert.equal(summary.canceled, true);
+    assert.equal(summary.folders, 0);
+    assert.equal(summary.uploaded, 0);
+    // Existing IDs were resolved read-only; children of a missing folder were
+    // never looked up, and only the one real destination was listed.
+    assert.deepEqual(fake.calls.lookups, ['root/Docs', 'docs/branch', 'docs/new-empty']);
+    assert.deepEqual(fake.calls.lists, ['docs']);
+  });
+
+  it('creates missing folders only after confirmation and binds new files by path', async () => {
+    const plan = await localPlan();
+    const fake = cloud();
+    fake.children.get('docs')[0].blobHash = await changedBlobHash();
+    let pending = null;
+    const summary = await uploadPlan(plan, {
+      parentId: 'root',
+      lookupFolder: fake.lookupFolder,
+      createFolder: fake.createFolder,
+      uploadFile: fake.uploadFile,
+      prepareFiles: async (entries) => {
+        pending = entries.map((entry) => ({
+          name: entry.file.name, path: entry.path, parentId: entry.parentId,
+          pendingDestination: entry.pendingDestination, blocked: entry.blocked,
+        }));
+        // Still read-only: the mkdirs happen after this returns.
+        assert.deepEqual(fake.calls.creates, []);
+        return prepareFolderFiles(entries, {
+          listFiles: fake.listFiles,
+          hashFile: fake.hashFile,
+          chooseConflict: async () => 'overwrite',
+        });
+      },
+    });
+    assert.deepEqual(pending, [
+      { name: 'a.txt', path: 'Docs', parentId: 'docs', pendingDestination: false, blocked: false },
+      { name: 'c.txt', path: 'Docs/branch/nested', parentId: undefined, pendingDestination: true, blocked: false },
+    ]);
+    // The existing folder is reused, never recreated; the empty folder and the
+    // nested branch materialise after the decision.
+    assert.deepEqual(fake.calls.creates, [
+      'docs/branch', 'docs/new-empty', 'new:branch/nested',
+    ]);
+    assert.equal(summary.folders, 3);
+    assert.equal(summary.failedFolders, 0);
+    assert.equal(summary.uploaded, 2);
+    assert.equal(summary.total, 2);
+    // The overwrite keeps the optimistic version guard from the live node.
+    const overwrite = fake.calls.uploads.find((entry) => entry.name === 'a.txt');
+    assert.equal(overwrite.parentId, 'docs');
+    assert.equal(overwrite.options.expectedVersion, 3);
+    assert.equal(overwrite.options.expectedNodeId, 'fa');
+    assert.equal(overwrite.options.onConflict, 'overwrite');
+    assert.equal(overwrite.options.hash, await sha256(new File(['new'], 'a.txt')));
+    // The new nested file is bound to the folder that was actually created.
+    const created = fake.calls.uploads.find((entry) => entry.name === 'c.txt');
+    assert.equal(created.parentId, 'new:nested');
+    assert.equal(created.options.expectedVersion, 0);
+  });
+
+  it('proceeds without asking when nothing conflicts and still creates empty new folders', async () => {
+    const plan = planFromFileList([
+      Object.assign(new File(['x'], 'x.txt'), { webkitRelativePath: 'New/x.txt' }),
+    ]);
+    plan.dirs.add('New/Empty');
+    const fake = cloud();
+    const summary = await uploadPlan(plan, {
+      parentId: 'root',
+      lookupFolder: fake.lookupFolder,
+      createFolder: fake.createFolder,
+      uploadFile: fake.uploadFile,
+      prepareFiles: (entries) => prepareFolderFiles(entries, {
+        listFiles: fake.listFiles,
+        hashFile: fake.hashFile,
+        chooseConflict: async () => { throw new Error('no conflict to confirm'); },
+      }),
+    });
+    assert.deepEqual(fake.calls.lookups, ['root/New']);
+    assert.deepEqual(fake.calls.creates, ['root/New', 'new:New/Empty']);
+    assert.equal(fake.calls.uploads.length, 1);
+    assert.equal(fake.calls.uploads[0].parentId, 'new:New');
+    assert.equal(summary.folders, 2);
+    assert.equal(summary.uploaded, 1);
+  });
+
+  it('issues no mutation when the read-only layout is cancelled', async () => {
+    const plan = await localPlan();
+    const fake = cloud();
+    const controller = new AbortController();
+    await assert.rejects(uploadPlan(plan, {
+      parentId: 'root',
+      signal: controller.signal,
+      lookupFolder: async (parentId, name) => { controller.abort(); return fake.lookupFolder(parentId, name); },
+      createFolder: fake.createFolder,
+      uploadFile: fake.uploadFile,
+      prepareFiles: async () => { throw new Error('must not compare after cancel'); },
+    }), { name: 'AbortError' });
+    assert.deepEqual(fake.calls.creates, []);
+    assert.deepEqual(fake.calls.uploads, []);
+  });
+
+  it('issues no mutation when hashing is cancelled', async () => {
+    const plan = await localPlan();
+    const fake = cloud();
+    fake.children.get('docs')[0].blobHash = await changedBlobHash();
+    const controller = new AbortController();
+    await assert.rejects(uploadPlan(plan, {
+      parentId: 'root',
+      signal: controller.signal,
+      lookupFolder: fake.lookupFolder,
+      createFolder: fake.createFolder,
+      uploadFile: fake.uploadFile,
+      prepareFiles: (entries) => prepareFolderFiles(entries, {
+        listFiles: fake.listFiles,
+        hashFile: async () => {
+          controller.abort();
+          throw Object.assign(new Error('aborted'), { name: 'AbortError' });
+        },
+        chooseConflict: async () => { throw new Error('must not ask after cancel'); },
+      }),
+    }), { name: 'AbortError' });
+    assert.deepEqual(fake.calls.creates, []);
+    assert.deepEqual(fake.calls.uploads, []);
+  });
+
+  it('blocks files under a failed mkdir instead of falling back to the root', async () => {
+    const plan = planFromFileList([
+      Object.assign(nested(), { webkitRelativePath: 'Docs/branch/c.txt' }),
+    ]);
+    const fake = cloud();
+    fake.createFolder = async (parentId, name) => {
+      fake.calls.creates.push((parentId || 'root') + '/' + name);
+      throw new Error('forbidden');
+    };
+    const summary = await uploadPlan(plan, {
+      parentId: 'root',
+      lookupFolder: fake.lookupFolder,
+      createFolder: fake.createFolder,
+      uploadFile: fake.uploadFile,
+      prepareFiles: (entries) => prepareFolderFiles(entries, {
+        listFiles: fake.listFiles,
+        hashFile: fake.hashFile,
+        chooseConflict: async () => 'overwrite',
+      }),
+    });
+    assert.deepEqual(fake.calls.creates, ['docs/branch']);
+    assert.deepEqual(fake.calls.uploads, []);
+    assert.equal(summary.failedFolders, 1);
+    assert.equal(summary.uploaded, 0);
+  });
 });

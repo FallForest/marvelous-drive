@@ -7,6 +7,8 @@
  *   components  buttons, fields, dialogs, drawers, menus, toasts
  *   app     drive surfaces: sidebar, list, preview, uploads, share page
  *   downloads  the download center: topbar entry + its panel
+ *   shares  the owner's link management page (/shares)
+ *   share-downloads  the public /s/<token> page's entry and download anchors
  *
  * Each layer may only reference the ones above it. A component that needs a
  * new duration, curve or colour adds a token in tokens.css first — that is what
@@ -19,3 +21,5 @@
 @import './app.css';
 @import './updates.css';
 @import './downloads.css';
+@import './shares.css';
+@import './share-downloads.css';

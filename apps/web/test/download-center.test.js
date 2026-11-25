@@ -167,6 +167,62 @@ describe('download center', () => {
     assert.equal(task.carrier.id, 'zip-1')
   })
 
+  it('packages a temporary carrier again once its TTL passed before the retry', async () => {
+    const time = clock()
+    let packages = 0
+    let attempts = 0
+    const urls = []
+    const { entries, saveBlob } = saved()
+    const center = createDownloadCenter({
+      now: time.now,
+      saveBlob,
+      // The file route a node carrier would use: a temporary carrier must never
+      // fall back to it.
+      contentUrl: (id) => '/files/' + id + '/content?download=1',
+      fetchBlob: async (url) => {
+        attempts += 1
+        urls.push(url)
+        if (attempts === 1) throw Object.assign(new Error('网络中断。'), { code: 'NETWORK' })
+        return new Blob(['zip'])
+      },
+    })
+    center.entry()
+    const handle = center.start({
+      name: 'Bundle.zip',
+      kind: 'archive',
+      prepare: async () => {
+        packages += 1
+        return {
+          id: 'zip-' + packages,
+          name: 'Bundle.zip',
+          temporary: true,
+          expiresAt: new Date(time.now() + 60_000).toISOString(),
+        }
+      },
+    })
+    const first = await handle.done
+    assert.equal(first.state, 'failed')
+    assert.equal(packages, 1)
+    // A transient transfer failure is no proof the registry dropped the bytes:
+    // the carrier stays, so a retry inside its TTL would reuse it.
+    assert.equal(first.carrier.id, 'zip-1')
+    assert.match(urls[0], /\/archive-downloads\/zip-1$/)
+    assert.ok(!urls[0].includes('/files/'), 'a temporary carrier reads its own route, not the file route')
+
+    // Past the TTL that carrier can only answer ARCHIVE_DOWNLOAD_UNAVAILABLE, so
+    // the retry packages it again instead of spending a round trip on it.
+    time.advance(60_001)
+    await handle.retry().done
+    const task = center.tasks[0]
+    assert.equal(packages, 2, 'an expired carrier is rebuilt exactly once')
+    assert.equal(attempts, 2)
+    assert.match(urls[1], /\/archive-downloads\/zip-2$/)
+    assert.ok(!urls[1].includes('/files/'), 'the rebuilt carrier still uses the archive-downloads route')
+    assert.equal(task.state, 'done')
+    assert.equal(task.carrier.id, 'zip-2')
+    assert.deepEqual(entries, [{ size: 3, filename: 'Bundle.zip' }])
+  })
+
   it('aborts the transport on cancel and lets the task be retried', async () => {
     const time = clock()
     let aborted = false

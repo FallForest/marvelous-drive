@@ -1,12 +1,13 @@
 import { db, nowIso } from '../db.js'
 import { userFromRequest } from '../auth.js'
-import { sendJson } from '../http.js'
-import { pathTo, requireNode } from '../nodes.js'
+import { fail, sendJson } from '../http.js'
+import { nodeJson, pathTo, requireNode } from '../nodes.js'
 import { config } from '../config.js'
 import { sweepExpiredTrash } from '../ops/retention.js'
 import { quotaSnapshot } from '../ops/quota.js'
 import { AUDIT_RETENTION_DAYS, listAudit } from '../ops/audit.js'
 import { indexCoverage, searchContents } from '../ops/search-index.js'
+import { buildSearchFilters, isSearchKind, SEARCH_KIND_NAMES } from '../ops/search-filters.js'
 import { drainIndexJobs, indexJobSummary } from '../ops/index-jobs.js'
 import { addMember, workspaceFor, workspacesFor } from '../workspaces.js'
 
@@ -17,6 +18,47 @@ const SEARCH_LIMIT_MAX = 100
 const SEARCH_OFFSET_MAX = 1000
 /** A report longer than this stops being a report and becomes a chore. */
 const DUPLICATE_GROUP_LIMIT = 100
+
+/** An integer query parameter that survives "", "abc", "2.7" and "Infinity". */
+function countParam(value, fallback) {
+  const raw = String(value ?? '').trim()
+  if (!raw) return fallback
+  const parsed = Number(raw)
+  return Number.isFinite(parsed) ? Math.trunc(parsed) : fallback
+}
+
+/** An ISO 8601 date, or a date-time with optional seconds/fraction and zone. */
+const ISO_DATE_OR_TIME = /^(\d{4})-(\d{2})-(\d{2})(?:T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,9})?)?(?:Z|[+-]\d{2}:?\d{2})?)?$/i
+
+/** Rejects shapes like 2024-02-31 that `Date.parse` would silently roll over. */
+function isCalendarDate(match) {
+  const month = Number(match[2])
+  const day = Number(match[3])
+  if (month < 1 || month > 12 || day < 1) return false
+  return day <= new Date(Date.UTC(Number(match[1]), month, 0)).getUTCDate()
+}
+
+/**
+ * An ISO date/time read as UTC.
+ *
+ * Only ISO 8601 is accepted: `Date.parse` also understands "March 5, 2024" and
+ * bare years like "5", which would turn a typo into a filter nobody asked for.
+ * A string with a time but no designator is ambiguous, and this parameter is
+ * documented as UTC, so it is treated as UTC rather than as the server's locale.
+ * Anything that still will not parse is a 400, not a silently ignored filter.
+ */
+function updatedAfterParam(value) {
+  const raw = String(value || '').trim()
+  if (!raw) return null
+  const match = ISO_DATE_OR_TIME.exec(raw)
+  if (!match || !isCalendarDate(match)) {
+    throw fail(400, 'INVALID_INPUT', 'updatedAfter must be an ISO 8601 timestamp in UTC.')
+  }
+  const needsZone = /T\d{2}:\d{2}/.test(raw) && !/(?:Z|[+-]\d{2}:?\d{2})$/i.test(raw)
+  const parsed = Date.parse(needsZone ? raw + 'Z' : raw)
+  if (!Number.isFinite(parsed)) throw fail(400, 'INVALID_INPUT', 'updatedAfter must be an ISO 8601 timestamp in UTC.')
+  return new Date(parsed).toISOString()
+}
 
 export function registerMiscRoutes(router, { version }) {
   router.get('/healthz', async (ctx) => {
@@ -36,6 +78,12 @@ export function registerMiscRoutes(router, { version }) {
    * half matched. Name hits come first because a file called "invoice.pdf" is a
    * better answer to "invoice" than a log line that mentions it.
    *
+   * The filters (`kind`, `folderId`, `updatedAfter`) are orthogonal to both
+   * halves, so they are built ONCE as a fixed SQL fragment with bound values and
+   * handed to both searches. Both apply them before their LIMIT — filtering a
+   * page after it was paginated would return short pages that look like the end
+   * of the results.
+   *
    * Paging is a window, not a cursor: `offset` + `limit` slice the merged list
    * and `hasMore` says whether anything fell off the end. There is deliberately
    * no `total` — the two halves are fetched with their own budgets, so a count
@@ -44,43 +92,87 @@ export function registerMiscRoutes(router, { version }) {
   router.get('/api/v1/search', async (ctx) => {
     const user = userFromRequest(ctx.req, ctx.url)
     const term = String(ctx.url.searchParams.get('q') || '').trim()
-    const limit = Math.min(Math.max(Number(ctx.url.searchParams.get('limit') || 20), 1), SEARCH_LIMIT_MAX)
-    const requestedOffset = Math.trunc(Number(ctx.url.searchParams.get('offset') || 0)) || 0
-    const offset = Math.min(Math.max(requestedOffset, 0), SEARCH_OFFSET_MAX)
+    const limit = Math.min(Math.max(countParam(ctx.url.searchParams.get('limit'), 20), 1), SEARCH_LIMIT_MAX)
+    const requestedOffset = Math.max(countParam(ctx.url.searchParams.get('offset'), 0), 0)
+    const offset = Math.min(requestedOffset, SEARCH_OFFSET_MAX)
     const scope = ['all', 'name', 'content'].includes(String(ctx.url.searchParams.get('scope')))
       ? String(ctx.url.searchParams.get('scope'))
       : 'all'
-    if (!term) { sendJson(ctx.res, 200, { results: [], limit, offset, hasMore: false, scope }); return }
-    if (scope !== 'name') await drainIndexJobs(user.id)
+
+    const requestedKind = String(ctx.url.searchParams.get('kind') || '').trim().toLowerCase()
+    if (requestedKind && !isSearchKind(requestedKind)) {
+      throw fail(400, 'INVALID_INPUT', `kind must be one of: ${SEARCH_KIND_NAMES.join(', ')}.`)
+    }
+    const kind = requestedKind || null
+    const folderId = String(ctx.url.searchParams.get('folderId') || '').trim() || null
+    const updatedAfter = updatedAfterParam(ctx.url.searchParams.get('updatedAfter'))
+
+    // `requireNode` already encodes the visibility rule (owner, or a workspace
+    // the caller belongs to), so a missing folder and a forbidden one both come
+    // back as 404 without this route re-deciding who may see what.
+    if (folderId) {
+      const folder = requireNode(user.id, folderId)
+      if (folder.deleted_at) throw fail(404, 'NOT_FOUND', 'Folder was not found.')
+      if (folder.kind !== 'folder') throw fail(400, 'NOT_FOLDER', 'The parent must be a folder.')
+    }
+
+    // One fixed SQL fragment, built once and handed to BOTH halves, so the name
+    // LIKE query and the FTS/LIKE content queries cannot answer different
+    // questions. Every user-supplied value inside it is a bound parameter, and it
+    // is spliced in BEFORE each LIMIT so a filter never shrinks a page after it
+    // was paginated.
+    const filters = buildSearchFilters(user.id, { folderId, updatedAfter, kind })
+    const filterSql = filters.sql
+
+    // No search word but a filter is still a question ("every PDF in this
+    // folder"), so it gets answered from the name branch: every matching node,
+    // newest first. The content index has no word to look for, so this branch
+    // runs even when `scope=content` was requested; the response still echoes the
+    // scope the caller asked for. With neither a word nor a filter there is
+    // nothing to say.
+    const browseOnly = !term && Boolean(kind || folderId || updatedAfter)
+    if (!term && !browseOnly) {
+      sendJson(ctx.res, 200, { results: [], limit, offset, hasMore: false, scope, kind, folderId, updatedAfter })
+      return
+    }
+    if (term && scope !== 'name') await drainIndexJobs(user.id)
 
     // One row beyond the window is fetched on purpose: its existence is the only
     // honest "there is more" signal, and it costs exactly one row.
     const window = offset + limit + 1
-    const results = []
+    // Candidates stay raw rows: `nodeJson`/`pathTo` run only for the page that is
+    // actually returned, so a deep page never resolves paths for the rows in front
+    // of the window that `offset` throws away.
+    const candidates = []
     const seen = new Set()
-    const push = (nodeLike, extra) => {
-      if (seen.has(nodeLike.id)) return
-      seen.add(nodeLike.id)
-      results.push(nodeLike)
+    const push = (row, matched, snippet) => {
+      if (seen.has(row.id)) return
+      seen.add(row.id)
+      candidates.push({ row, matched, snippet: snippet ?? null })
     }
 
-    if (scope !== 'content') {
-      const pattern = `%${term.replace(/[%_\\]/g, (char) => `\\${char}`)}%`
-      const rows = db.prepare(`SELECT * FROM nodes WHERE user_id=? AND deleted_at IS NULL AND name LIKE ? ESCAPE '\\'
-          ORDER BY (kind='file') DESC, length(name), lower(name) LIMIT ?`).all(user.id, pattern, window)
-      for (const row of rows) {
-        push({
-          id: row.id, name: row.name, kind: row.kind, parentId: row.parent_id ?? null,
-          size: row.size, mime: row.mime, updatedAt: row.updated_at,
-          path: pathTo(user.id, row.parent_id), matched: 'name', snippet: null,
-        })
-      }
+    // `browseOnly` is answered by the name branch even when `scope=content` was
+    // asked for: there is no word to look for in the bodies, and the filters are
+    // still a question worth answering.
+    if (browseOnly || scope !== 'content') {
+      // Stable order: the sort key is unique (id breaks every tie), which is what
+      // makes `offset` mean the same thing on the next page.
+      const order = browseOnly
+        ? 'n.updated_at DESC, lower(n.name), n.id'
+        : "(n.kind='file') DESC, length(n.name), lower(n.name), n.id"
+      const rows = browseOnly
+        ? db.prepare(`SELECT n.* FROM nodes n WHERE ${filterSql} ORDER BY ${order} LIMIT ?`)
+            .all(...filters.params, window)
+        : db.prepare(`SELECT n.* FROM nodes n WHERE ${filterSql} AND n.name LIKE ? ESCAPE '\\'
+            ORDER BY ${order} LIMIT ?`)
+            .all(...filters.params, `%${term.replace(/[%_\\]/g, (char) => `\\${char}`)}%`, window)
+      for (const row of rows) push(row, 'name', null)
     }
 
-    if (scope !== 'name' && results.length < window) {
-      // The index caps its own fetch at 50 per mechanism, so a deep page simply
-      // has fewer content hits to merge into it — never fewer pages of names.
-      for (const hit of searchContents(user.id, term, window)) {
+    if (term && scope !== 'name' && candidates.length < window) {
+      // The index raises its own fetch to offset+limit+1 so a deep page has
+      // content hits left to merge in rather than an empty tail.
+      for (const hit of searchContents(user.id, term, window, { folderId, updatedAfter, kind })) {
         if (seen.has(hit.nodeId)) continue
         // Same visibility rule as a direct read: owned by the caller, or in a
         // workspace they belong to. Filtering by owner here would throw away the
@@ -90,26 +182,35 @@ export function registerMiscRoutes(router, { version }) {
             AND (n.user_id=? OR EXISTS (SELECT 1 FROM memberships m WHERE m.user_id=? AND m.workspace_id=n.workspace_id))`)
           .get(hit.nodeId, user.id, user.id)
         if (!row) continue
-        push({
-          id: row.id, name: row.name, kind: row.kind, parentId: row.parent_id ?? null,
-          size: row.size, mime: row.mime, updatedAt: row.updated_at,
-          path: pathTo(user.id, row.parent_id), matched: 'content',
-          // `marked` uses the control characters FTS5 was told to emit; the
-          // client turns them into <mark> so no markup travels in JSON.
-          snippet: String(hit.snippet || '').replace(/\u0001/g, '').replace(/\u0002/g, ''),
-        })
-        if (results.length >= window) break
+        // `marked` uses the control characters FTS5 was told to emit; the client
+        // turns them into <mark> so no markup travels in JSON.
+        push(row, 'content', String(hit.snippet || '').replace(/\u0001/g, '').replace(/\u0002/g, ''))
+        if (candidates.length >= window) break
       }
     }
 
-    // hasMore is "the fetch budget overflowed the window", not a total: the
-    // extra row proves there is at least one more hit and nothing else.
+    const page = candidates.slice(offset, offset + limit)
+    const results = page.map(({ row, matched, snippet }) => nodeJson(row, {
+      path: pathTo(user.id, row.parent_id),
+      matched,
+      snippet,
+    }))
+
+    // hasMore is "the fetch budget overflowed the window", not a total: the extra
+    // row proves there is at least one more hit and nothing else. Once this page
+    // ends at or past the offset ceiling it is forced false: `offset` is clamped
+    // to SEARCH_OFFSET_MAX, so the next page would be served from the same
+    // position again and repeat the tail instead of showing more results.
+    const pastOffsetCap = offset + limit > SEARCH_OFFSET_MAX
     sendJson(ctx.res, 200, {
-      results: results.slice(offset, offset + limit),
+      results,
       limit,
       offset,
-      hasMore: results.length > offset + limit,
+      hasMore: !pastOffsetCap && candidates.length > offset + limit,
       scope,
+      kind,
+      folderId,
+      updatedAfter,
     })
   })
 

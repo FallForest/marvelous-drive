@@ -306,6 +306,27 @@ export function createUploader(options) {
     get paused() { return scheduler.paused; },
     get interruptedCount() { return interrupted; },
     get history() { return finished.slice(); },
+    /**
+     * A folder walk that has not enqueued anything yet. Forwarded to the panel,
+     * which owns the row; headless uploaders (the tests) get a no-op handle so
+     * callers never have to branch on whether a panel exists.
+     *
+     * The third argument is the panel's option bag, forwarded verbatim:
+     * `{ onCancel }` adds a 取消准备 control to the row. Without it the row
+     * keeps its old, cancel-free shape — so a headless uploader must still
+     * hand back a working `cancel()` that simply reports false.
+     */
+    beginPreparation(name, count, options) {
+      if (queue && typeof queue.beginPreparation === 'function') return queue.beginPreparation(name, count, options);
+      const noop = () => {};
+      return {
+        name: String(name || ''),
+        update: noop,
+        end: noop,
+        cancel: () => false,
+        get canceled() { return false; },
+      };
+    },
     add,
     enqueue,
     enqueueAll,

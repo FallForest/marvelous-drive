@@ -10,7 +10,7 @@
 
 import { h, raw } from './dom.js';
 import { icon, relativeTime } from './format.js';
-import { api, request, clearToken } from './api.js';
+import { api, request, requestArchive, clearToken, archiveDownloadUrl } from './api.js';
 import { toast, dialog, promptDialog, confirmDialog, copyText, drawer, openMenu } from './ui.js';
 import { beginInlineRename, toggleStar, renameNode, moveNode, createFolder, deleteNode, restoreNode, purgeNode } from './files.js';
 import { openPreview, showDetails } from './preview.js';
@@ -46,10 +46,41 @@ function cssEscape(value) {
  * The gallery is everything the current view shows, so → walks the rows the
  * user is looking at — in their sort order, in the current folder — and never
  * jumps into a file that is only reachable through another directory.
+ *
+ * `gallery` is a function, not a snapshot, because a directory is paged: the
+ * rows the drawer can walk grow when the folder's next page arrives, and the
+ * answer to "is there another picture?" is only true while this route is still
+ * the one on screen. The function is re-read by the drawer after every appended
+ * page, and returns null once the route behind it has moved — a drawer left open
+ * across a navigation must not pull page two of the folder the user just left.
  */
 export function openPreviewFor(node) {
+  // The route the drawer belongs to, captured once: a later navigation must be
+  // detectable even though the store is one shared object. Paging is only ever
+  // allowed into the folder/query the drawer was opened on — a drawer left open
+  // across a navigation must not pull page two of the directory the user left.
+  const route = store.state.route;
   openPreview(node, {
-    gallery: visibleNodes(),
+    gallery: () => {
+      if (store.state.route !== route) return null;
+      // `searchMore` and `nodeMore` are per-load cursors: app.js replaces them
+      // on every loadRoute(), so the offset/hasMore read here is always the one
+      // the list on screen belongs to.
+      const more = route.name === 'search' ? store.state.searchMore : store.state.nodeMore;
+      const hasMore = Boolean(more && more.hasMore);
+      return {
+        nodes: visibleNodes(),
+        hasMore,
+        // How many rows the view has already read: the drawer compares it
+        // across a request to tell an arrived page from one still in flight.
+        offset: Number(more && more.offset) || 0,
+        // Only the verbs the shell already owns: no request is built here and
+        // no page is fetched until the viewer actually runs out of pictures.
+        loadMore: hasMore
+          ? () => (route.name === 'search' ? runtime.loadMoreSearch() : runtime.loadMoreNodes())
+          : null,
+      };
+    },
     onDownload: (target) => downloadOne(target),
     onShare: (target) => openShareDialog(target),
     onDetails: (target) => showDetails(target),
@@ -109,41 +140,70 @@ function archiveCarrier(payload) {
   return archive;
 }
 
+/** A carrier built by the archive-download registry instead of a real node. */
+function isTemporaryArchive(archive) {
+  return Boolean(archive) && archive.temporary === true;
+}
+
 /**
- * Deletes a carrier archive node, best effort.
+ * Drops a carrier archive, best effort.
  *
- * Only ever called after the download resolved: the node is the only handle on
- * those bytes, so removing it any earlier (the old `finally`) turned one failed
- * download into a lost archive. The download panel keeps the carrier too: a
- * failed or canceled transfer can be retried without zipping the folder again.
+ * Only ever called after the download resolved: the carrier is the only handle
+ * on those bytes, so removing it any earlier (the old `finally`) turned one
+ * failed download into a lost archive. The download panel keeps the carrier
+ * too: a failed or canceled transfer can be retried without zipping the folder
+ * again.
+ *
+ * The two kinds are dropped differently. A temporary one is a registry row, so
+ * it is released through its own route and needs no list refresh: no node was
+ * ever created, and refreshing for one would repaint the whole tree for nothing.
+ * A legacy one is a real node, so it is deleted exactly as before and the list
+ * refreshes once that delete completed — if it failed, the node is still there
+ * and the rows on screen are still correct.
  */
 function releaseArchive(archive) {
   if (!archive) return;
-  request('/nodes/' + archive.id, { method: 'DELETE' }).catch(() => {});
-  runtime.refreshData();
+  if (isTemporaryArchive(archive)) {
+    request(archiveDownloadUrl(archive.id), { method: 'DELETE' })
+      .catch(() => {});
+    return;
+  }
+  request('/nodes/' + archive.id, { method: 'DELETE' })
+    .then(() => runtime.refreshData())
+    .catch(() => {});
 }
 
 /**
  * Report a ZIP task that did not deliver.
  *
  * The carrier is deliberately not released: it is still the only copy of the
- * bytes, and the panel's retry reuses it. Both sentences name that fact, because
- * "打包完成，但下载没有开始" without "保留在列表中" reads as "your archive is gone".
+ * bytes, and the panel's retry reuses it. The sentence names where the retry
+ * is, because "打包完成，但下载没有开始" without it reads as "your archive is
+ * gone".
+ *
+ * A temporary carrier is never in the list — it is not a node — so its copy
+ * points at the download panel only, and no list refresh is needed. A legacy
+ * carrier is a row the user can see, so it keeps saying "列表" and repaints.
  */
 function reportArchiveFailure(archive, result) {
   const reason = (result && result.message) || '下载失败。';
+  const temporary = isTemporaryArchive(archive);
   if (result && result.state === 'canceled') {
     toast('已取消下载压缩包。', {
       type: 'info',
-      detail: '压缩包「' + archive.name + '」保留在列表和下载面板中，可以再点一次下载。',
+      detail: temporary
+        ? '压缩包「' + archive.name + '」保留在下载面板中，可以再点一次下载。'
+        : '压缩包「' + archive.name + '」保留在列表和下载面板中，可以再点一次下载。',
     });
   } else {
     toast('打包完成，但下载没有开始。', {
       type: 'error',
-      detail: '压缩包「' + archive.name + '」保留在列表中，可以在下载面板重试：' + reason,
+      detail: temporary
+        ? '压缩包「' + archive.name + '」保留在下载面板中，可以重试：' + reason
+        : '压缩包「' + archive.name + '」保留在列表中，可以在下载面板重试：' + reason,
     });
   }
-  runtime.refreshData();
+  if (!temporary) runtime.refreshData();
 }
 
 /** Zips whatever is selected and downloads it, then drops the carrier node. */
@@ -153,13 +213,19 @@ export async function downloadSelectionArchive() {
   const handle = downloadCenter().start({
     name: selected.length > 1 ? selected.length + ' 个项目的压缩包' : (selected[0].name || '压缩包') + '.zip',
     kind: 'archive',
-    prepare: async () => {
-      // Deliberately no abort signal: cutting a running archive build leaves the
-      // server with a half-written carrier and no way to name it. The cancel is
-      // honoured the moment packaging returns; the node is then kept, not lost.
-      const payload = await request('/nodes/archive', { method: 'POST', body: { ids: selected.map((node) => node.id) } });
+    prepare: async ({ signal, onProgress }) => {
+      // The build can be followed over SSE on the same route; a server that
+      // answers in one JSON body is understood by requestArchive() itself.
+      const payload = await requestArchive('/nodes/archive', {
+        body: { ids: selected.map((node) => node.id) },
+        signal,
+        onProgress,
+      });
       return archiveCarrier(payload);
     },
+    // The carrier may only be dropped once the browser really got the blob; the
+    // panel fires this on a successful execution, including a successful retry.
+    onDelivered: releaseArchive,
   });
   const result = await handle.done;
   const archive = result.carrier;
@@ -170,7 +236,6 @@ export async function downloadSelectionArchive() {
   }
   if (result.state !== 'done') { reportArchiveFailure(archive, result); return; }
   toast('已打包 ' + selected.length + ' 项并开始下载。', { type: 'success' });
-  releaseArchive(archive);
 }
 
 /** Zips one folder and downloads the archive, then deletes the carrier node. */
@@ -179,12 +244,18 @@ export async function downloadFolderArchive(node) {
   const handle = downloadCenter().start({
     name: (node.name || '文件夹') + '.zip',
     kind: 'archive',
-    prepare: async () => {
-      // Same reasoning as the selection archive: let the build finish so the
-      // carrier can be named, then honour a cancel on the transfer.
-      const payload = await request('/nodes/' + node.id + '/archive', { method: 'POST', body: {} });
+    prepare: async ({ signal, onProgress }) => {
+      // A folder build can be the long one: the same negotiated stream reports
+      // its progress and lets a cancel stop it before the carrier is named.
+      const payload = await requestArchive('/nodes/' + node.id + '/archive', {
+        body: {},
+        signal,
+        onProgress,
+      });
       return archiveCarrier(payload);
     },
+    // Same contract as the selection archive: release only after the save landed.
+    onDelivered: releaseArchive,
   });
   const result = await handle.done;
   const archive = result.carrier;
@@ -194,7 +265,6 @@ export async function downloadFolderArchive(node) {
   }
   if (result.state !== 'done') { reportArchiveFailure(archive, result); return; }
   toast('已生成「' + archive.name + '」并开始下载。', { type: 'success' });
-  releaseArchive(archive);
 }
 
 export function startRename(node) {
@@ -335,14 +405,16 @@ export async function startDelete(node) {
  * ones refused. A failed item stays picked (so Delete / 移到回收站 can be pressed
  * again) and the toast names up to three of them with the server's reason.
  */
-async function deleteBatch(list, remove) {
+async function deleteBatch(list, remove, coveredIds) {
   const failedNodes = [];
   const errors = [];
   for (const node of list) {
     try {
       await remove(node);
       // Only successes leave the selection; the retry set is exactly its complement.
-      store.state.selection.delete(node.id);
+      // A collapsed root also covers its selected descendants, which the one
+      // request already acted on.
+      for (const id of coveredIds ? coveredIds(node) : [node.id]) store.state.selection.delete(id);
     } catch (error) {
       failedNodes.push(node);
       errors.push(node.name + '：' + ((error && error.message) || '删除失败'));
@@ -358,23 +430,289 @@ function failureDetail(errors) {
   return errors.slice(0, 3).join('；');
 }
 
+/** The ids in a trashed row's originalPath, or null when the page gave none. */
+function originalPathIds(node) {
+  if (!Array.isArray(node && node.originalPath)) return null;
+  return node.originalPath
+    .map((segment) => (typeof segment === 'string' ? segment : segment && segment.id))
+    .filter(Boolean);
+}
+
+/**
+ * Root-to-parent ids via parentId, reading each link from the selection first
+ * and the loaded tree second.
+ *
+ * The fallback for rows whose originalPath the page could not resolve (a
+ * missing segment is null, never a partial chain): the trash page still knows
+ * the parent id, and a selected parent does not need to be on the same page.
+ */
+function ancestorIds(node, selectedById, index) {
+  const ids = [];
+  const visited = new Set([node.id]);
+  const byId = (index && index.byId) || session.index.byId;
+  let current = node.parentId || null;
+  while (current && !visited.has(current) && ids.length < 256) {
+    visited.add(current);
+    ids.unshift(current);
+    const parent = selectedById.get(current) || byId.get(current);
+    current = (parent && parent.parentId) || null;
+  }
+  return ids;
+}
+
+/** The trash row's delete-operation group, or null on a server without it. */
+function trashGroupOf(node) {
+  const value = node && node.trashGroup;
+  return typeof value === 'string' && value ? value : null;
+}
+
+/**
+ * Root-to-parent ids for one selected trashed row.
+ *
+ * `originalPath` is the primary answer because the parent may be on another
+ * page and therefore absent from the loaded index. Rows the page could not
+ * resolve keep the parentId fallback the purge planner already uses.
+ */
+function trashAncestors(node, selectedById, index) {
+  const path = originalPathIds(node);
+  if (path !== null) return path;
+  return ancestorIds(node, selectedById, index);
+}
+
+/** The selected ancestor nearest to `node` on its trash path, or null. */
+function nearestSelectedAncestor(chain, selectedById) {
+  for (let index = chain.length - 1; index >= 0; index -= 1) {
+    const ancestor = selectedById.get(chain[index]);
+    if (ancestor) return ancestor;
+  }
+  return null;
+}
+
+/**
+ * The selected nodes to request, with every selected descendant folded into the
+ * selected ancestor that already covers it.
+ *
+ * A trashed parent and its trashed child are one subtree: purging the parent
+ * already acts on the child, so requesting both would make the child answer
+ * "not in the trash" after its parent succeeded. `originalPath` is what makes
+ * that visible in a paged trash view where the parent may be on another page;
+ * rows without it fall back to the existing moveRoots/index rule.
+ *
+ * Restore does NOT use this collapse — see planRestore, where a separately
+ * deleted child must keep its own request. Delete and permanent delete keep it.
+ *
+ * Returns the roots plus, per root, the selected ids it covers (including
+ * itself). A failed root therefore keeps exactly the rows it would retry.
+ */
+function topmostSelection(nodes) {
+  const list = [];
+  const selectedById = new Map();
+  for (const node of nodes || []) {
+    if (!node || !node.id || selectedById.has(node.id)) continue;
+    selectedById.set(node.id, node);
+    list.push(node);
+  }
+  if (!list.length) return { nodes: [], coverage: new Map() };
+
+  const candidates = list.filter((node) => {
+    const path = originalPathIds(node);
+    if (!path) return true;
+    return !path.some((id) => selectedById.has(id));
+  });
+  const rootIds = new Set(moveRoots(candidates.map((node) => node.id), session.index));
+  const roots = candidates.filter((node) => rootIds.has(node.id));
+  const coverage = new Map(roots.map((node) => [node.id, new Set([node.id])]));
+  for (const node of list) {
+    if (coverage.has(node.id)) continue;
+    // Nearest ancestor first: with roots already collapsed there is at most one
+    // selected root above this row, and it is the closest one.
+    const path = originalPathIds(node);
+    if (coverByAncestors(path, coverage, node)) continue;
+    coverByAncestors(ancestorIds(node, selectedById, session.index), coverage, node);
+  }
+  return { nodes: roots, coverage };
+}
+
+/** Adds `node` to the coverage of the nearest planned (or selected) id. */
+function coverByAncestors(ancestors, coverage, node) {
+  const covered = nearestAncestorCoverage(ancestors, coverage);
+  if (!covered) return false;
+  covered.add(node.id);
+  return true;
+}
+
+/**
+ * The coverage set of the nearest ancestor that is planned or already covered.
+ *
+ * `coverage` carries the request roots and, after the single pass that folds
+ * rows in, the selected descendants each root covers. Nearby entries therefore
+ * let a grandchild join its parent's request instead of becoming another one.
+ */
+function nearestAncestorCoverage(ancestors, coverage) {
+  let nearest = null;
+  let at = -1;
+  for (let index = (ancestors || []).length - 1; index >= 0; index -= 1) {
+    const covered = coverage.get(ancestors[index]);
+    if (covered && index > at) { nearest = covered; at = index; }
+  }
+  return nearest;
+}
+
+/**
+ * The requests one restore batch should send, parent-first.
+ *
+ * A restore differs from a purge: the server restores a trashed node plus the
+ * descendants it trashed in the *same* operation (same `trashGroup`). A child
+ * that was deleted on its own therefore sits under a trashed folder with a
+ * different group, and the folder's restore will not bring it back. Requesting
+ * it is required — collapsing it into the folder is the bug this planner exists
+ * to prevent.
+ *
+ * The rules, in order:
+ *  - a row joins a selected ancestor's request when its nearest selected
+ *    ancestor is proven to share its group (same non-empty `trashGroup`);
+ *  - a row stays its own request when that ancestor's group is unknown or
+ *    different — a boundary cannot be collapsed across, even if some higher
+ *    row is from the same group again;
+ *  - a batch where no row carries a group at all (an old server) keeps the
+ *    previous topmostSelection collapse unchanged.
+ *
+ * Returns the requests plus, per request, the selected ids it covers (itself
+ * included), and the same coverage entries for selected rows that were folded
+ * into a request — that is what keeps a failure retrying exactly its own rows.
+ */
+function planRestore(nodes, index) {
+  const list = [];
+  const selectedById = new Map();
+  for (const node of nodes || []) {
+    if (!node || !node.id || selectedById.has(node.id)) continue;
+    selectedById.set(node.id, node);
+    list.push(node);
+  }
+  if (!list.length) return { nodes: [], coverage: new Map() };
+
+  // A server that sends no groups at all is the old one: nothing can be proven
+  // about which restore covered which child, so the previous collapse stays
+  // exactly as it was instead of inventing one request per selected child.
+  if (!list.some((node) => trashGroupOf(node))) return topmostSelection(list);
+
+  // The nearest selected ancestor is the only comparison that matters: the
+  // server collapses a restore along the same group, and "a different group
+  // above, the same group again higher up" must not cross that known boundary.
+  const chains = new Map();
+  const parents = new Map();
+  for (const node of list) {
+    const chain = trashAncestors(node, selectedById, index);
+    chains.set(node.id, chain);
+    const parent = nearestSelectedAncestor(chain, selectedById);
+    if (parent) parents.set(node.id, parent);
+  }
+  const sameGroup = (child, ancestor) => {
+    const group = trashGroupOf(child);
+    return group !== null && group === trashGroupOf(ancestor);
+  };
+
+  const requestOf = new Map();
+  const resolving = new Set();
+  const requestFor = (node) => {
+    if (requestOf.has(node.id)) return requestOf.get(node.id);
+    if (resolving.has(node.id)) { requestOf.set(node.id, node); return node; }
+    resolving.add(node.id);
+    const parent = parents.get(node.id);
+    // A row folds into the request its nearest selected ancestor speaks
+    // through, and only when both provably share one deletion group. Comparing
+    // against the resolved request (not the immediate parent) is what keeps a
+    // selected grandchild from splitting off when its parent already folded.
+    const request = parent && sameGroup(node, parent) ? requestFor(parent) : node;
+    resolving.delete(node.id);
+    requestOf.set(node.id, request);
+    return request;
+  };
+
+  const requested = [];
+  const coverage = new Map();
+  for (const node of list) {
+    if (requestFor(node) !== node) continue;
+    requested.push(node);
+    coverage.set(node.id, new Set([node.id]));
+  }
+  // Every folded row joins the coverage of the request it speaks through. The
+  // resolver above already proved that request is itself a request.
+  for (const node of list) {
+    if (coverage.has(node.id)) continue;
+    const request = requestFor(node);
+    const bucket = coverage.get(request.id);
+    if (bucket) bucket.add(node.id);
+  }
+
+  // Parent-first, stable within a depth: the original selection order breaks
+  // ties, so no comparator has to re-walk a path and the sort is N log N.
+  const ordered = requested
+    .map((node, order) => ({ node, order, depth: chains.get(node.id).length }))
+    .sort((left, right) => (left.depth - right.depth) || (left.order - right.order))
+    .map((entry) => entry.node);
+  return { nodes: ordered, coverage };
+}
+
+/** The server's actual name, which changes when a restore had to rename. */
+function restoredName(payload, fallback) {
+  return payload && payload.node && payload.node.name ? payload.node.name : fallback;
+}
+
+/** How many selected rows one request speaks for: the root plus its covered group. */
+function coveredCount(coverage, node) {
+  return coverage.get(node.id)?.size ?? 1;
+}
+
+/**
+ * The restore plan, exported for the focused regression.
+ *
+ * Purge and permanent delete must keep collapsing every selected descendant
+ * into its selected ancestor: `topmostSelection` stays exactly as it was. Only
+ * restore needs to respect the server's deletion groups.
+ */
+export function planRestoreRequests(nodes, index) {
+  return planRestore(nodes, index || session.index);
+}
+
 export async function deleteSelection(nodes) {
   const list = nodes && nodes.length ? nodes : Array.from(store.state.selection).map(lookupNode).filter(Boolean);
   if (!list.length) return;
   if (store.state.route.name === 'trash') {
+    // A trashed folder and its trashed contents are one request. Collapsing the
+    // selection first is what keeps a child from being reported as a failure
+    // after the parent's purge already removed it.
+    const { nodes: roots, coverage } = topmostSelection(list);
+    if (!roots.length) return;
+    const folders = roots.filter((node) => node.kind === 'folder');
+    // The title counts what the user picked, not the number of requests: one
+    // request for a folder speaks for every selected row inside it.
+    const totalSelected = roots.reduce((total, node) => total + coveredCount(coverage, node), 0);
     const yes = await confirmDialog({
-      title: '永久删除 ' + list.length + ' 项',
-      description: '回收站中的内容会被永久删除，无法恢复。',
+      title: '永久删除 ' + totalSelected + ' 项',
+      description: '回收站中的内容会被永久删除，无法恢复。'
+        + (folders.length ? '所选文件夹中的内容会一并永久删除。' : ''),
       confirmLabel: '永久删除',
       danger: true,
     });
     if (!yes) return;
-    const { failedNodes, errors } = await deleteBatch(list, (node) => purgeNode(node));
-    const done = list.length - failedNodes.length;
+    const { failedNodes, errors } = await deleteBatch(
+      roots,
+      (node) => purgeNode(node),
+      (node) => coverage.get(node.id) || [node.id],
+    );
+    const failedIds = new Set(failedNodes.map((node) => node.id));
+    const done = roots.filter((node) => !failedIds.has(node.id))
+      .reduce((total, node) => total + coveredCount(coverage, node), 0);
+    const failedCount = roots.filter((node) => failedIds.has(node.id))
+      .reduce((total, node) => total + coveredCount(coverage, node), 0);
     if (!failedNodes.length) {
-      toast('已永久删除 ' + done + ' 项。', { type: 'success' });
+      toast('已永久删除 ' + done + ' 项。', {
+        type: 'success',
+        detail: folders.length ? '所选文件夹中的内容已一并删除。' : undefined,
+      });
     } else {
-      toast((done ? '已永久删除 ' + done + ' 项，' + failedNodes.length + ' 项失败' : '永久删除失败 ' + failedNodes.length + ' 项') + '。可再次按 Delete 重试。', {
+      toast((done ? '已永久删除 ' + done + ' 项，' + failedCount + ' 项失败' : '永久删除失败 ' + failedCount + ' 项') + '。可再次按 Delete 重试。', {
         type: 'warning',
         detail: failureDetail(errors),
       });
@@ -451,13 +789,113 @@ export async function downloadSelection(nodes) {
   });
 }
 
+/*
+ * True while one restore batch is running.
+ *
+ * The bar disables its button for the duration, but the row menu, the keyboard
+ * and a second press can still reach this function. Two serial loops over the
+ * same roots would race the trash boundary — the second pass would ask for rows
+ * the first one already restored and report failures that are not failures.
+ * Module-level because the guard has to outlive any one selection bar: the
+ * refresh at the end of a batch remounts that bar.
+ */
+let restorePending = false;
+
+/**
+ * Restores a batch from the trash.
+ *
+ * A restore is recoverable (undoing it is one delete), so unlike purge it asks
+ * nothing: the whole point of the bar in the trash is "put these back". The
+ * requests are serial because a parent restore already brings its subtree back,
+ * and two parallel requests on one branch would race — the child could answer
+ * "restore the parent first" while the parent is being restored, or arrive
+ * second and answer "not in the trash".
+ *
+ * The selected subtree is collapsed first: only the topmost selected rows are
+ * requested, and a root's success clears itself plus the selected descendants
+ * it covered. That collapse is restore-specific (see planRestore): a child
+ * deleted in a separate operation keeps its own request even when its trashed
+ * parent is selected, because the server's restore only follows the same
+ * deletion group. A failed root leaves that same group selected, so pressing
+ * 还原 again retries exactly what is still broken. One refresh at the end, after
+ * paintSelection(), keeps the toasts off a list that is about to be reloaded.
+ *
+ * `onProgress(done, total)` is optional: it is told 0 once the batch is
+ * accepted, then once per attempted root — failures included — so a caller can
+ * say "还原中 1/2" instead of leaving a long serial batch looking stuck.
+ */
+export async function restoreSelection(nodes, onProgress) {
+  const list = nodes && nodes.length ? nodes : Array.from(store.state.selection).map(lookupNode).filter(Boolean);
+  if (!list.length) return;
+  const { nodes: roots, coverage } = planRestore(list, session.index);
+  if (!roots.length) return;
+  // Checked after the roots are known: an empty call is not a duplicate batch
+  // and must not swallow the progress report of the real one.
+  if (restorePending) return;
+  restorePending = true;
+
+  const report = typeof onProgress === 'function' ? onProgress : null;
+  const total = roots.length;
+  // "0/2" is the accepted state: the press did something, the batch is running.
+  if (report) report(0, total);
+
+  const errors = [];
+  const restored = [];
+  const failedIds = new Set();
+  try {
+    let done = 0;
+    for (const node of roots) {
+      try {
+        const payload = await restoreNode(node);
+        // A restore that collided with a live name comes back renamed; say the
+        // name the user will actually see in the list, not the stale one.
+        const name = restoredName(payload, node.name);
+        restored.push({ node, name, renamed: name !== node.name });
+        for (const id of coverage.get(node.id) || [node.id]) store.state.selection.delete(id);
+      } catch (error) {
+        failedIds.add(node.id);
+        errors.push(node.name + '：' + ((error && error.message) || '还原失败'));
+      }
+      // After every attempt, failed or not: the next root is a step forward, and
+      // the caller's only way to know a slow batch is still moving.
+      done += 1;
+      if (report) report(done, total);
+    }
+    // Whatever failed is still selected for the next press; a successful root has
+    // already cleared itself and the descendants it covered.
+    runtime.paintSelection();
+
+    // Count selected rows, not requests: restoring a folder also restores the
+    // children that were picked with it.
+    const count = roots.filter((node) => !failedIds.has(node.id))
+      .reduce((total, node) => total + coveredCount(coverage, node), 0);
+    const failedCount = roots.filter((node) => failedIds.has(node.id))
+      .reduce((total, node) => total + coveredCount(coverage, node), 0);
+    const renamed = restored.filter((entry) => entry.renamed);
+    const renamedDetail = renamed.slice(0, 3).map((entry) => entry.node.name + ' → ' + entry.name).join('；');
+    if (!errors.length) {
+      toast(count === 1 ? '已还原：' + restored[0].name : '已还原 ' + count + ' 项。', {
+        type: 'success',
+        detail: renamedDetail ? '原位置已有同名项目，已重命名：' + renamedDetail : undefined,
+      });
+    } else {
+      toast((count ? '已还原 ' + count + ' 项，' + failedCount + ' 项失败' : '还原失败 ' + failedCount + ' 项') + '。可再次按还原重试。', {
+        type: 'warning',
+        detail: [failureDetail(errors), renamedDetail ? '已重命名：' + renamedDetail : ''].filter(Boolean).join('；'),
+      });
+    }
+    // One refresh for the batch: the restored rows leave the trash, the failed
+    // ones are still there and keep the selection painted above.
+    await runtime.refreshData();
+  } finally {
+    // A thrown refresh must not leave the guard latched forever.
+    restorePending = false;
+  }
+}
+
+/** Row-level 还原: one node, the same rules as the batch. */
 export function startRestore(node) {
-  restoreNode(node)
-    .then(async () => {
-      toast('已还原：' + node.name, { type: 'success' });
-      await runtime.refreshData();
-    })
-    .catch((error) => toast((error && error.message) || '还原失败。', { type: 'error' }));
+  return restoreSelection([node]);
 }
 
 export async function startPurge(node) {

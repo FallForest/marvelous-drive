@@ -10,6 +10,7 @@
 import { h } from './dom.js';
 import { request } from './api.js';
 import { toast, openMenu, dialog } from './ui.js';
+import { bytes } from './format.js';
 import { createFolder } from './files.js';
 import { pickDirectoryPlan, prepareFolderFiles, uploadPlan } from './folder-upload.js';
 import { sha256 } from './upload.js';
@@ -83,8 +84,10 @@ export function pickUploadKind(uploader, anchor) {
         onSelect: async () => {
           const target = currentParentId();
           if (target === undefined) return;
-          const plan = await pickDirectoryPlan();
-          if (plan) await uploadFolderPlan(uploader, plan, target);
+          // The picker is entered as a FACTORY, not as a resolved plan: nothing
+          // is queued while the OS dialog is open, and the walk that follows
+          // reports its own counts into the same preparation row.
+          await uploadFolderPlan(uploader, ({ signal, onProgress }) => pickDirectoryPlan({ signal, onProgress }), target);
         },
       },
     ],
@@ -101,89 +104,445 @@ export function currentParentId() {
   return route.folderId || null;
 }
 
-/** Creates the folder skeleton first, then streams every file into it. */
-export async function uploadFolderPlan(uploader, plan, parentId) {
+/** The one cancellation shape every stage of a folder walk throws. */
+function abortError() {
+  const error = new Error('aborted');
+  error.name = 'AbortError';
+  return error;
+}
+
+function isAbort(error) {
+  return !!(error && error.name === 'AbortError');
+}
+
+/**
+ * Repaints the shell after a walk, swallowing a failure: the caller is already
+ * on the error or cancel path and must not be derailed by a refresh.
+ */
+async function refreshQuietly() {
+  try { await runtime.refreshData(); } catch { /* the toast is the report */ }
+}
+
+/** "1.2 MB" of hashed bytes, or '' when there is nothing honest to show yet. */
+function hashBytesLabel(hashed, total) {
+  if (!(Number(total) > 0)) return '';
+  return bytes(hashed) + ' / ' + bytes(total);
+}
+
+/**
+ * Creates the folder skeleton first, then streams every file into it.
+ *
+ * `planOrFactory` is either a plan (`{ name, dirs, files }`) or a factory
+ * `({ signal, onProgress }) => plan|null`. The factory shape exists because the
+ * scan can outlive the picker: a directory walk reports `stage: 'scan'` counts
+ * as it goes, so the row can name real numbers from the first folder instead of
+ * appearing once the whole tree has been read. Nothing is queued while the OS
+ * dialog is open — the factory is the thing that opens it.
+ */
+export async function uploadFolderPlan(uploader, planOrFactory, parentId) {
   try {
-    return await mergeFolderPlan(uploader, plan, parentId);
+    return await mergeFolderPlan(uploader, planOrFactory, parentId);
   } catch (error) {
+    if (isAbort(error)) {
+      toast('已取消这次上传。', { type: 'info', timeout: 2400 });
+      await refreshQuietly();
+      return;
+    }
     toast('文件夹检查未完成，请稍后重新上传。', { type: 'warning', detail: error.message });
-    await runtime.refreshData().catch(() => {});
+    await refreshQuietly();
   }
 }
 
-async function mergeFolderPlan(uploader, plan, parentId) {
-  if (!plan || (!plan.files.length && plan.dirs.size <= 1)) {
-    toast('这个文件夹是空的，没有可上传的内容。', { type: 'info' });
-    return;
+/**
+ * The preparation row for one batch, plus the cancel request that owns it.
+ *
+ * The row is created LAZILY: opening the OS folder picker must not put a task
+ * in the queue, so the controller exists from the start but the row appears
+ * only when there is something real to say (the first folder the scan reports,
+ * or the plan once it resolves). Patches that arrive before that are buffered,
+ * so the row opens already showing the true count instead of 0.
+ *
+ * Each batch gets its own AbortController: cancelling one folder walk must not
+ * touch a transfer, a second walk or the scheduler. `cancelDialog` is how the
+ * conflict question is dismissed when the row is cancelled while it is open —
+ * without it the dialog would outlive the walk that asked the question and the
+ * next answer would land on a batch that no longer exists.
+ */
+function openPreparation(uploader) {
+  const controller = new AbortController();
+  let cancelDialog = null;
+  let preparation = null;
+  let entered = false;
+  let pending = null;
+  const onCancel = () => {
+    // Take the dialog's close handle BEFORE aborting: the abort listener inside
+    // the question settles it and clears the handle, so reading it afterwards
+    // would find null and skip the close.
+    const close = cancelDialog;
+    cancelDialog = null;
+    controller.abort();
+    if (close) {
+      try { close(); } catch { /* a dialog that is already gone */ }
+    }
+  };
+  const noopRow = { update() {}, end() {}, cancel() { return false; } };
+  const handle = {
+    signal: controller.signal,
+    get aborted() { return controller.signal.aborted; },
+    /**
+     * Creates the row on first use. `name`/`count` are only read the first time;
+     * later calls keep the row's identity so a scan cannot rename the batch.
+     */
+    ensure(name, count) {
+      // A walk that already finished never resurrects its row: the buffer is
+      // dropped instead, so a late report cannot reopen a settled batch.
+      if (entered) return null;
+      if (preparation) return preparation;
+      const label = String(name || '文件夹');
+      const total = Math.max(0, Math.floor(Number(count) || 0));
+      preparation = uploader && typeof uploader.beginPreparation === 'function'
+        ? uploader.beginPreparation(label, total, { onCancel })
+        : Object.assign({}, noopRow, { name: label, count: total });
+      if (pending) {
+        const patch = pending;
+        pending = null;
+        preparation.update(patch);
+      }
+      return preparation;
+    },
+    /** Registers the open conflict dialog so a cancel can close it. */
+    setDialog(close) { cancelDialog = close; },
+    clearDialog(close) { if (!close || cancelDialog === close) cancelDialog = null; },
+    update(patch) {
+      if (!patch || entered) return;
+      if (!preparation) {
+        pending = Object.assign({}, pending || {}, patch);
+        return;
+      }
+      preparation.update(patch);
+    },
+    /** The first real file owns the panel from here on: the row steps aside. */
+    finish() {
+      if (entered) return;
+      entered = true;
+      pending = null;
+      if (preparation) preparation.end();
+    },
+  };
+  return handle;
+}
+
+/**
+ * Turns a stage report from uploadPlan/prepareFolderFiles/pickDirectoryPlan
+ * into the row's sentence, count and honest progress.
+ *
+ * Only a real total becomes a percentage. A scan has none (no entry API reports
+ * how many files are left), so it reports `progress: null` — the indeterminate
+ * bar — while still showing the real N it has counted. Hashing reports both the
+ * file count and the bytes actually read, because one 900 MB file would
+ * otherwise sit at the same percentage for minutes.
+ */
+function presentProgress(state) {
+  const patch = { detail: '', progress: null };
+  if (!state) return patch;
+  if (state.stage === 'scan') {
+    const files = Math.max(0, Number(state.files) || 0);
+    const dirs = Math.max(0, Number(state.dirs) || 0);
+    patch.count = files;
+    const where = state.name ? '正在读取「' + state.name + '」' : '正在读取所选文件夹';
+    patch.detail = where + ' · 已找到 ' + files + ' 个文件、' + dirs + ' 个文件夹';
+    patch.progress = null;
+    return patch;
   }
-  const label = plan.name || '文件夹';
-  toast('正在检查「' + label + '」的新增和变化文件…', { type: 'info', timeout: 3000 });
+  if (state.stage === 'layout') {
+    const done = Math.max(0, Number(state.done) || 0);
+    const total = Math.max(0, Number(state.total) || 0);
+    patch.detail = '核对目录 ' + done + '/' + total + ' · 只读检查，尚未创建文件夹';
+    patch.progress = total ? Math.min(1, done / total) : null;
+    return patch;
+  }
+  if (state.stage === 'directories') {
+    const done = Math.max(0, Number(state.done) || 0);
+    const total = Math.max(0, Number(state.total) || 0);
+    // Only missing folders are ever created, and only after the decision: this
+    // is the mutating stage, unlike the read-only `layout` check above.
+    patch.detail = '正在创建缺失目录 ' + done + '/' + total;
+    patch.progress = total ? Math.min(1, done / total) : null;
+    return patch;
+  }
+  if (state.stage === 'metadata') {
+    const done = Math.max(0, Number(state.done) || 0);
+    const total = Math.max(0, Number(state.total) || 0);
+    patch.detail = '正在核对 ' + done + '/' + total + ' 个目标目录中的同名文件';
+    patch.progress = total ? Math.min(1, done / total) : null;
+    return patch;
+  }
+  if (state.stage === 'files') {
+    const done = Math.max(0, Number(state.done) || 0);
+    const total = Math.max(0, Number(state.total) || 0);
+    const hashed = Math.max(0, Number(state.hashedBytes) || 0);
+    const hashTotal = Math.max(0, Number(state.hashTotalBytes) || 0);
+    const byteText = hashBytesLabel(hashed, hashTotal);
+    patch.detail = '正在校验文件内容 ' + done + '/' + total + (byteText ? ' · 已校验 ' + byteText : '');
+    // Bytes are the finer, more honest measure — one 900 MB file would hold a
+    // file-count bar at 0% for its whole read. With no byte total there is no
+    // percentage to draw, so the row stays indeterminate.
+    patch.progress = hashTotal > 0 ? Math.min(1, hashed / hashTotal) : null;
+    return patch;
+  }
+  return patch;
+}
+
+/**
+ * Uses one server folder's subtree manifest when — and only when — it can
+ * replace the per-directory listings honestly.
+ *
+ * A folder merge that is about to reuse an existing root only needs to know
+ * what is already below it. The manifest answers that in one request, empty
+ * directories included. `complete: false` means the server refused to describe
+ * the whole tree (it caps the walk), and a partial answer must never be used:
+ * it reads as "these files are gone". Everything then falls back to the
+ * original per-directory listing, unchanged.
+ */
+async function readMergeManifest(root, signal) {
+  if (!root || root.kind !== 'folder' || !root.id) return null;
+  const payload = await request('/nodes/' + encodeURIComponent(root.id) + '/merge-manifest', { signal });
+  if (!payload || payload.complete !== true || !Array.isArray(payload.nodes)) return null;
+  return payload.nodes.filter((node) => node && node.id && node.kind);
+}
+
+/**
+ * Indexes a manifest by parentId, so one lookup fills one directory bucket.
+ *
+ * Every folder in the manifest also gets a bucket of its own, even when it has
+ * no children: an existing EMPTY folder must be found by the createFolder check,
+ * not listed again. Files and folders land in their parent's bucket exactly as
+ * the listing route would return them.
+ */
+function manifestDirectories(nodes) {
+  const directories = new Map();
+  for (const node of nodes) {
+    const key = node.parentId || 'root';
+    if (!directories.has(key)) directories.set(key, []);
+    directories.get(key).push(node);
+    if (node.kind === 'folder' && node.id && !directories.has(node.id)) directories.set(node.id, []);
+  }
+  return directories;
+}
+
+/**
+ * The root folder's name from a scan report, or '' when this report cannot
+ * prove one.
+ *
+ * Both pickers start one level above the chosen folder, so the FIRST directory
+ * a scan reports is the picked folder itself: `dirs === 1` is what makes the
+ * name trustworthy. Every later entry is a child and must never rename the
+ * batch — which is why the row is not created until this returns a name.
+ */
+function scanLabel(state) {
+  if (Math.max(0, Number(state.dirs) || 0) !== 1) return '';
+  return state.name ? String(state.name) : '';
+}
+
+async function mergeFolderPlan(uploader, planOrFactory, parentId) {
+  const isFactory = typeof planOrFactory === 'function';
+  // No row yet: the OS dialog may still be open, and an open picker is not a
+  // task. The row is born at the first scan report that can name the batch (the
+  // handle and entry walks name it with their root folder), or from the plan
+  // itself when the picker could only hand back a flat FileList.
+  const prep = openPreparation(uploader);
+  let plan = null;
+  let summary = null;
+  const report = (state) => {
+    if (!state) return;
+    const patch = presentProgress(state);
+    // A scan names the batch with its root folder, so the row can appear the
+    // moment one directory has been counted. Earlier reports only buffer.
+    if (state.stage === 'scan') {
+      const label = scanLabel(state);
+      if (label) prep.ensure(label, patch.count);
+    }
+    prep.update(patch);
+  };
   const directories = new Map();
   const listFiles = async (targetParent) => {
     const key = targetParent || 'root';
     if (!directories.has(key)) {
-      const live = await request('/nodes?parentId=' + encodeURIComponent(key));
+      const live = await request('/nodes?parentId=' + encodeURIComponent(key), { signal: prep.signal });
       directories.set(key, live.nodes || []);
     }
     return directories.get(key);
   };
-  const summary = await uploadPlan(plan, {
-    parentId,
-    createFolder: async (targetParent, name) => {
-      const cleanName = String(name).trim().replace(/\s+/g, ' ');
-      const existingFolder = (await listFiles(targetParent)).find((node) => node.kind === 'folder' && node.name === cleanName);
-      if (existingFolder) {
-        const conflict = new Error('exists');
-        conflict.status = 409;
-        conflict.existing = existingFolder;
-        throw conflict;
-      }
+  try {
+    if (isFactory) {
+      plan = await planOrFactory({ signal: prep.signal, onProgress: report });
+    } else {
+      plan = planOrFactory;
+    }
+    if (prep.aborted) throw abortError();
+    if (!plan) {
+      // Cancelled at the OS picker: no row was created, and an empty toast
+      // would be a lie about a folder the user never chose.
+      prep.finish();
+      return;
+    }
+    if (!plan.files.length && plan.dirs.size <= 1) {
+      toast('这个文件夹是空的，没有可上传的内容。', { type: 'info' });
+      prep.finish();
+      return;
+    }
+    const label = plan.name || '文件夹';
+    const total = plan.files.length;
+    prep.ensure(label, total);
+    prep.update({ count: total, detail: '共 ' + total + ' 个文件，正在准备上传', progress: null });
+
+    // The plan's single top-level folder may already exist under the parent.
+    // Finding it here is the one place the manifest can help: it describes that
+    // folder's whole subtree, so the per-directory listing below becomes a map
+    // lookup instead of one request per folder. A plan with several top-level
+    // folders has no single root to match, so it keeps the per-directory walk.
+    const topLevel = [...plan.dirs].filter((path) => path && !path.includes('/'));
+    const rootDir = topLevel.length === 1 ? topLevel[0] : '';
+    const rootName = rootDir ? rootDir.trim().replace(/\s+/g, ' ') : '';
+    if (rootName) {
+      prep.update({ detail: '正在核对已存在的「' + rootName + '」文件夹', progress: null });
       try {
-        const created = await createFolder(targetParent, name);
-        directories.get(targetParent || 'root').push(created);
-        return created;
-      } catch (error) {
-        // Mirror what the server says: a same-named folder is reusable, not fatal.
-        if (error && error.status === 409) {
-          const live = await request('/nodes?parentId=' + encodeURIComponent(targetParent || 'root'));
-          const existing = (live.nodes || []).find((node) => node.kind === 'folder' && node.name === cleanName);
-          if (existing) {
-            const conflict = new Error('exists');
-            conflict.status = 409;
-            conflict.existing = existing;
-            throw conflict;
+        const parentNodes = await listFiles(parentId);
+        const root = parentNodes.find((node) => node.kind === 'folder' && node.name === rootName);
+        if (root) {
+          const nodes = await readMergeManifest(root, prep.signal);
+          if (nodes) {
+            const fromManifest = manifestDirectories(nodes);
+            for (const [key, list] of fromManifest) {
+              if (!directories.has(key)) directories.set(key, list);
+            }
+            // An existing EMPTY root has no child row, so it needs its bucket
+            // seeded explicitly: otherwise the preflight would list it again.
+            if (!directories.has(root.id)) directories.set(root.id, []);
           }
         }
-        throw error;
+      } catch (error) {
+        // A manifest is an optimisation: no route, an old server, a network blip
+        // or a cancelled request all leave the original listing in charge.
+        if (isAbort(error) || prep.aborted) throw abortError();
       }
-    },
-    // One file per slot, no more: the plan keeps `concurrency` files in flight
-    // and the shared scheduler caps the real transfers, so this number only has
-    // to be big enough to keep every slot fed. It used to be 1, which meant the
-    // three-slot scheduler never saw a second file until the first had finished
-    // — a folder upload was a strict relay of single requests.
-    concurrency: Math.max(1, Number(uploader.limit) || 1),
-    prepareFiles: (entries) => prepareFolderFiles(entries, { listFiles, hashFile: sha256, chooseConflict: (count) => askConflictStrategy(count, true) }),
-    uploadFile: (file, targetParent, options) => uploader.enqueueAndWait(file, targetParent, options.onConflict, options),
-  });
-  if (summary.canceled) { toast('已取消这次上传。', { type: 'info' }); await runtime.refreshData(); return; }
-  const failed = summary.total - summary.uploaded - summary.skipped;
-  const detail = summary.skipped ? '已跳过 ' + summary.skipped + ' 个文件（其中 ' + summary.unchanged + ' 个内容未变，无需重传）。' : undefined;
-  await runtime.refreshData();
-  if (failed || summary.failedFolders) {
-    toast('已上传 ' + summary.uploaded + ' 个文件，' + failed + ' 个文件、' + summary.failedFolders + ' 个文件夹未完成', { type: 'warning', detail });
-  } else {
-    toast('「' + label + '」已合并：上传 ' + summary.uploaded + ' 个文件，跳过 ' + summary.skipped + ' 个文件', { type: 'success', detail });
-  }
-  if (plan.name) {
-    const rootNode = (await request('/nodes?parentId=' + encodeURIComponent(parentId || 'root'))).nodes
-      .find((node) => node.kind === 'folder' && node.name === plan.name);
-    if (rootNode) {
-      store.state.expanded.add(rootNode.id);
-      runtime.renderShell();
     }
+    if (prep.aborted) throw abortError();
+
+    summary = await uploadPlan(plan, {
+      parentId,
+      signal: prep.signal,
+      onProgress: report,
+      // Read-only: resolves the existing tree and lists each destination
+      // directory through the same cache createFolder and the merge manifest
+      // already fill, so nothing is fetched twice and nothing is changed. The
+      // first mkdir happens only after the file comparison and the user's
+      // decision, which is what keeps a cancel from leaving empty folders.
+      lookupFolder: async (targetParent, name) => {
+        const cleanName = String(name).trim().replace(/\s+/g, ' ');
+        const nodes = await listFiles(targetParent);
+        return nodes.find((node) => node.kind === 'folder' && node.name === cleanName) || null;
+      },
+      createFolder: async (targetParent, name) => {
+        const cleanName = String(name).trim().replace(/\s+/g, ' ');
+        const existingFolder = (await listFiles(targetParent)).find((node) => node.kind === 'folder' && node.name === cleanName);
+        if (existingFolder) {
+          const conflict = new Error('exists');
+          conflict.status = 409;
+          conflict.existing = existingFolder;
+          throw conflict;
+        }
+        try {
+          const created = await createFolder(targetParent, name);
+          const bucket = directories.get(targetParent || 'root');
+          if (bucket) bucket.push(created);
+          return created;
+        } catch (error) {
+          // Mirror what the server says: a same-named folder is reusable, not fatal.
+          if (error && error.status === 409) {
+            const live = await request('/nodes?parentId=' + encodeURIComponent(targetParent || 'root'), { signal: prep.signal });
+            const existing = (live.nodes || []).find((node) => node.kind === 'folder' && node.name === cleanName);
+            if (existing) {
+              const conflict = new Error('exists');
+              conflict.status = 409;
+              conflict.existing = existing;
+              throw conflict;
+            }
+          }
+          throw error;
+        }
+      },
+      // One file per slot, no more: the plan keeps `concurrency` files in flight
+      // and the shared scheduler caps the real transfers, so this number only has
+      // to be big enough to keep every slot fed. It used to be 1, which meant the
+      // three-scheduler never saw a second file until the first had finished
+      // — a folder upload was a strict relay of single requests.
+      concurrency: Math.max(1, Number(uploader.limit) || 1),
+      prepareFiles: async (entries) => {
+        prep.update({ count: entries.length, detail: '正在比对文件内容和变更 · 共 ' + entries.length + ' 个文件', progress: null });
+        const prepared = await prepareFolderFiles(entries, {
+          signal: prep.signal,
+          onProgress: report,
+          listFiles: (targetParent) => listFiles(targetParent),
+          hashFile: (file, options) => sha256(file, options),
+          chooseConflict: (count) => {
+            prep.update({ detail: '有 ' + count + ' 个文件需要确认如何处理', progress: null });
+            return askConflictStrategy(count, true, {
+              signal: prep.signal,
+              onOpen: (close) => prep.setDialog(close),
+              onSettled: (close) => prep.clearDialog(close),
+            });
+          },
+        });
+        if (prepared) prep.update({ detail: '准备完成，共 ' + prepared.length + ' 个文件，开始上传', progress: null });
+        return prepared;
+      },
+      uploadFile: (file, targetParent, options) => {
+        // Enqueue first: the synchronous head of enqueueAndWait registers the
+        // task, so ending the preparation row after it cannot empty the batch
+        // and let the summary reset the caller's collapsed folders.
+        const pending = uploader.enqueueAndWait(file, targetParent, options.onConflict, options);
+        prep.finish();
+        return pending;
+      },
+    });
+    if (summary.canceled || prep.aborted) {
+      prep.finish();
+      toast('已取消这次上传。', { type: 'info', timeout: 2400 });
+      await runtime.refreshData();
+      return;
+    }
+    const failed = summary.total - summary.uploaded - summary.skipped;
+    const detail = summary.skipped ? '已跳过 ' + summary.skipped + ' 个文件（其中 ' + summary.unchanged + ' 个内容未变，无需重传）。' : undefined;
+    await runtime.refreshData();
+    if (failed || summary.failedFolders) {
+      toast('已上传 ' + summary.uploaded + ' 个文件，' + failed + ' 个文件、' + summary.failedFolders + ' 个文件夹未完成', { type: 'warning', detail });
+    } else {
+      toast('「' + label + '」已合并：上传 ' + summary.uploaded + ' 个文件，跳过 ' + summary.skipped + ' 个文件', { type: 'success', detail });
+    }
+    if (plan.name) {
+      const rootNode = (await request('/nodes?parentId=' + encodeURIComponent(parentId || 'root'))).nodes
+        .find((node) => node.kind === 'folder' && node.name === plan.name);
+      if (rootNode) {
+        store.state.expanded.add(rootNode.id);
+        runtime.renderShell();
+      }
+    }
+  } catch (error) {
+    if (isAbort(error) || prep.aborted) {
+      prep.finish();
+      toast('已取消这次上传。', { type: 'info', timeout: 2400 });
+      await refreshQuietly();
+      return;
+    }
+    throw error;
+  } finally {
+    // Covers the error path, the canceled plan and a tree where every file was
+    // skipped or blocked: the row never outlives the walk that owns it.
+    prep.finish();
   }
 }
+
 
 /**
  * Names already taken in one folder, as a Set.
@@ -232,11 +591,28 @@ const CONFLICT_CHOICES = [
  * checkbox is there for the batch that is genuinely mixed.
  * Resolves null when the dialog is dismissed, which cancels the upload rather
  * than silently picking overwrite.
+ *
+ * `{ signal, onOpen, onSettled }` is how a folder walk owns the question: the
+ * signal closes the dialog when the preparation row is cancelled (resolving
+ * null — exactly what the 取消上传 button does), and the callbacks hand the
+ * caller a way to close it that does not require holding the whole options
+ * bag. Both fire once; a dialog the user closed first stays closed.
  */
-function askConflictStrategy(count, folderMerge = false) {
+function askConflictStrategy(count, folderMerge = false, options = {}) {
+  const opts = options || {};
   return new Promise((resolve) => {
     let settled = false;
-    const finish = (value) => { if (!settled) { settled = true; resolve(value); } };
+    let closeDialog = () => {};
+    let detachAbort = null;
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      if (detachAbort) { detachAbort(); detachAbort = null; }
+      if (typeof opts.onSettled === 'function') {
+        try { opts.onSettled(closeDialog); } catch { /* a broken listener must not strand the promise */ }
+      }
+      resolve(value);
+    };
     const name = 'mdrive-upload-conflict';
     const radios = CONFLICT_CHOICES.map((choice, index) => h('input', {
       attrs: { type: 'radio', name, value: choice.value, id: name + '-' + choice.value },
@@ -259,25 +635,42 @@ function askConflictStrategy(count, folderMerge = false) {
       h('span', { text: '对本批全部 ' + count + ' 个文件使用此选择' }),
     ));
     const chosen = () => {
+      // Read the option, not the reflection: a radio built with `attrs.value`
+      // carries the strategy on its attribute, and only a real input mirrors
+      // that onto `.value`. Falling back keeps the answer correct either way.
       const hit = radios.find((radio) => radio.checked);
-      return hit ? hit.value : 'overwrite';
+      if (!hit) return 'overwrite';
+      const value = hit.value || (typeof hit.getAttribute === 'function' ? hit.getAttribute('value') : '');
+      return value || 'overwrite';
     };
     // The footer is a factory: dialog() drops an empty footer, so buttons added
     // after it returns would land in a detached node.
-    dialog({
+    const dlg = dialog({
       title: '有同名文件',
       description: '这一批里有文件和当前文件夹重名。',
       body,
       onClose: () => finish(null),
-      footer: (dlg) => [
-        h('button', { class: 'btn', attrs: { type: 'button' }, text: '取消上传', on: { click: () => dlg.close() } }),
+      footer: (handle) => [
+        h('button', { class: 'btn', attrs: { type: 'button' }, text: '取消上传', on: { click: () => handle.close() } }),
         h('span', { class: 'push' }),
         h('button', {
           class: 'btn btn-primary', attrs: { type: 'button' }, text: '继续上传',
-          on: { click: () => { finish(chosen()); dlg.close(); } },
+          on: { click: () => { finish(chosen()); handle.close(); } },
         }),
       ],
     });
+    closeDialog = () => dlg.close();
+    // An already-cancelled walk never gets to ask: resolve null and leave the
+    // dialog unopened rather than flashing a question nobody is waiting for.
+    if (opts.signal && opts.signal.aborted) { finish(null); dlg.close(); return; }
+    if (typeof opts.onOpen === 'function') {
+      try { opts.onOpen(closeDialog); } catch { /* the question still works */ }
+    }
+    if (opts.signal && typeof opts.signal.addEventListener === 'function') {
+      const onAbort = () => { finish(null); closeDialog(); };
+      opts.signal.addEventListener('abort', onAbort, { once: true });
+      detachAbort = () => opts.signal.removeEventListener('abort', onAbort);
+    }
   });
 }
 

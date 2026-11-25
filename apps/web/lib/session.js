@@ -48,3 +48,5 @@ export const session = {
   /** Node ids in the current drag, if any. */
   draggingIds: [],
 };
+
+// etag probe

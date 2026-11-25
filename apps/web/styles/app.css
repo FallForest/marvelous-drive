@@ -79,7 +79,7 @@
 .crumbs{display:flex;align-items:center;gap:2px;min-width:0;flex:1;overflow:hidden}
 .crumb{
   display:inline-flex;align-items:center;height:24px;padding:0 6px;border-radius:var(--radius-xs);
-  font-size:var(--fs-sm);color:var(--text-muted);white-space:nowrap;max-width:220px;
+  font-size:var(--fs-sm);color:var(--text-muted);white-space:nowrap;
   overflow:hidden;text-overflow:ellipsis;
   transition:var(--transition-colors),transform var(--duration-fast) var(--ease-spring-snappy);
 }
@@ -88,6 +88,27 @@ button.crumb:active{transform:scale(var(--press-scale));transition-duration:var(
 .crumb:last-child{color:var(--text);font-weight:500}
 .crumb-sep{color:var(--text-faint);display:flex;flex:0 0 auto}
 .crumb-sep svg{width:13px;height:13px}
+/* A drive trail is as deep as the folder tree, and a topbar cannot be. The bar
+   scrolls sideways instead of clipping, and only on the drive route: the trash /
+   starred / search trail is always two crumbs and never needs a scroller.
+   The last crumb is the page the user is on, so lib/sidebar.js scrolls the bar
+   to its end after mount — that keeps the current folder and its parent readable
+   on a phone, while every ancestor stays a swipe away. */
+.crumbs-drive{overflow-x:auto;overflow-y:hidden;overscroll-behavior-x:contain}
+/* The bar is a nibbled strip in a 50px topbar: keep the scrollbar thin enough to
+   sit under the 24px crumbs without pushing the topbar taller. */
+.crumbs-drive::-webkit-scrollbar{height:5px}
+.crumbs-drive::-webkit-scrollbar-thumb{border-width:1px}
+/* No shrinking inside the deep trail: a squeezed crumb would ellipsise to a few
+   pixels and look like a truncated word rather than a level of the path. The bar
+   scrolls instead. (.crumbs alone keeps the default shrink: the share drawer's
+   two-or-three crumbs have no scroller and still have to fit.) */
+.crumbs-drive .crumb{flex:0 0 auto}
+.crumbs-drive .crumb-sep{flex-shrink:0}
+/* A long folder name may take a chunk of the bar but never most of the viewport:
+   min() is what keeps a wide name from pushing the current folder out of reach
+   at 320-390px. The 360px block below tightens this further. */
+.crumb{max-width:min(220px,30vw)}
 .top-actions{display:flex;align-items:center;gap:6px;flex:0 0 auto}
 .nav-toggle{display:none}
 
@@ -99,13 +120,55 @@ button.crumb:active{transform:scale(var(--press-scale));transition-duration:var(
 }
 .toolbar .seg-label{font-size:var(--fs-xs);color:var(--text-faint);margin-right:-2px}
 .toolbar .push{margin-left:auto}
-.sel-bar{
-  display:flex;align-items:center;gap:8px;flex-wrap:wrap;
-  padding:7px 16px;border-bottom:1px solid var(--accent-line);
-  background:var(--accent-soft);font-size:var(--fs-sm);color:var(--text);
+/* The toolbar row carries two layers: .toolbar-default (the original flex
+   contents, so its geometry is unchanged) and a .selection-slot that paints the
+   selection bar over the same row instead of adding a second line of chrome. */
+.toolbar-default{
+  display:flex;align-items:center;flex-wrap:wrap;gap:inherit;
+  width:100%;min-width:0;
 }
-.sel-bar b{font-weight:600}
-.sel-bar .icon-btn{margin-left:2px}
+.selection-slot{position:absolute;inset:0;pointer-events:none}
+.sel-bar{
+  display:flex;align-items:center;flex-wrap:nowrap;gap:8px;
+  height:100%;min-width:0;padding-inline:16px;
+  background:var(--bg);color:var(--text);font-size:var(--fs-sm);
+  pointer-events:auto;
+}
+.sel-bar .push{margin-inline-start:auto}
+.sel-bar svg{display:block;flex:0 0 auto}
+.sel-bar b{
+  min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+  font-weight:600;
+}
+/* Controls keep their own width; only the summary label absorbs the squeeze.
+   28px matches the .btn height, so swapping layers does not resize the row. */
+.sel-bar .btn,.sel-bar .icon-btn{flex:0 0 auto;min-width:24px;min-height:24px}
+.sel-bar .icon-btn{width:28px;height:28px;min-width:28px;min-height:28px}
+.sel-bar .sel-delete{color:var(--text-muted)}
+.sel-bar .sel-delete:hover,.sel-bar .sel-delete:focus-visible{color:var(--danger)}
+/* Normal controls keep their size but drop out of the tab order visually. */
+.toolbar:has(>.selection-slot:not(:empty))>.toolbar-default{visibility:hidden}
+
+/* In the search header the h1 and count stay in the page for assistive tech;
+   only their paint is suppressed while the selection bar is up. */
+.search-selection-head{position:relative}
+.search-heading-default{display:flex;align-items:center;gap:10px;min-width:0}
+.search-selection-head:has(>.selection-slot:not(:empty))>.search-heading-default{
+  opacity:0;pointer-events:none;
+}
+
+/* The bar sits in the toolbar's padding box, so it follows the toolbar's own
+   inline padding at each breakpoint; that padding is mirrored inside the
+   880px and 360px responsive blocks below, next to .toolbar. Only the padding
+   is mirrored, never the toolbar's gap or fonts. */
+/* Compact: icon-only actions with 28px targets and aria-labels carrying the
+   names. Still ≥24px squares, so the touch floor holds. */
+@media (max-width:380px){
+  .sel-action-label{display:none}
+  .sel-bar{gap:6px}
+  .sel-bar .icon-btn{width:28px;height:28px;min-width:28px;min-height:28px}
+  .sel-bar .btn{min-width:28px;padding:0 6px}
+}
 
 /* ═══ file list ════════════════════════════════════════════════ */
 .list{padding:0 8px 24px}
@@ -247,8 +310,23 @@ body.is-moving .frow,body.is-moving .gcard{cursor:grabbing}
 .frow-skel{height:var(--row-h);margin:1px 8px;border-radius:var(--radius-sm)}
 .frow-skel .skeleton{height:100%}
 
-/* grid view */
+/* grid view
+ *
+ * Folders and files get one .grid each (see renderGrid). A picture card is a
+ * fixed 88px media box plus its caption; a folder that shared its row was
+ * stretched to that height and showed an empty thumbnail-shaped hole, so the
+ * folder grid stands on its own and its cards are a different shape entirely.
+ *
+ * Two stacked grids keep a single outer padding: the first gives up its bottom
+ * padding, the second its top, and 12px of the second's top becomes the seam.
+ */
 .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(148px,1fr));gap:10px;padding:12px 16px 32px}
+.list > .grid + .grid{padding-top:12px}
+.list > .grid:not(:last-child){padding-bottom:0}
+/* Folder cards are wide and short, not squares: the name needs the room the
+   picture grid does not, so this grid's track is wider and never less than the
+   card itself at 320px (min() keeps one column instead of overflowing). */
+.grid-folders{grid-template-columns:repeat(auto-fill,minmax(min(100%,216px),1fr))}
 .gcard{
   position:relative;
   display:flex;flex-direction:column;gap:8px;padding:9px;
@@ -290,6 +368,39 @@ body.is-moving .frow,body.is-moving .gcard{cursor:grabbing}
 }
 .gcard .gactions .icon-btn{width:22px;height:22px}
 .gcard .gactions .icon-btn svg{width:13px;height:13px}
+
+/* Folder tiles: no thumbnail band, a fixed icon cell and a text column.
+   DOM order is checkbox / .gfolder-icon / .gfolder-body / .gactions; the grid
+   places them so a long folder name wraps inside its column instead of pushing
+   the actions around, and the checkbox keeps its own corner (bottom-left, in
+   the empty cell under the icon) so it never covers icon or actions. */
+.gcard.is-folder{
+  display:grid;
+  grid-template-columns:36px minmax(0,1fr);
+  align-items:start;gap:6px 10px;min-height:74px;
+}
+.gcard.is-folder .gfolder-icon{
+  grid-column:1;grid-row:1;
+  width:36px;height:36px;display:grid;place-items:center;
+  border-radius:var(--radius-sm);
+  color:var(--warning);background:var(--warning-soft);
+}
+.gcard.is-folder .gfolder-icon svg{width:20px;height:20px}
+.gcard.is-folder .gfolder-body{
+  grid-column:2;grid-row:1;
+  display:flex;flex-direction:column;gap:3px;min-width:0;
+}
+.gcard.is-folder .gname{align-items:flex-start}
+.gcard.is-folder .gname span{
+  display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;
+  overflow:hidden;white-space:normal;line-height:1.3;overflow-wrap:anywhere;
+}
+.gcard.is-folder .gmeta{font-size:12px;color:var(--text-faint)}
+.gcard.is-folder .gactions{
+  grid-column:2;grid-row:2;
+  justify-self:end;height:22px;
+}
+.gcard.is-folder .card-pick{top:auto;left:12px;bottom:8px}
 
 /* ═══ drop zone ════════════════════════════════════════════════ */
 .drop-overlay{
@@ -511,6 +622,23 @@ body.is-moving .frow,body.is-moving .gcard{cursor:grabbing}
 .qitem.is-finalizing .qbar i{background:var(--warning)}
 .qitem.is-resumable .qbar i{background:var(--warning);opacity:.7}
 .qitem .qstate.is-resumable{color:var(--warning)}
+/* A preparation row's bar is a stage meter, not a transfer meter: it shares the
+   4px slot so the row keeps its rhythm, but it never enters the batch numbers.
+   The indeterminate variant is the native <progress>, which has no fill child
+   and must be told to paint like the div bar. */
+.qitem.is-preparing .qbar i{background:var(--text-faint)}
+.qbar-prep-busy{
+  grid-column:1/-1;width:100%;height:4px;margin-top:2px;
+  appearance:none;-webkit-appearance:none;border:0;border-radius:2px;
+  background:var(--surface-3);overflow:hidden;
+}
+.qbar-prep-busy[hidden]{display:none}
+.qbar-prep-busy::-webkit-progress-bar{background:var(--surface-3);border-radius:2px}
+.qbar-prep-busy::-webkit-progress-value{background:var(--text-faint);border-radius:2px}
+.qbar-prep-busy::-moz-progress-bar{background:var(--text-faint);border-radius:2px}
+/* A canceled preparation request is a request, not a result: the row keeps its
+   shape, and the one control it had is visibly spent. */
+.qitem.is-preparing .icon-btn.is-busy{opacity:.55;cursor:default}
 /* 24px, not 18: the queue row carries three or four actions side by side and
    at 18px with a 1px gap the pointer landed on the wrong one. 24x24 with a
    4px gap keeps 28px between centres, and the glyph goes to 13px so the
@@ -566,9 +694,53 @@ body.is-moving .frow,body.is-moving .gcard{cursor:grabbing}
 .preview-drawer .preview-md{overflow:auto;width:100%}
 .preview-drawer .empty{padding:40px 24px}
 
+/* ═══ reader viewer (PDF · text · Office · video) ══════════════
+ * The sibling of .photo-viewer: formats that are read get the whole surface
+ * instead of the narrow rail. Pinned to all four sides, so the panel is the
+ * viewport and the 100% width costs no horizontal overflow; no side border
+ * because this is the screen, and a plain fade replaces the drawer's slide-in:
+ * the content is what arrived, not a panel sliding over the drive.
+ */
+.reader-viewer.drawer{
+  inset:0;
+  width:100%;
+  max-width:none;
+  height:100dvh;
+  max-height:none;
+  border-left:0;
+  overflow:hidden;
+  animation:motion-fade-in var(--duration-fast) var(--ease-standard) backwards;
+}
+/* The stage is the leftover height between header and footer and must never
+   grow with its content; the body is the one thing that scrolls. */
+.reader-viewer .preview-stage{flex:1 1 0;min-height:0;background:var(--bg)}
+.reader-viewer .preview-body{flex:1 1 auto;min-width:0;min-height:0}
+/* The title yields first and the actions stay put on the right; below this
+   width the head wraps rather than pushing prev/next/download off-screen. */
+.reader-viewer .drawer-head{flex-wrap:wrap;min-width:0}
+.reader-viewer .drawer-head h2{flex:1 1 auto;min-width:0}
+.reader-viewer .preview-nav,.reader-viewer .drawer-head .icon-btn,.reader-viewer .drawer-head .btn{flex:0 0 auto}
+/* Reuses .preview-frame's size, its white paper and its border-radius. */
+.reader-viewer .preview-frame{flex:1 1 auto;min-width:0;min-height:0;width:100%;height:100%}
+/* A video is letterboxed in whatever room the drawer has, not cropped. */
+.reader-viewer .preview-body > .preview-media{max-height:100%;object-fit:contain}
+/* A reading measure for text and Markdown; centred so the line does not hug
+   the left edge of a 1440px window. Code is exempt: it wraps to its own lines,
+   and pre-wrap keeps long lines from forcing the page sideways. */
+.reader-viewer .preview-text,
+.reader-viewer .preview-md{width:100%;max-width:72ch;margin-inline:auto;min-width:0}
+/* Wide Office tables scroll inside their own box (.office-table-wrap already
+   carries overflow-x:auto) so the panel itself never gains a horizontal bar. */
+.reader-viewer .office{min-width:0;padding-inline:max(16px,env(safe-area-inset-left)) max(16px,env(safe-area-inset-right))}
+.reader-viewer .office-table-wrap{max-width:100%}
+
 /* ═══ share dialog + public page ══════════════════════════════ */
-.share-link-row{display:flex;gap:6px}
-.share-link-row .input{font-family:var(--font-mono);font-size:var(--fs-xs)}
+.share-link-row{display:flex;gap:6px;min-width:0}
+.share-link-row .input{font-family:var(--font-mono);font-size:var(--fs-xs);min-width:0;flex:1 1 0}
+.share-link-row .btn{flex:0 0 auto}
+/* The owner dialog inherits an intrinsic min-width from the long share URL; keep
+   it inside the scrim's 24px side padding so the URL scrolls in the input. */
+.dialog.share-owner-dialog{min-width:0;max-width:calc(100vw - 48px)}
 .share-list{display:flex;flex-direction:column;gap:6px;max-height:216px;overflow:auto}
 .share-item{
   display:flex;align-items:center;gap:8px;padding:7px 9px;
@@ -631,6 +803,7 @@ body.is-moving .frow,body.is-moving .gcard{cursor:grabbing}
   .row-pick{opacity:1}
   .frow .meta.num{min-width:0;font-size:10.5px;text-align:right}
   .toolbar{padding:8px 12px;gap:6px}
+  .sel-bar{padding-inline:12px}
   .toolbar .seg-label{display:none}
   .list{padding:0 4px 24px}
   .grid{padding:10px 12px 28px;grid-template-columns:repeat(auto-fill,minmax(132px,1fr))}
@@ -671,6 +844,7 @@ body.is-moving .frow,body.is-moving .gcard{cursor:grabbing}
   .top-actions{gap:2px}
   .crumb{max-width:96px}
   .toolbar{padding:6px 8px;gap:6px}
+  .sel-bar{padding-inline:8px}
   .segmented{padding:1px;gap:1px}
   .segmented button{padding:0 4px}
   .statusbar{padding:0 8px;gap:8px;overflow:hidden}

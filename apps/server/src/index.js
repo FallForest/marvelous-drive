@@ -129,6 +129,14 @@ async function runRetention() {
     if (summary.sessions || summary.orphanSessions) {
       console.log(`[retention] dropped ${summary.sessions} expired upload sessions, ${summary.orphanSessions} orphan directories`)
     }
+    // Archive downloads are reaped on the same clock. The summary carries plain
+    // counts, so there is nothing to unwrap here.
+    if (summary.archiveDownloads > 0) {
+      console.log(`[retention] reaped ${summary.archiveDownloads} expired archive downloads`)
+    }
+    if (summary.archiveDownloadFailures > 0) {
+      console.warn(`[retention] ${summary.archiveDownloadFailures} archive download reaps failed`)
+    }
   } catch (error) {
     console.error('[retention] sweep failed:', error)
   }

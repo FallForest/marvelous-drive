@@ -61,7 +61,7 @@ type Node = {
 
 | Method | Path | Notes |
 | --- | --- | --- |
-| GET | `/nodes` | No `parentId` → the whole live tree (legacy CLI shape); `?parentId=<uuid>` → authorized direct children; `?parentId=root` → root level. Plus `?trash=1`, `?starred=1`, `?kind=file\|folder`, `?sort=name\|size\|updated\|created`, `?direction=asc\|desc`. Folders sort before files. Optional `limit=1..500&offset=0..` returns `{nodes,limit,offset,hasMore}`; without paging parameters the response remains `{nodes}` |
+| GET | `/nodes` | No `parentId` → the whole live tree (legacy CLI shape); `?parentId=<uuid>` → authorized direct children; `?parentId=root` → root level. Plus `?trash=1`, `?starred=1`, `?kind=file\|folder`, `?sort=name\|size\|updated\|created`, `?direction=asc\|desc`. On the trash only, `?q=` is a literal name substring and `?deletedWithin=24h\|7d\|30d` is a rolling UTC window applied before paging (`400` for any other value; ignored outside the trash). Folders sort before files. Optional `limit=1..500&offset=0..` returns `{nodes,limit,offset,hasMore}`; without paging parameters the response remains `{nodes}` |
 | GET | `/nodes/:id` | Adds `children`, `path` (breadcrumb), and for files `downloadUrl`/`previewUrl` |
 | POST | `/nodes` | `{ name, kind?, parentId? }` → `201 { node }` |
 | PUT | `/nodes/:id` | `{ name?, parentId?, expectedVersion? }` → `{ node }` |

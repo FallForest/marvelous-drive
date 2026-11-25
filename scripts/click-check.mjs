@@ -103,14 +103,20 @@ process.exit(await runBrowserCheck({ title: 'Marvelous Drive click model check',
       .find((element) => (element.querySelector('.name') || {}).textContent === '项目资料')
     const box = row && row.querySelector('.pick')
     if (!box) return { error: 'no checkbox' }
+    const beforeTop = row.getBoundingClientRect().top
+    const beforeScroll = document.getElementById('view').scrollTop
     box.click()
     await new Promise((resolve) => setTimeout(resolve, 400))
+    const afterTop = row.getBoundingClientRect().top
+    const afterScroll = document.getElementById('view').scrollTop
     return {
       error: null,
       checked: box.checked,
       drawers: document.querySelectorAll('.preview-drawer').length,
       path: location.pathname,
       bar: (document.querySelector('.sel-bar') || {}).innerText || '',
+      sameGeometry:
+        Math.abs(afterTop - beforeTop) < 1 && Math.abs(afterScroll - beforeScroll) < 1,
     }
   })
   check('the row has a checkbox', boxed.error === null, JSON.stringify(boxed))
@@ -118,6 +124,11 @@ process.exit(await runBrowserCheck({ title: 'Marvelous Drive click model check',
   check('the checkbox does not navigate', boxed.path === '/', JSON.stringify(boxed))
   check('the checkbox does not open a preview', boxed.drawers === 0, JSON.stringify(boxed))
   check('the selection bar counts it', /已选择 1 项/.test(boxed.bar), JSON.stringify(boxed.bar))
+  check(
+    'selecting does not push the row down',
+    boxed.sameGeometry === true,
+    JSON.stringify(boxed),
+  )
   await page.shot('click-03-checkbox')
 
   /* ── 5. select all / clear from the header checkbox ─────────── */

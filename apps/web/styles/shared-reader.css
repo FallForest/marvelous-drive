@@ -1,0 +1,166 @@
+/*
+ * shared-reader.css — the public page's full-viewport reading surface.
+ *
+ * A visitor following /s/<token> used to read a PDF inside the 476px
+ * .public-card: on a 1440×900 window the frame measured 430×150 and showed one
+ * page corner. The page now hands the file to the same drawer() the drive uses
+ * and pins it to all four sides, so the frame claims the height between header
+ * and footer instead of a fixed 60vh slice.
+ *
+ * Loaded separately from app.css/index.css (like photo-viewer.css) because this
+ * is its own surface: it must not inherit .preview-drawer's rail geometry, and
+ * the public page must not be able to alter the drive. Values come from
+ * tokens.css; nothing is hard-coded that a token already names.
+ */
+
+/* ── the panel: the whole viewport ────────────────────────────────
+ * Pinned to all four sides with auto width/height, exactly as .photo-viewer
+ * does: the fixed box is then the viewport itself, so no 100vw/100dvh (which
+ * overshoot once a scrollbar exists) can add horizontal overflow. A plain fade
+ * replaces the rail's slide-in — content arrived, no panel slid over the drive.
+ */
+.shared-reader.drawer{
+  inset:0;
+  width:auto;
+  max-width:none;
+  height:auto;
+  max-height:none;
+  border-left:0;
+  overflow:hidden;
+  background:var(--surface);
+  animation:motion-fade-in var(--duration-fast) var(--ease-standard) backwards;
+}
+/* The exit is the same fade, not the drawer's 12px slide: this panel did not
+   come in from the edge, so it must not leave through it. dismissOverlay still
+   removes the node on this animation's end, as it does for every overlay. */
+.shared-reader.drawer.is-closing{animation:motion-fade-out var(--duration-fast) var(--ease-accelerate) both}
+
+/* ── header: name first, close always reachable ───────────────────
+ * One row that never wraps: the title yields with an ellipsis, the close button
+ * keeps a 44px target on a phone, and the safe-area insets are paid here so the
+ * panel itself needs no padding. */
+.shared-reader .drawer-head{
+  flex:0 0 auto;
+  flex-wrap:nowrap;
+  height:auto;
+  min-height:44px;
+  gap:8px;
+  padding-top:env(safe-area-inset-top,0px);
+  padding-left:max(14px,env(safe-area-inset-left,0px));
+  padding-right:max(8px,env(safe-area-inset-right,0px));
+}
+.shared-reader .drawer-head h2{flex:1 1 auto;min-width:0}
+.shared-reader .drawer-head h2 .title-text{
+  max-width:100%;
+  overflow-wrap:anywhere;
+  text-overflow:ellipsis;
+  white-space:nowrap;
+}
+.shared-reader .drawer-head .sub{flex:0 1 auto;white-space:nowrap}
+/* Desktop: a comfortable 32px hit area on a surface this large. The 44px
+   version is in the narrow block below, where a finger needs it. */
+.shared-reader .drawer-head .icon-btn{flex:0 0 auto;width:32px;height:32px}
+
+/* ── body: the leftover height, nothing else ──────────────────────
+ * No padding and no scrolling of its own: every renderer below either scrolls
+ * inside itself (text, Office) or is a replaced box that fills the stage. */
+.shared-reader .drawer-body{
+  display:flex;
+  flex-direction:column;
+  flex:1 1 auto;
+  min-height:0;
+  padding:0;
+  overflow:hidden;
+}
+/* The stage stacks the single node renderSharedPreview mounted, so one rule
+   sizes a frame, a <pre> and a media element alike. */
+.shared-reader .shared-reader-stage{
+  display:flex;
+  flex-direction:column;
+  flex:1 1 auto;
+  min-width:0;
+  min-height:0;
+}
+.shared-reader .shared-reader-stage > *{
+  flex:1 1 0;
+  min-width:0;
+  min-height:0;
+}
+
+/* A PDF: every pixel of the stage, on white paper, no rounded corner against a
+ * panel edge. ~1120×680 at 1440×900 instead of 430×150. */
+.shared-reader .preview-frame{
+  width:100%;
+  height:auto;
+  border:0;
+  border-radius:0;
+  background:#fff;
+}
+
+/* A picture or an audio player keeps its own aspect and is letterboxed in the
+ * stage instead of being stretched by it. A video is the exception: it reads
+ * best as wide as the panel allows, still letterboxed inside that width. */
+.shared-reader .shared-reader-stage > .preview-media{
+  flex:0 1 auto;
+  max-width:100%;
+  max-height:100%;
+  width:auto;
+  height:auto;
+  margin:auto;
+  object-fit:contain;
+  border-radius:0;
+  background:transparent;
+}
+.shared-reader .shared-reader-stage > video.preview-media{width:100%}
+
+/* Long text and Markdown get a reading measure, centred rather than hugging the
+ * left edge of a 1440px window; the panel does not scroll, the text does. */
+.shared-reader .preview-text,
+.shared-reader .preview-md{
+  flex:1 1 0;
+  width:100%;
+  max-width:72ch;
+  min-height:0;
+  margin-inline:auto;
+  overflow-y:auto;
+  overscroll-behavior:contain;
+  background:var(--surface);
+}
+.shared-reader .preview-text{padding:20px 22px}
+.shared-reader .preview-md{padding:22px 24px}
+
+/* Office: the extracted outline scrolls vertically; wide tables keep their own
+ * horizontal box (.office-table-wrap already carries overflow-x:auto). */
+.shared-reader .office{
+  flex:1 1 0;
+  min-width:0;
+  min-height:0;
+  overflow-x:hidden;
+  padding-inline:max(16px,env(safe-area-inset-left,0px)) max(16px,env(safe-area-inset-right,0px));
+}
+.shared-reader .office-table-wrap{max-width:100%}
+
+/* Loading, empty and "cannot preview" states keep a reading gutter. */
+.shared-reader .empty,
+.shared-reader .public-note{
+  flex:1 1 0;
+  width:100%;
+  max-width:72ch;
+  min-height:0;
+  margin:0 auto;
+  overflow-y:auto;
+  padding:24px 22px;
+}
+
+@media (max-width:480px){
+  /* The subtitle is the first thing to give up on a phone: at 320px the name
+     and a visible, tappable close button are what has to survive. */
+  .shared-reader .drawer-head .sub{display:none}
+  .shared-reader .drawer-head .icon-btn{width:44px;height:44px;min-width:44px;min-height:44px}
+  .shared-reader .preview-text{padding:16px}
+  .shared-reader .preview-md{padding:18px 16px}
+}
+
+@media (prefers-reduced-motion:reduce){
+  .shared-reader.drawer{animation:none}
+}

@@ -1,0 +1,40 @@
+/*
+ * share-downloads.css — the public /s/<token> page's download surfaces.
+ *
+ * The download center itself is styled by downloads.css, which this page reuses
+ * unchanged: one center, one look. What is public-page-specific lives here and
+ * nothing else, so a change for the recipient's card can never reach the drive.
+ *
+ * Only two things exist:
+ *   - the stable entry slot in the card header, which holds the same compact
+ *     icon button the drive's topbar uses;
+ *   - the download anchor, which must read as a button but stay a real link
+ *     (middle click, modifiers and "save as" all fall back to the browser).
+ */
+
+/* The header's tool slot sits between the brand and "打开我的云盘". It must not
+   collapse when the entry is absent (viewer or unavailable link): an empty slot
+   with no box is simply not drawn. */
+.public-head-tools{display:inline-flex;align-items:center;gap:6px}
+.public-head-tools:empty{display:none}
+
+/* The entry is a 28px icon target, a touch above the 26px default: it is the
+   only control up there, and on a phone it is a thumb target in a 476px card. */
+.public-dl-entry{width:28px;height:28px;min-width:28px;min-height:28px}
+.public-dl-entry svg{width:15px;height:15px}
+.public-dl-entry:focus-visible{outline:2px solid var(--focus-ring);outline-offset:2px}
+
+/* A download that the page cannot finish itself is handed to the browser, and
+   the control says so. The arrow glyph is already the download icon; the dashed
+   underline is the "this leaves the page" cue, not a second verb. */
+.public-download.is-native-download{
+  text-decoration:underline dotted;
+  text-underline-offset:3px;
+  text-decoration-color:var(--border-strong);
+}
+.public-download.is-native-download:hover{text-decoration-color:currentColor}
+.public-download:focus-visible{outline:2px solid var(--focus-ring);outline-offset:2px}
+
+/* The public card is narrow; a long file name must not push the actions out.
+   The anchor is a flex item like any button, so this only pins its ceiling. */
+.public-actions .public-download{max-width:100%}

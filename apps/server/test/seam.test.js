@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
-import { readdirSync, readFileSync } from 'node:fs';
+import { mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, it } from 'node:test';
 import { fileURLToPath } from 'node:url';
@@ -65,12 +66,30 @@ describe('storage seam', () => {
   });
 
   it('the backend exposes the whole interface a second tier would need', async () => {
-    const { backend, LocalBackend, readBlobBuffer } = await import('../src/storage/backend.js');
-    for (const method of ['put', 'get', 'stat', 'remove', 'link', 'path']) {
-      assert.equal(typeof backend[method], 'function', 'backend.' + method + ' is missing');
+    // backend.js reaches config.js → db.js → security.js at module load, so the
+    // import has to happen after this suite owns a throwaway data directory;
+    // otherwise the seam test creates drive.db and .jwt-secret in the checkout.
+    const dataDir = mkdtempSync(join(tmpdir(), 'mdrive-seam-'));
+    const savedDataDir = process.env.DRIVE_DATA_DIR;
+    process.env.DRIVE_DATA_DIR = dataDir;
+    try {
+      const { backend, LocalBackend, readBlobBuffer } = await import('../src/storage/backend.js');
+      for (const method of ['put', 'get', 'stat', 'remove', 'link', 'path']) {
+        assert.equal(typeof backend[method], 'function', 'backend.' + method + ' is missing');
+      }
+      assert.equal(backend.name, 'local');
+      assert.equal(typeof LocalBackend, 'function');
+      assert.equal(typeof readBlobBuffer, 'function');
+    } finally {
+      // Nothing in here may throw: it would replace the assertion message that
+      // says which method is missing.
+      try {
+        const { db } = await import('../src/db.js');
+        db.close();
+      } catch { /* the graph threw before db.js was reached */ }
+      if (savedDataDir === undefined) delete process.env.DRIVE_DATA_DIR;
+      else process.env.DRIVE_DATA_DIR = savedDataDir;
+      try { rmSync(dataDir, { recursive: true, force: true }); } catch { /* windows lock */ }
     }
-    assert.equal(backend.name, 'local');
-    assert.equal(typeof LocalBackend, 'function');
-    assert.equal(typeof readBlobBuffer, 'function');
   });
 });

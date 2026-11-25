@@ -63,7 +63,8 @@ bytes — `apps/server/test/seam.test.js` is the static guard for that.
 office.js         OOXML → pages/blocks or sheets/rows for pptx/docx/xlsx
 office-text.js    Flattens pptx/docx/xlsx and PDFs to searchable text (one-way)
 pdf-text.js       Dependency-free PDF text: object scan, Flate, ToUnicode CMaps
-zip.js            Stored ZIP writer (CRC32, streaming)
+zip.js            Stored ZIP writer (CRC32, streaming, ZIP64 when a field overflows)
+zip-records.js    Pure Buffer builders for the data descriptor and ZIP64 records
 zip-read.js       Minimal ZIP reader (stored/deflate, zip64, bomb caps)
 image-normalize.js HEIC frame → downscaled RGBA → PNG (box filter + node:zlib)
 heif-loader.js    The only importer of libheif: lazy WASM, LGPL, fails soft
@@ -79,6 +80,8 @@ scrub.js          Blob integrity: missing files, orphans, size mismatches
 audit.js          Append-only action log with a 90 day window
 access-log.js     Blob read tracking (one row per blob per day) + hot/cold split
 search-index.js   Body index: FTS5 + LIKE merge, index on write, rebuild on boot
+search-filters.js kind/folder/updatedAfter as one fixed SQL fragment for both halves
+archive-downloads.js  Temporary ZIP carriers: one owned blob ref, 24h TTL, reader-safe reclaim
 index-jobs.js     Durable Office/PDF index queue, replay and search barrier
 thumbnail.js      Content-hash/size WebP cache and worker orchestration
 preview-source.js Capped local/remote source preparation after worker admission
@@ -147,6 +150,12 @@ lib/
   image-size.js   Reads width/height from a PNG/JPEG/GIF/WebP header
   image-zoom.js   The picture viewer's zoom: stops, pan limits, wheel and drag rules
   downloads.js    The download center: one topbar entry, one panel, retry, carriers
+  shares-view.js  The owner's /shares page: paging, state from the server, filters
+  share-edit.js   The in-place link editor: seed from the row, patch only what changed
+  trash-filter.js The recycle bin's name/kind/deletion-time controls and canonical URL
+  search-form.js  The search page's filter controls (kind / scope / folder)
+  directory-prefs.js  Per-user, per-folder view and sort memory
+  sha256-worker.js    Background SHA-256 for a large local Blob (one shared worker)
   sha256.js       Web Crypto hashing with a fallback for non-secure origins
   row-action.js   What a click means: action vs. selection (see the rules below)
   preview.js      Preview drawer: image, PDF, text, markdown, media, edit lock
@@ -179,7 +188,10 @@ styles/
   components.css  Buttons, inputs, dialogs, toasts, badges
   app.css         Drive-specific: sidebar, list/grid, preview, panel
   downloads.css   The download center: topbar entry and its panel, own surface
+  shares.css      The owner's /shares management page, scoped to .shares-page
+  share-downloads.css  The public page's entry slot and download anchors
   photo-viewer.css  The full-viewport picture drawer, scoped under .photo-viewer
+  shared-reader.css The public page's full-viewport reader, scoped to .shared-reader
 ```
 
 Rules:

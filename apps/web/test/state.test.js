@@ -4,6 +4,7 @@ import {
   parseLocation, routePath, buildIndex, ancestorPath, childrenOf, descendantIds,
   isDescendant, moveTargets, createStore,
 } from '../lib/state.js'
+import { nodePagePath, sharesPagePath } from '../lib/route-data.js'
 
 /** Routing and the flat-tree index: the two things that silently break navigation. */
 
@@ -36,6 +37,71 @@ describe('parseLocation', () => {
 
   it('maps unknown paths to notFound', () => {
     assert.equal(at('/nope/deeper').name, 'notFound')
+  })
+})
+
+describe('trash filters', () => {
+  it('parses and rebuilds the trash filter as route.query', () => {
+    const path = '/trash?q=Chinese%literal&kind=file'
+    const parsed = parseLocation({ pathname: '/trash', search: '?q=Chinese%literal&kind=file' })
+    assert.equal(parsed.name, 'trash')
+    assert.equal(parsed.query, 'Chinese%literal')
+    assert.equal(parsed.kind, 'file')
+    assert.deepEqual(parseLocation({ pathname: '/trash', search: '' }), { name: 'trash' })
+    const rebuilt = routePath(parsed)
+    const reparsed = parseLocation({ pathname: rebuilt.split('?')[0], search: '?' + rebuilt.split('?')[1] })
+    assert.deepEqual(reparsed, parsed)
+    assert.equal(nodePagePath(parsed).includes('q=Chinese%25literal'), true)
+    assert.equal(nodePagePath({ name: 'trash' }).includes('q='), false)
+    assert.equal(nodePagePath({ name: 'trash' }).includes('deletedWithin'), false)
+  })
+
+  it('parses and rebuilds the deletion window, dropping values outside the vocabulary', () => {
+    const parsed = parseLocation({ pathname: '/trash', search: '?deletedWithin=7d' })
+    assert.deepEqual(parsed, { name: 'trash', deletedWithin: '7d' })
+    assert.equal(routePath(parsed), '/trash?deletedWithin=7d')
+    assert.deepEqual(parseLocation({ pathname: '/trash', search: '?q=报告&kind=file&deletedWithin=30d' }),
+      { name: 'trash', query: '报告', kind: 'file', deletedWithin: '30d' })
+    // 全部时间 has no parameter at all, and an unknown preset is not carried.
+    assert.deepEqual(parseLocation({ pathname: '/trash', search: '?deletedWithin=' }), { name: 'trash' })
+    assert.deepEqual(parseLocation({ pathname: '/trash', search: '?deletedWithin=this-week' }), { name: 'trash' })
+    assert.equal(routePath({ name: 'trash', deletedWithin: '' }), '/trash')
+    assert.equal(routePath({ name: 'trash', deletedWithin: 'this-week' }), '/trash')
+    // The kind vocabulary is dropped the same way, so a URL this app builds is
+    // one it accepts back unchanged.
+    assert.equal(routePath({ name: 'trash', kind: 'image' }), '/trash')
+  })
+})
+
+describe('shares filters', () => {
+  it('parses and rebuilds /shares?q=&state= as route state', () => {
+    const parsed = parseLocation({ pathname: '/shares', search: '?q=' + encodeURIComponent('季度 报告') + '&state=trashed' })
+    assert.deepEqual(parsed, { name: 'shares', query: '季度 报告', state: 'trashed' })
+    // The canonical URL parses back to the same route, so Back and reload keep
+    // the filter (URLSearchParams chooses the space encoding, not this test).
+    const rebuilt = routePath(parsed)
+    assert.deepEqual(parseLocation({ pathname: rebuilt.split('?')[0], search: '?' + rebuilt.split('?')[1] }), parsed)
+    assert.equal(new URLSearchParams(rebuilt.split('?')[1]).get('state'), 'trashed')
+    // Bare /shares keeps its old one-key shape, and unknown values are dropped.
+    assert.deepEqual(parseLocation({ pathname: '/shares', search: '' }), { name: 'shares' })
+    assert.deepEqual(parseLocation({ pathname: '/shares', search: '?state=gone' }), { name: 'shares' })
+    assert.equal(routePath({ name: 'shares', query: '   ', state: '' }), '/shares')
+  })
+
+  it('carries both filters on every page, including 继续加载', () => {
+    const first = new URLSearchParams(sharesPagePath({ name: 'shares', query: ' 报告 ', state: 'expired' }).split('?')[1])
+    assert.equal(first.get('q'), '报告')
+    assert.equal(first.get('state'), 'expired')
+    assert.equal(first.get('limit'), '50')
+    assert.equal(first.get('offset'), '0')
+    const later = new URLSearchParams(sharesPagePath({ name: 'shares', query: '报告', state: 'expired' }, { offset: 50 }).split('?')[1])
+    assert.equal(later.get('offset'), '50')
+    assert.equal(later.get('q'), '报告', 'a later page stays on the same filtered set')
+    assert.equal(later.get('state'), 'expired')
+    // A bare list asks the question it asked before the filters existed.
+    const bare = new URLSearchParams(sharesPagePath({ name: 'shares' }).split('?')[1])
+    assert.equal(bare.has('q'), false)
+    assert.equal(bare.has('state'), false)
   })
 })
 

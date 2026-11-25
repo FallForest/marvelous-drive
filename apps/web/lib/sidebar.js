@@ -13,13 +13,54 @@ import { renderMenu } from './select.js';
 const NAV = [
   { key: 'drive', label: '我的云盘', icon: 'harddrive', path: () => '/' },
   { key: 'starred', label: '星标', icon: 'star', path: () => '/starred' },
+  { key: 'shares', label: '我分享的', icon: 'share', path: () => '/shares' },
   { key: 'trash', label: '回收站', icon: 'trash', path: () => '/trash' },
 ];
+
+/**
+ * The route object whose trail is already open, and the reason the tree does
+ * not fight the user.
+ *
+ * Opening /folder/a/a1/a2 must leave the trail open, otherwise the sidebar says
+ * nothing about where the page is. But renderShell() also runs for a star
+ * toggle, a sort, a caret click or a refresh of the same page, and re-expanding
+ * there would undo the branch the user just collapsed. So the trail is opened
+ * once per *route object*: every navigation re-parses the URL into a fresh
+ * descriptor (parseLocation), while a re-render keeps the object in the store.
+ */
+let trailRoute = null;
+
+/**
+ * Opens the ancestor branches of the folder being shown.
+ *
+ * The last ancestor is the current folder itself, and a folder is not its own
+ * branch: only `ancestors.slice(0, -1)` is expanded. The route is remembered
+ * only once its trail is known — while route-data is still in flight
+ * session.index belongs to the previous page, so the path is empty or ends
+ * elsewhere and the route must stay unmarked for the paint that follows the
+ * load.
+ */
+function expandRouteTrail(state, route, ancestors) {
+  if (!route || route.name !== 'drive' || !route.folderId) return;
+  if (trailRoute === route) return;
+  // The loading skeleton paints before the new page's folders are in the index,
+  // so its ancestors belong to the route being left. Opening a trail there would
+  // remember a path that is about to be replaced.
+  if (state.loading) return;
+  const path = ancestors || [];
+  const current = path[path.length - 1];
+  if (!current || current.id !== route.folderId) return;
+  trailRoute = route;
+  for (const node of path.slice(0, -1)) state.expanded.add(node.id);
+}
 
 export function renderSidebar(ctx) {
   const state = ctx.state;
   const route = state.route;
   const index = ctx.index;
+  // Before the tree is built: treeRow() reads state.expanded for every branch,
+  // so the trail has to be open by the time the roots are walked.
+  expandRouteTrail(state, route, ctx.ancestors);
   const searchInput = h('input', {
     class: 'input',
     attrs: {
@@ -56,6 +97,11 @@ export function renderSidebar(ctx) {
         : null,
       item.key === 'starred' && state.stats && state.stats.starred
         ? h('span', { class: 'count', text: String(state.stats.starred) })
+        : null,
+      // The count rides the existing stats payload (/storage/stats already
+      // reports shares), so the nav needs no second request of its own.
+      item.key === 'shares' && state.stats && state.stats.shares
+        ? h('span', { class: 'count', text: String(state.stats.shares) })
         : null,
     )),
   );
@@ -340,7 +386,7 @@ function treeKeydown(event, ctx) {
 
 /* ── breadcrumb ───────────────────────────────────────────────── */
 const ROUTE_TITLE = {
-  trash: '回收站', starred: '星标', search: '搜索',
+  trash: '回收站', starred: '星标', search: '搜索', shares: '我分享的',
 };
 
 export function renderBreadcrumb(ctx) {
@@ -365,7 +411,13 @@ export function renderBreadcrumb(ctx) {
     }
   }
 
-  const bar = h('nav', { class: 'crumbs', attrs: { 'aria-label': '路径' } });
+  // A drive trail can be arbitrarily deep, so it gets its own class: only that
+  // bar scrolls sideways (see .crumbs-drive in app.css). The buttons, their
+  // aria-current, the titles and the drop handlers below are unchanged.
+  const bar = h('nav', {
+    class: route.name === 'drive' ? 'crumbs crumbs-drive' : 'crumbs',
+    attrs: { 'aria-label': '路径' },
+  });
   crumbs.forEach((crumb, index) => {
     if (index > 0) bar.appendChild(h('span', { class: 'crumb-sep', html: icon('chevron-right', 13) }));
     // Every breadcrumb level is a drop target, including the level being shown
@@ -388,7 +440,36 @@ export function renderBreadcrumb(ctx) {
       }));
     }
   });
+  // The bar is still detached here — the shell mounts it right after this
+  // returns — so scrolling is deferred to the next frame. Only the drive trail
+  // scrolls: the two-crumb views never overflow.
+  if (route.name === 'drive') scrollCrumbsToEnd(bar);
   return bar;
+}
+
+/**
+ * Pins the drive trail to its right edge after it lands in the document.
+ *
+ * A deep path is wider than the topbar on a laptop and far wider on a phone, so
+ * the bar scrolls horizontally. The page the user is on is the last crumb, and
+ * showing the root instead would hide both it and its parent behind the right
+ * edge. Scrolling to the end once, per render, keeps those two readable while
+ * every ancestor stays one swipe away — the bar is never clipped, only scrolled.
+ *
+ * requestAnimationFrame, not a direct write: scrollWidth is 0 until layout runs,
+ * and the element is not even connected at render time. The frame callback
+ * checks isConnected first, because a quick second render can replace the bar
+ * before the first frame arrives.
+ */
+function scrollCrumbsToEnd(bar) {
+  const toEnd = () => {
+    if (!bar.isConnected) return;
+    // scrollLeft clamps to scrollWidth - clientWidth; assigning the raw width is
+    // the shortest way to say "go as far right as the content allows".
+    bar.scrollLeft = bar.scrollWidth;
+  };
+  if (typeof requestAnimationFrame === 'function') requestAnimationFrame(toEnd);
+  else toEnd();
 }
 
 
@@ -425,9 +506,15 @@ export function renderToolbar(ctx) {
   const state = ctx.state;
   const route = state.route;
   const isTrash = route.name === 'trash';
+  const isShares = route.name === 'shares';
   const nodes = [];
 
-  if (!isTrash) {
+  if (isShares) {
+    // Link management is not a file directory: there is nothing to upload, no
+    // folder to create and no sort/view to pick. The toolbar says what the page
+    // is, so the shell keeps its height and the user keeps the same chrome.
+    nodes.push(h('span', { class: 'dialog-note', text: '这里列出你创建的所有链接。撤销后访问者会立即失去访问，原文件不会被删除。' }));
+  } else if (!isTrash) {
     const uploadBtn = h('button', {
       class: 'btn btn-primary', attrs: { type: 'button', 'aria-haspopup': 'menu', 'aria-expanded': 'false' },
       on: { click: (event) => ctx.onUploadClick(event.currentTarget) },
@@ -441,43 +528,48 @@ export function renderToolbar(ctx) {
     nodes.push(h('span', { class: 'dialog-note', text: '回收站中的文件可以还原，或永久删除。' }));
   }
 
-  nodes.push(h('span', { class: 'push' }));
-  nodes.push(h('span', { class: 'seg-label', text: '排序' }));
+  // The share list has a fixed server order (newest first) and one shape, so
+  // sort and view would be controls that do nothing. They are left out instead
+  // of rendered disabled.
+  if (!isShares) {
+    nodes.push(h('span', { class: 'push' }));
+    nodes.push(h('span', { class: 'seg-label', text: '排序' }));
 
-  // A button, not a <select>: this control sits in a row of 28px buttons, and
-  // the native widget brought its own height, its own type scale and an arrow
-  // that sat below the optical centre. The menu behind it is the app's own.
-  nodes.push(renderMenu({
-    label: '排序方式',
-    className: 'sort-menu',
-    value: state.sortKey,
-    options: [
-      { value: 'name', label: '按名称' },
-      { value: 'size', label: '按大小' },
-      { value: 'updated', label: '按更新时间' },
-    ],
-    onChange: (value) => ctx.onSort(value),
-  }));
-  nodes.push(h('button', {
-    class: 'icon-btn', attrs: {
-      type: 'button',
-      'aria-label': state.sortDir === 'asc' ? '当前升序，点击切换为降序' : '当前降序，点击切换为升序',
-      title: state.sortDir === 'asc' ? '升序' : '降序',
-    },
-    html: icon(state.sortDir === 'asc' ? 'arrow-up' : 'arrow-down', 13),
-    on: { click: () => ctx.onSortDirection() },
-  }));
+    // A button, not a <select>: this control sits in a row of 28px buttons, and
+    // the native widget brought its own height, its own type scale and an arrow
+    // that sat below the optical centre. The menu behind it is the app's own.
+    nodes.push(renderMenu({
+      label: '排序方式',
+      className: 'sort-menu',
+      value: state.sortKey,
+      options: [
+        { value: 'name', label: '按名称' },
+        { value: 'size', label: '按大小' },
+        { value: 'updated', label: '按更新时间' },
+      ],
+      onChange: (value) => ctx.onSort(value),
+    }));
+    nodes.push(h('button', {
+      class: 'icon-btn', attrs: {
+        type: 'button',
+        'aria-label': state.sortDir === 'asc' ? '当前升序，点击切换为降序' : '当前降序，点击切换为升序',
+        title: state.sortDir === 'asc' ? '升序' : '降序',
+      },
+      html: icon(state.sortDir === 'asc' ? 'arrow-up' : 'arrow-down', 13),
+      on: { click: () => ctx.onSortDirection() },
+    }));
 
-  nodes.push(h('div', { class: 'segmented', attrs: { role: 'group', 'aria-label': '视图' } },
-    h('button', {
-      attrs: { type: 'button', 'aria-pressed': state.view === 'list' ? 'true' : 'false', 'aria-label': '列表视图', title: '列表视图' },
-      html: icon('list', 14), on: { click: () => ctx.onViewChange('list') },
-    }),
-    h('button', {
-      attrs: { type: 'button', 'aria-pressed': state.view === 'grid' ? 'true' : 'false', 'aria-label': '网格视图', title: '网格视图' },
-      html: icon('grid', 14), on: { click: () => ctx.onViewChange('grid') },
-    }),
-  ));
+    nodes.push(h('div', { class: 'segmented', attrs: { role: 'group', 'aria-label': '视图' } },
+      h('button', {
+        attrs: { type: 'button', 'aria-pressed': state.view === 'list' ? 'true' : 'false', 'aria-label': '列表视图', title: '列表视图' },
+        html: icon('list', 14), on: { click: () => ctx.onViewChange('list') },
+      }),
+      h('button', {
+        attrs: { type: 'button', 'aria-pressed': state.view === 'grid' ? 'true' : 'false', 'aria-label': '网格视图', title: '网格视图' },
+        html: icon('grid', 14), on: { click: () => ctx.onViewChange('grid') },
+      }),
+    ));
+  }
 
   return nodes;
 }

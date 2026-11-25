@@ -148,11 +148,18 @@ export function prefetchWindow(gallery, index, options) {
   return out;
 }
 
-/** "3 / 12" — the counter both the header and the live region read. */
-export function positionLabel(index, length) {
+/**
+ * "3 / 12" — the counter both the header and the live region read.
+ *
+ * `more` appends a "+" when the list is only what has been loaded so far and
+ * the folder still has a page behind it: the total is then a floor, not a final
+ * count, and printing "3 / 12" would promise an end the viewer has not seen.
+ */
+export function positionLabel(index, length, options) {
   if (!Number.isFinite(length) || length <= 0) return '';
   const at = Number.isFinite(index) && index >= 0 ? index + 1 : 0;
-  return at + ' / ' + length;
+  const suffix = options && options.more ? '+' : '';
+  return at + ' / ' + length + suffix;
 }
 
 /** Arrow keys that mean "previous / next" when the drawer is not typing. */

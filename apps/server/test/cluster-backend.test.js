@@ -3,9 +3,6 @@ import { after, before, describe, it } from 'node:test'
 import { mkdtemp, mkdir, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { db } from '../src/db.js'
-import { ClusterBackend } from '../src/storage/cluster.js'
-import { sealSecret, openSecret } from '../src/security.js'
 
 /**
  * Placement and durability rules, with the network stubbed.
@@ -15,15 +12,20 @@ import { sealSecret, openSecret } from '../src/security.js'
  * silent — the API says 201 and one box holds the only copy — so the rules are
  * pinned here rather than discovered during a disk failure.
  *
- * These tests write to the shared `db` (the process has exactly one connection),
- * so `before` gives the file a throwaway `DRIVE_DATA_DIR` and `after` restores it.
- * Running this file alone is not enough: the node:test runner executes files in
- * one process, and leftover rows from another suite would make "chosen 2 nodes"
- * mean something else.
+ * These tests write through the shared `db` (the process has exactly one
+ * connection), so `before` points `DRIVE_DATA_DIR` at a throwaway directory
+ * *before* the first impure import. Nothing here may import db.js, cluster.js or
+ * security.js statically: those reach config.js at module load, and a static
+ * import would have opened the checkout's own database before `before` ran.
  */
 
 let dataDir
 let backend
+let ClusterBackend
+let db
+let sealSecret
+let openSecret
+let savedDataDir
 
 /** A fake node: records every request, so placement can be inspected. */
 function fakeFetch(responses = {}) {
@@ -60,10 +62,10 @@ const OWN_HASHES = ['a', 'b', 'c', 'd', 'e', 'f', '1'].map((char) => char.repeat
 /**
  * Removes only what this file created.
  *
- * `db` is one shared in-process connection, and the runner executes every test
- * file in the same process — so a blanket `DELETE FROM blobs` here would wipe the
- * rows another suite is using. Both names are targeted exactly: the nodes are
- * `node-*` and the hashes are the fixed list above.
+ * The suite now owns its database, so the narrow deletes are not there to protect
+ * another file's rows (node:test runs each file in its own process). They keep the
+ * file self-contained: every test starts from the rows it just enrolled, and a
+ * re-run of one test cannot inherit state from the one before it.
  */
 function clear() {
   const placeholders = OWN_HASHES.map(() => '?').join(',')
@@ -83,13 +85,25 @@ async function spool(name, content) {
 before(async () => {
   dataDir = await mkdtemp(join(tmpdir(), 'mdrive-cluster-test-'))
   await mkdir(join(dataDir, 'tmp'), { recursive: true })
+  // The same directory serves the DB, the spools and the WAL files; every import
+  // is deferred so config.js resolves against it and nowhere else.
+  savedDataDir = process.env.DRIVE_DATA_DIR
+  process.env.DRIVE_DATA_DIR = dataDir
+  ;({ db } = await import('../src/db.js'))
+  ;({ ClusterBackend } = await import('../src/storage/cluster.js'))
+  ;({ sealSecret, openSecret } = await import('../src/security.js'))
   backend = new ClusterBackend({ dataDir, writes: 1, reserveBytes: 100 })
   clear()
 })
 
 after(async () => {
-  clear()
-  await rm(dataDir, { recursive: true, force: true })
+  // `before` may have thrown before any of this existed; a teardown that throws a
+  // second error would hide the real one. Closing first also releases the WAL so the
+  // directory is removable on Windows instead of lingering in %TEMP%.
+  try { db.close() } catch { /* never opened, or already closed */ }
+  if (savedDataDir === undefined) delete process.env.DRIVE_DATA_DIR
+  else process.env.DRIVE_DATA_DIR = savedDataDir
+  if (dataDir) await rm(dataDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }).catch(() => {})
 })
 
 describe('capacity-aware placement', () => {
@@ -213,10 +227,10 @@ describe('replication report', () => {
       .run(hash, 'node-a', 100, 'present', new Date().toISOString())
     const strict = new ClusterBackend({ dataDir, writes: 2 })
     const report = strict.replicationReport()
-    // The report covers the whole store, and the test runner shares one database
-    // process-wide: blobs written by another suite (local-driver uploads, which
-    // have no placements at all) are legitimately under-replicated here. Assert
-    // on this file's own hash instead of on the total.
+    // The report covers the whole store. This suite owns the database file, so the
+    // only blobs present are the ones `clear()` left: assert on this file's hash
+    // rather than on the total, which keeps the test independent of the order the
+    // tests inside this file run in.
     const mine = report.blobs.find((entry) => entry.hash === hash)
     assert.ok(mine, JSON.stringify(report.blobs.map((entry) => entry.hash.slice(0, 4))))
     assert.equal(mine.replicas, 1)
@@ -232,7 +246,7 @@ describe('replication report', () => {
       .run(hash, 'node-a', 10, 'present', new Date().toISOString())
     const single = new ClusterBackend({ dataDir, writes: 1 })
     // Same scoping: this file's fully replicated blob must not be reported,
-    // whatever else is in the shared database.
+    // whatever other rows the earlier tests in this file left behind.
     const report = single.replicationReport()
     assert.equal(report.blobs.some((entry) => entry.hash === hash), false)
   })

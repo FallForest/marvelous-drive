@@ -12,8 +12,11 @@
 
 import { h, raw } from './dom.js';
 import { icon, bytes, sortNodes } from './format.js';
+import { renderSearchForm } from './search-form.js';
+import { routePath } from './state.js';
 import { store, session } from './session.js';
-import { renderFileList } from './files.js';
+import { renderFileList, trashRetentionClause } from './files.js';
+import { renderTrashFilter, isTrashFilterActive } from './trash-filter.js';
 import { runtime } from './runtime.js';
 
 /** The rows the current route shows, sorted. */
@@ -61,6 +64,7 @@ function listContext(ctx, nodes) {
     onFolderDragOver: ctx.onFolderDragOver,
     onFolderDragLeave: ctx.onFolderDragLeave,
     onFolderDrop: ctx.onFolderDrop,
+    navigate: ctx.navigate,
   };
 }
 
@@ -183,17 +187,33 @@ function nodeMoreBar(ctx, count) {
 /** The search page. */
 function searchView(ctx) {
   const state = store.state;
+  const route = state.route;
   const query = state.searchQuery || '';
+  const term = query.trim();
   const results = state.searchResults || [];
-  const header = h('div', { class: 'section-head' },
-    h('h1', { attrs: { 'data-route-heading': '' }, text: '搜索' }),
-    h('span', { class: 'sub', text: query ? describeResults(query, results) : '在侧边栏输入关键字' }),
+  const more = state.searchMore;
+  // One form instance for every state: the same controls stay on screen while
+  // the user switches between the prompt, an empty result and real results.
+  const form = renderSearchForm(ctx);
+  const header = h('div', { class: 'section-head search-selection-head' },
+    h('div', { class: 'search-heading-default' },
+      h('h1', { attrs: { 'data-route-heading': '' }, text: '搜索' }),
+      h('span', {
+        class: 'sub',
+        text: more && more.hasMore
+          ? '已显示 ' + results.length + ' 项'
+          : term
+            ? describeResults(term, results)
+            : '筛选结果',
+      }),
+    ),
+    results.length ? ctx.selectionSlot : null,
   );
-  if (!query) {
-    return h('div', {}, header, h('div', { class: 'empty' },
+  if (!term && !route.folderId && !route.kind && !route.updatedAfter) {
+    return h('div', {}, header, form, h('div', { class: 'empty' },
       raw(icon('search', 30)),
       h('b', { text: '开始搜索' }),
-      h('p', { text: '按 / 聚焦搜索框，可以搜文件名，也可以搜文件内容。' }),
+      h('p', { text: '输入关键字，或按文件夹、类型、修改时间筛选；可以搜文件名，也可以搜文件内容。' }),
     ));
   }
   if (!results.length) {
@@ -201,7 +221,7 @@ function searchView(ctx) {
     // instead of letting the user believe the file does not contain the word.
     const coverage = state.stats && state.stats.search;
     const behind = coverage && coverage.missing > 0;
-    return h('div', {}, header, h('div', { class: 'empty' },
+    return h('div', {}, header, form, h('div', { class: 'empty' },
       raw(icon('search', 30)),
       h('b', { text: '没有找到匹配的文件' }),
       h('p', { text: '试试更短的关键字；只有文本类文件的内容会被索引。' }),
@@ -210,7 +230,7 @@ function searchView(ctx) {
   }
   const wrap = h('div', {},
     header,
-    ctx.selectionSlot,
+    form,
     renderFileList(listContext(ctx, results)),
     matchNotes(results),
     searchMoreBar(ctx),
@@ -219,27 +239,87 @@ function searchView(ctx) {
   return wrap;
 }
 
+/**
+ * The way from the recycle bin to the links whose source file sits in it.
+ *
+ * A deleted file keeps its share rows (that is what makes "restore brings the
+ * link back" true), but the bin itself lists files, not links, so there was no
+ * discoverable path to that management view. The link is a real anchor to the
+ * canonical URL — middle-click and copy-address work — while a plain click stays
+ * in the SPA. The note states only what is true: while the source is trashed the
+ * link does not resolve, and after a restore a link that is still within its
+ * expiry and download budget works again.
+ */
+function trashSharesLink(ctx) {
+  const href = routePath({ name: 'shares', state: 'trashed' });
+  return h('p', { class: 'trash-shares-link' },
+    h('a', {
+      attrs: { href },
+      on: {
+        click: (event) => {
+          // Leave modified clicks alone: the browser's own "open in new tab" /
+          // "open in new window" is a better answer than a same-tab navigation.
+          if (event.defaultPrevented || event.button === 1 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+          event.preventDefault();
+          ctx.navigate(href);
+        },
+      },
+    }, raw(icon('link', 13)), '回收站里的分享链接'),
+    h('span', {
+      text: '文件在回收站时链接打不开；还原后，仍在有效期和下载次数内的链接会恢复可用。',
+    }),
+  );
+}
+
 /** The drive / trash / starred list. */
 function listView(ctx) {
   const route = store.state.route;
   const nodes = visibleNodes();
+  const trash = route.name === 'trash';
+  const filtered = trash && isTrashFilterActive(route);
   const heading = route.name === 'trash'
     ? '回收站'
     : route.name === 'starred'
       ? '星标文件'
       : (ctx.ancestors.length ? ctx.ancestors[ctx.ancestors.length - 1].name : '全部文件');
 
+  const searchScope = route.name === 'drive'
+    ? h('button', {
+      class: 'btn', attrs: { type: 'button' },
+      text: route.folderId ? '搜索此文件夹' : '搜索文件',
+      // Only navigates: the search page owns the form, nothing is submitted here.
+      on: { click: () => ctx.navigate(routePath({ name: 'search', query: '', folderId: route.folderId })) },
+    })
+    : null;
+
   const wrap = h('div', {},
     h('div', { class: 'section-head' },
       // data-route-heading is the anchor the shell focuses after a navigation
       // (a route change must move focus somewhere predictable for the keyboard).
       h('h1', { attrs: { 'data-route-heading': '' }, text: heading }),
-      h('span', { class: 'sub', text: (store.state.nodeMore && store.state.nodeMore.hasMore ? '已加载 ' : '') + nodes.length + ' 项' }),
+      h('span', {
+        class: 'sub',
+        text: (filtered ? '筛选 · ' : '') + (store.state.nodeMore && store.state.nodeMore.hasMore ? '已加载 ' : '') + nodes.length + ' 项',
+      }),
+      searchScope,
     ),
-    ctx.selectionSlot,
+    // The filter stays mounted in every trash state — filtered results, a
+    // filtered no-match and an empty bin — so the way out is always on screen.
+    trash ? renderTrashFilter(ctx) : null,
+    route.name === 'trash' && nodes.length
+      ? h('p', { class: 'muted', attrs: { style: 'margin:0;padding:0 16px 8px;font-size:var(--fs-xs)' }, text: trashRetentionClause(store.state.stats) })
+      : null,
+    // Discovery, not an action: the link opens the filtered management list, and
+    // it stays mounted in every trash state that can hold a deleted share
+    // (filtered results, a filtered no-match, a bin with items) so the way back
+    // to a share's own row is always on screen. An empty bin has no trashed
+    // source, hence no trashed link, so the footnote would be a dead end there.
+    trash && (nodes.length || filtered) ? trashSharesLink(ctx) : null,
     renderFileList(listContext(ctx, nodes)),
     nodeMoreBar(ctx, nodes.length),
-    hints(),
+    // A matched-empty list does not need the keyboard hints; the no-match state
+    // above already says what happened and how to undo it.
+    filtered && !nodes.length ? null : hints(),
   );
   runtime.paintSelection();
   return wrap;
@@ -250,7 +330,7 @@ export function viewContent(ctx) {
   const state = store.state;
   if (state.loading) return skeletonView();
   if (state.loadError) {
-    return h('div', { class: 'empty', style: { paddingTop: '64px' } },
+    const error = h('div', { class: 'empty', style: { paddingTop: '64px' } },
       raw(icon('alert', 30)),
       h('b', { text: '加载失败' }),
       h('p', { text: state.loadError }),
@@ -259,6 +339,10 @@ export function viewContent(ctx) {
         on: { click: () => runtime.refreshData() },
       }),
     );
+    // A search that failed may be the filter's fault (say, a folder that no
+    // longer exists), so keep the form above the error to let the user fix it.
+    if (state.route.name === 'search') return h('div', {}, renderSearchForm(ctx), error);
+    return error;
   }
   return state.route.name === 'search' ? searchView(ctx) : listView(ctx);
 }

@@ -111,6 +111,11 @@ export function summaryLabel(stats) {
 
 /* ── one row's status line ─────────────────────────────────────── */
 
+/** "38% · 3.4 MB / 9.0 MB" from a hash reading. */
+function hashSent(stage) {
+  return stage.pct + '% · ' + bytes(stage.hashed) + ' / ' + bytes(stage.size);
+}
+
 /** The state word a row leads with. */
 const ROW_STATE_LABEL = Object.freeze({
   queued: '排队中',
@@ -131,6 +136,36 @@ const ROW_TONES = Object.freeze({
   paused: 'warning',
   resumable: 'warning',
 });
+
+/**
+ * The hashing stage as one progress reading, or null when the task is not
+ * hashing right now.
+ *
+ * `task.hashBytes` is null until the transport reports real bytes hashed, then
+ * the number of bytes read. A null/absent/invalid value is "not known yet", not
+ * 0%: the row has to draw an indeterminate bar rather than invent a percentage.
+ * `task.progress`/`task.uploaded` are network bytes and deliberately stay out of
+ * this reading — during hashing no byte has been uploaded yet.
+ *
+ * Returns { known, ratio, pct, hashed, size }. ratio/pct are null when unknown.
+ */
+export function hashStageProgress(task) {
+  const t = task || {};
+  if (String(t.state || '') !== 'hashing') return null;
+  const rawSize = Number(t.size);
+  const size = Number.isFinite(rawSize) && rawSize > 0 ? rawSize : 0;
+  const raw = t.hashBytes;
+  const hashed = raw === null || raw === undefined || raw === '' ? NaN : Number(raw);
+  // A zero-byte file has no percentage worth drawing: 0/0 is not progress.
+  const known = size > 0 && Number.isFinite(hashed) && hashed >= 0;
+  if (!known) return { known: false, ratio: null, pct: null, hashed: 0, size };
+  const clamped = Math.min(size, hashed);
+  const ratio = clamped / size;
+  // Floor, except when every byte has really been read: rounding 99.6% up to
+  // 100% while the digest is still running is the one lie this row must not tell.
+  const pct = clamped >= size ? 100 : Math.min(99, Math.floor(ratio * 100));
+  return { known: true, ratio, pct, hashed: clamped, size };
+}
 
 /**
  * What one row should say, split into the state word and its detail line.
@@ -187,7 +222,11 @@ export function taskRowStatus(task) {
     return { state, label, tone, detail: parts.join(' · ') };
   }
   if (state === 'hashing') {
-    return { state, label, tone, detail: size ? sent : '' };
+    // The line reads hashing bytes, never the (still zero) transfer count: a
+    // "0 B / 9.0 MB" here is a real sentence about the wrong stage.
+    const stage = hashStageProgress(t);
+    if (stage && stage.known) return { state, label, tone, detail: hashSent(stage) };
+    return { state, label, tone, detail: size ? '正在读取文件内容' : '' };
   }
   return { state, label, tone, detail: size ? sent : '' };
 }

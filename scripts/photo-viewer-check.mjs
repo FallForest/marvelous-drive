@@ -299,7 +299,9 @@ process.exit(await runBrowserCheck({ title: 'Picture viewer layout check', netwo
   check('a single picture in its folder still opens as a viewer', /photo-viewer/.test(single.className) && single.panel.width === single.viewport.width, JSON.stringify({ cls: single.className, panel: single.panel }))
   check('the single picture is contained too', inside(single.media, single.frame), JSON.stringify({ media: single.media, frame: single.frame }))
 
-  /* ── a non-picture keeps the narrow reading drawer ────────────── */
+  /* ── a non-picture gets the full-surface reader ─────────────────
+   * Text is read, so it takes the whole surface like the picture viewer does;
+   * the line measure, not the panel, is what stays narrow. */
   await page.navigate(server + '/folder/' + seeded['照片'].id, { settle: 1100 })
   await page.run((id) => document.querySelector('.frow[data-id="' + id + '"] .name').click(), seeded['照片'].rows['notes.md'])
   await page.waitFor("document.querySelector('.preview-drawer:not(.is-closing) .preview-md')")
@@ -307,16 +309,22 @@ process.exit(await runBrowserCheck({ title: 'Picture viewer layout check', netwo
   const text = await page.run(() => {
     const panel = document.querySelector('.preview-drawer:not(.is-closing)')
     const rect = panel.getBoundingClientRect()
+    const body = panel.querySelector('.preview-text, .preview-md')
+    const measure = body ? body.getBoundingClientRect() : null
     return {
       className: panel.className,
       width: rect.width,
       viewport: window.innerWidth,
       photoClass: panel.classList.contains('photo-viewer'),
+      readerClass: panel.classList.contains('reader-viewer'),
       picture: Boolean(panel.querySelector('.picture-frame')),
+      measure: measure ? { width: measure.width } : null,
     }
   })
   check('a text preview never gets the picture layout', text.photoClass === false && text.picture === false, JSON.stringify(text))
-  check('the text drawer keeps its reading width', text.width <= 600 && text.width < text.viewport, JSON.stringify(text))
+  check('a text preview opens the full-surface reader', text.readerClass === true, JSON.stringify(text))
+  check('the reader fills the viewport', Math.abs(text.width - text.viewport) <= 2, JSON.stringify(text))
+  check('the reading measure is set but stays narrow', text.measure !== null && text.measure.width > 0 && text.measure.width <= 800, JSON.stringify(text.measure))
   await page.shot('photo-viewer-04-text-drawer')
   await closeDrawer()
   check('Esc still closes the drawer', await page.evaluate("!document.querySelector('.preview-drawer:not(.is-closing)')"))

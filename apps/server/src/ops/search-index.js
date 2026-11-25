@@ -7,6 +7,7 @@ import {
 } from '../text/office-text.js'
 import { runCpuTask } from '../text/cpu-tasks.js'
 import { previewSource } from './preview-source.js'
+import { buildSearchFilters } from './search-filters.js'
 
 /**
  * Full-text index over file contents.
@@ -155,6 +156,9 @@ export function renameInIndex(nodeId, name) {
   }
 }
 
+/** Rows a single content mechanism may fetch; the route's window is offset+limit+1. */
+const SEARCH_CONTENT_LIMIT_MAX = 1101
+
 /**
  * Searches file bodies.
  *
@@ -162,11 +166,22 @@ export function renameInIndex(nodeId, name) {
  * "invo" finds "invoice". Every token is quoted, which is what keeps a stray
  * `"` or `*` from turning into a syntax error — the query language belongs to
  * us, not to the user.
+ *
+ * `options` carries the same external filters the name search uses (`folderId`,
+ * `updatedAfter`, `kind`) so both halves answer the same question. They are
+ * applied inside each query, before its LIMIT, against `nodes n` — which is why
+ * every content query is `FROM node_text JOIN nodes n ON n.id = node_text.node_id`
+ * rather than a bare scan of the index: a body whose node was trashed or is not
+ * visible must never occupy a slot in the page.
  */
-export function searchContents(userId, term, limit = 20) {
+export function searchContents(userId, term, limit = 20, options = {}) {
   const text = String(term || '').trim()
   if (!text) return []
-  const cap = Math.min(Math.max(limit, 1), 50)
+  // The route asks for offset+limit+1 rows (<= 1101). The old cap of 50 turned
+  // every page past 50 hits into an empty one; the ceiling here only exists so a
+  // caller cannot ask the index for an unbounded scan.
+  const cap = Math.min(Math.max(Math.trunc(Number(limit) || 20), 1), SEARCH_CONTENT_LIMIT_MAX)
+  const filters = buildSearchFilters(userId, options)
 
   // Two mechanisms, deliberately both:
   //   - FTS5 gives ranking and snippets, but its unicode61 tokeniser only splits
@@ -175,19 +190,29 @@ export function searchContents(userId, term, limit = 20) {
   //   - A LIKE scan is a substring match: the superset FTS cannot provide.
   // Merging them means a search never misses because of how SQLite decided to
   // tokenise; FTS hits stay on top because they matched a real token boundary.
-  const ranked = searchFts(userId, text, cap)
+  const ranked = searchFts(userId, text, cap, filters)
   const rankedIds = new Set(ranked.map((hit) => hit.nodeId))
   const merged = [...ranked]
-  for (const hit of searchSubstring(userId, text, cap)) {
-    if (rankedIds.has(hit.nodeId)) continue
-    merged.push(hit)
-    if (merged.length >= cap) break
+  // The fallback only fills a page the FTS hits did not already fill.
+  //
+  // Appending extras whenever the FTS list was truncated to `cap` would make the
+  // merged order depend on `cap` — and `cap` is offset+limit+1, so page 2 would
+  // place an extra at a position that page 1 gave to an FTS row. The user would
+  // see the same file twice across a page boundary and never see another. When
+  // FTS saturates the budget, the window being served is entirely inside the
+  // stable FTS order, so nothing that the fallback could add is reachable here.
+  if (ranked.length < cap) {
+    for (const hit of searchSubstring(userId, text, cap, filters)) {
+      if (rankedIds.has(hit.nodeId)) continue
+      merged.push(hit)
+      if (merged.length >= cap) break
+    }
   }
   return merged
 }
 
 /** FTS5 lookup; returns [] when the query cannot be tokenised or parsed. */
-function searchFts(userId, text, limit) {
+function searchFts(userId, text, limit, filters) {
   const tokens = text
     .split(/\s+/)
     .map((token) => token.replace(/["*():^]/g, '').trim())
@@ -203,13 +228,13 @@ function searchFts(userId, text, limit) {
   // column filter keeps a file called invoice.pdf out of a scope=content search.
   const query = tokens.map((token) => 'body:"' + token + '"*').join(' AND ')
   try {
-    return db.prepare(`SELECT node_id AS nodeId,
+    return db.prepare(`SELECT node_text.node_id AS nodeId,
         snippet(node_text, ${BODY_COLUMN}, '\u0001', '\u0002', '…', 14) AS snippet,
         rank
-      FROM node_text
+      FROM node_text JOIN nodes n ON n.id = node_text.node_id
       WHERE node_text MATCH ?
-        AND (user_id = ? OR workspace_id IN (SELECT workspace_id FROM memberships WHERE user_id = ?))
-      ORDER BY rank LIMIT ?`).all(query, userId, userId, limit)
+        AND ${filters.sql}
+      ORDER BY rank, node_text.node_id LIMIT ?`).all(query, ...filters.params, limit)
   } catch (error) {
     // A malformed query must look like "no results", not like a 500.
     console.error('[search] FTS query failed for "' + text + '":', error)
@@ -219,13 +244,14 @@ function searchFts(userId, text, limit) {
 
 
 /** Substring scan: the superset FTS cannot produce (CJK, digits glued to CJK). */
-function searchSubstring(userId, text, limit) {
+function searchSubstring(userId, text, limit, filters) {
   const pattern = '%' + text.replace(/[%_\\]/g, (char) => '\\' + char) + '%'
   try {
-    const rows = db.prepare(`SELECT node_id AS nodeId, body FROM node_text
-      WHERE (user_id=? OR workspace_id IN (SELECT workspace_id FROM memberships WHERE user_id=?))
-        AND body LIKE ? ESCAPE '\\'
-      ORDER BY length(body) LIMIT ?`).all(userId, userId, pattern, limit)
+    const rows = db.prepare(`SELECT node_text.node_id AS nodeId, node_text.body AS body
+      FROM node_text JOIN nodes n ON n.id = node_text.node_id
+      WHERE ${filters.sql}
+        AND node_text.body LIKE ? ESCAPE '\\'
+      ORDER BY length(node_text.body), node_text.node_id LIMIT ?`).all(...filters.params, pattern, limit)
     return rows.map((row) => ({
       nodeId: row.nodeId,
       snippet: excerptAround(String(row.body || ''), text),

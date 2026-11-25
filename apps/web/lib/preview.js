@@ -73,21 +73,71 @@ export function openPreview(node, options) {
   const opts = options || {};
   if (!node) return null;
 
+  /**
+   * One normalized read of the gallery source.
+   *
+   * `opts.gallery` is either a plain array — an already-known gallery, which is
+   * what the shared reader and the tests hand over — or a function the caller
+   * owns (actions.js). That function returns the live rows in the view's sort
+   * order, whether the list has another page behind it, and how to fetch that
+   * page; it returns null once the route behind the drawer is no longer the one
+   * the drawer opened on. Normalising here keeps a single code path for both,
+   * and a throwing source must not break the drawer: it degrades to "no more".
+   */
+  function readSource() {
+    const source = opts.gallery;
+    if (typeof source !== 'function') {
+      // A plain array — or a pre-read { nodes, hasMore, loadMore } object — is a
+      // known, fixed gallery: there is nothing behind it to page into.
+      const value = Array.isArray(source) || !source ? { nodes: source } : source;
+      return {
+        nodes: Array.isArray(value.nodes) ? value.nodes : [],
+        hasMore: value.hasMore === true,
+        loadMore: typeof value.loadMore === 'function' ? value.loadMore : null,
+        offset: Number(value.offset) || 0,
+      };
+    }
+    let read = null;
+    try { read = source(); } catch { return null; }
+    if (!read) return null;
+    const value = Array.isArray(read) ? { nodes: read } : read;
+    return {
+      nodes: Array.isArray(value.nodes) ? value.nodes : [],
+      hasMore: value.hasMore === true,
+      loadMore: typeof value.loadMore === 'function' ? value.loadMore : null,
+      // The caller's page cursor (how many rows the view has already read).
+      // A page that arrives without moving it was a failure or a fetch the
+      // list already had in flight, which is how the walk stops asking.
+      offset: Number(value.offset) || 0,
+    };
+  }
+
   // The gallery is the folder's pictures in list order; a non-picture (a PDF, a
   // folder) is a gallery of one, so the drawer still works and simply has no
-  // neighbours to arrow to.
-  const list = galleryOf(node, opts.gallery);
+  // neighbours to arrow to. The rows are re-read through the source whenever a
+  // page is appended, so they keep the view's order rather than arrival order.
+  const initial = readSource() || { nodes: [], hasMore: false, loadMore: null };
+  let list = galleryOf(node, initial.nodes);
   let index = Math.max(0, indexOfId(list, node.id));
   let current = list[index] || node;
-  // A drawer showing one non-picture has no gallery to speak of: printing
-  // "1 / 1" next to a PDF would promise navigation that does not exist.
-  const counted = list.length > 1;
-
+  /**
+   * True while the source says the folder has a page after the loaded rows.
+   * It is a floor, not a total: the counter must never print a final "… / 100"
+   * while pictures may still be behind page one (see positionLabel's `more`).
+   *
+   * A non-picture is a gallery of one and never pages: a folder of 40 photos
+   * that also holds a PDF must not offer "next" on that PDF, because the next
+   * thing in the gallery source is not something this drawer can paint.
+   */
+  const pagesPictures = isGalleryImage(node);
+  let more = pagesPictures && initial.hasMore;
   const body = h('div', { class: 'preview-body centered' });
   const objectUrls = [];
   let disposed = false;
   let paintRevision = 0;
   let swipe = null;
+  /** True while one next-page request is in flight. Repeated → is ignored. */
+  let loadingMore = false;
   /** True only while the body holds a picture whose zoom may be used. */
   let zoomable = false;
   /** Pending picture requests: { controller, targetIndex }. See cancelPrefetch(). */
@@ -198,20 +248,28 @@ export function openPreview(node, options) {
     onInteract: () => swipe?.cancel(),
   });
 
-  // A picture is the one preview with no reading measure, so it asks for the
-  // viewport-sized layout in styles/photo-viewer.css. The decision comes from
-  // the node that OPENED the drawer: a gallery of pictures stays a picture
-  // viewer while arrowing, and a PDF, text, folder or Office drawer keeps the
-  // narrow reading panel. Single pictures and animated formats share the
-  // `image` kind, so a lone PNG and a GIF get the same treatment.
-  const photoClass = current.kind !== 'folder' && fileKind(current.mime, current.name) === 'image'
-    ? ' photo-viewer'
-    : '';
+  // The layout follows the node that OPENED the drawer, never the file being
+  // painted: a gallery of pictures stays a picture viewer while arrowing, and a
+  // folder never becomes one. A picture is the one preview with no reading
+  // measure, so it asks for the viewport-sized layout in photo-viewer.css
+  // (single pictures and animated formats share the `image` kind). The formats
+  // that are actually read — PDF, text/Markdown/code, Office and video — get
+  // the full-surface reading layout in app.css instead of the narrow rail.
+  // Audio, folders and unknown formats keep the plain drawer they always had.
+  const kind = current.kind === 'folder' ? 'folder' : fileKind(current.mime, current.name);
+  const photoClass = kind === 'image' ? ' photo-viewer' : '';
+  // The kind guard is load-bearing, not redundant: isTextLike() looks at the
+  // MIME and the extension, and a folder is neither. A folder called
+  // `notes.txt` would otherwise be put in the reading layout — a typeset
+  // column for a folder preview that is a definition list.
+  const reading = kind !== 'folder' && (kind === 'pdf' || kind === 'video' || isOfficeKind(kind)
+    || isTextLike(current.mime, current.name));
+  const readerClass = !photoClass && reading ? ' reader-viewer' : '';
 
   const handle = drawer({
     title: current.name,
-    sub: counted ? positionLabel(index, list.length) : '',
-    className: 'preview-drawer' + photoClass,
+    sub: hasCounter() ? positionLabel(index, list.length, { more }) : '',
+    className: 'preview-drawer' + photoClass + readerClass,
     headActions: [nav, h('button', downloadBtn())],
     // The stage is a flex column so the body can claim the leftover height: as a
     // plain block, `flex:1` on .preview-body is inert and a short picture sits
@@ -265,7 +323,7 @@ export function openPreview(node, options) {
   // Arrow keys belong to the picture, not to the scroll container. The listener
   // lives on the panel because the focus trap keeps focus inside it.
   handle.el.addEventListener('keydown', (event) => {
-    if (!counted || !isGalleryImage(current) || event.defaultPrevented || event.altKey || event.ctrlKey || event.metaKey
+    if (!hasCounter() || !isGalleryImage(current) || event.defaultPrevented || event.altKey || event.ctrlKey || event.metaKey
       || event.target.closest?.('input,textarea,select,video,audio,[contenteditable="true"]')) return;
     const delta = arrowDelta(event.key) || jumpDelta(event.key, index, list.length);
     if (!delta) return;
@@ -276,7 +334,7 @@ export function openPreview(node, options) {
   // photo, so the gallery swipe must stay off for as long as the multiplier is
   // above fit. Resetting restores normal paging (see the is-zoomed gate).
   swipe = attachGallerySwipe(body, {
-    enabled: () => !disposed && counted && isGalleryImage(current) && !zoom.zoomed,
+    enabled: () => !disposed && hasCounter() && isGalleryImage(current) && !zoom.zoomed,
     onStep: step,
   });
 
@@ -287,15 +345,134 @@ export function openPreview(node, options) {
     if (opts.onChanged) opts.onChanged(updated);
   }
 
-  /** Moves the drawer to another picture; the chrome and the body follow. */
+  /** True when the drawer has something to count: more than one picture, or a
+      page still behind the rows already loaded. */
+  function hasCounter() {
+    return list.length > 1 || more;
+  }
+
+  /**
+   * Moves the drawer to another picture; the chrome and the body follow.
+   *
+   * A → at the end of the loaded rows is no longer a dead stop when the folder
+   * has another page: the loaded rows are only page one (000.png … 099.png),
+   * and the pictures after them live behind loadMoreNodes()/loadMoreSearch().
+   * Asking for that page on demand — rather than fetching the whole directory
+   * when the drawer opens — is what keeps a 5000-photo folder a 100-row read.
+   */
   function step(delta) {
     if (disposed) return;
     const next = stepIndex(index, delta, list.length);
-    if (next < 0 || next === index) return;
+    if (next < 0) return;
+    if (next === index) {
+      // Clamped at an end. Only forward, and only while a page may still
+      // exist, is that an invitation to load the next one.
+      if (delta > 0 && more) requestMore();
+      return;
+    }
+    move(delta);
+  }
+
+  /** Paints the neighbour `delta` steps away, when there is one. */
+  function move(delta) {
+    const next = stepIndex(index, delta, list.length);
+    if (next < 0 || next === index) { paintChrome(); return; }
     index = next;
     current = list[index];
     cancelPrefetch(cancelDirection(delta));
     paint();
+  }
+
+  /**
+   * Appends the next page behind the loaded rows, then continues the walk.
+   *
+   * Pages are fetched one at a time, in series, and a page with no picture in it
+   * (a page of text files) is not a dead end: the walk asks for the page after
+   * it, so one press still reaches the next picture (…, 200.png). The single
+   * `loadingMore` lock spans the whole walk: pressing → five times on a slow
+   * connection is five keydowns but one walk, and the button stays where it is
+   * (and any failure leaves the current picture painted) so the press can simply
+   * be repeated. The walk stops when it found its picture, when the source is no
+   * longer the current route, when the drawer closed, when there is no more, or
+   * when a round did not move the source's cursor (a failure, or a fetch the
+   * list already had in flight) — it never re-requests rows already loaded.
+   * The page is appended to the same store the list renders from, so the new
+   * rows arrive in the view's own sort order instead of arrival order.
+   */
+  async function requestMore() {
+    if (disposed || loadingMore) return;
+    // The picture the user is looking at when they ask. A page that lands after
+    // they stepped back must grow the list, never pull them forward again.
+    const anchor = current.id;
+    loadingMore = true;
+    paintChrome();
+    // The cursor the request in flight was for; null until one is made.
+    let asked = null;
+    let found = false;
+    try {
+      // Pages are fetched one at a time, in series, inside this single lock: a
+      // page of text files (…) carries no picture, so the walk has to ask for
+      // the page after it, and everything it learns comes from re-reading the
+      // source rather than from what the previous page returned.
+      for (;;) {
+        // Re-read before asking: the page may already have arrived (the list's own
+        // "继续加载", or a press that finished after this one was queued), and
+        // fetching a page that is on screen would double it.
+        const source = readSource();
+        if (!source) { more = false; break; }
+        if (adopt(source)) { found = true; break; }
+        if (!source.hasMore || !source.loadMore) { more = false; break; }
+        // Already asked for this page and the cursor has not moved past it: the
+        // request failed, or the list's own fetch owns it. Asking again would
+        // spin on the same page until the user noticed.
+        if (asked !== null && source.offset === asked) break;
+        asked = source.offset;
+        try {
+          await source.loadMore();
+        } catch {
+          // The failure is the caller's to report (app.js toasts it); the viewer
+          // only has to stay exactly where it is, with a working retry.
+        }
+        // A drawer closed (or a picture re-painted) while the page was in flight
+        // must not jump: the user is no longer looking at the place they asked from.
+        if (disposed) return;
+        const after = readSource();
+        if (!after) { more = false; break; }
+        if (adopt(after)) { found = true; break; }
+        // The source is the only authority on "is there another page": a page that
+        // held no picture at all still advances this, and the last page clears it so
+        // → becomes a real, disabled end again.
+        more = after.hasMore;
+        if (after.offset === asked) break;
+        if (!after.hasMore) break;
+      }
+    } finally {
+      loadingMore = false;
+    }
+    if (disposed) return;
+    // Only the press that is still on the same picture may advance it; a page
+    // that arrived after the user stepped back just widens the arrows.
+    if (found && current.id === anchor) { move(1); return; }
+    paintChrome();
+  }
+
+  /**
+   * Takes the source's rows into the gallery when it brought pictures.
+   *
+   * Returns true when the walk grew. It never shrinks the list: a row deleted
+   * from another tab must not pull the picture on screen out from under the
+   * user, and a page that contained only text files leaves the index where it
+   * was and keeps `more` for the page after it.
+   */
+  function adopt(source) {
+    const rebuilt = galleryOf(node, source.nodes);
+    if (!rebuilt.length || rebuilt.length <= list.length) return false;
+    const at = indexOfId(rebuilt, current.id);
+    if (at < 0) return false;
+    list = rebuilt;
+    index = at;
+    more = source.hasMore;
+    return true;
   }
 
   /**
@@ -323,39 +500,73 @@ export function openPreview(node, options) {
 
   /** Repaints the header, the lock banner and the body for `current`. */
   function paint() {
-    if (!disposed) {
-      const nameEl = titleEl();
-      if (nameEl) nameEl.textContent = current.name;
-      const counter = subEl();
-      if (counter) counter.textContent = counted ? positionLabel(index, list.length) : '';
-      const atStart = index <= 0;
-      const atEnd = index >= list.length - 1;
-      nav.hidden = !counted;
-      // NOT the `disabled` attribute: a disabled button cannot hold focus, so
-      // the moment the last picture was reached the focused element fell back
-      // to <body> and every further key press went nowhere — the drawer stopped
-      // responding exactly when the user was still pressing → to see if it would
-      // wrap. aria-disabled keeps the control focusable and announced as
-      // unavailable; stepIndex() already clamps, so the click is a no-op.
-      prevBtn.setAttribute('aria-disabled', atStart ? 'true' : 'false');
-      nextBtn.setAttribute('aria-disabled', atEnd ? 'true' : 'false');
-      prevBtn.classList.toggle('is-disabled', atStart);
-      nextBtn.classList.toggle('is-disabled', atEnd);
-      // A live region, not the title: the drawer is a layer over the page, and
-      // the page's <title> still describes the folder.
-      const spoken = handle.el.querySelector('.preview-announce');
-      if (spoken) spoken.textContent = isGalleryImage(current)
-        ? '第 ' + (index + 1) + ' 张，共 ' + list.length + ' 张：' + current.name
-        : '预览：' + current.name;
-      const hasHistory = current.kind === 'file' && (current.version || 1) > 1;
-      if (hasHistory) historyBtn.removeAttribute('hidden');
-      else historyBtn.setAttribute('hidden', 'hidden');
-      editBtn.hidden = !canEditText(current);
-      const gallery = counted && isGalleryImage(current);
-      body.classList.toggle('is-gallery', gallery);
-      gestureHint.hidden = !gallery;
-    }
+    paintChrome();
     paintBody();
+  }
+
+  /**
+   * The header and the navigation state.
+   *
+   * Split from paint() because a page load changes what "next" means — one more
+   * picture exists, or the folder turned out to have no second page — without
+   * changing the picture on screen. Repainting the body for that would throw
+   * away the decoded frame and show a spinner, i.e. punish the user for the
+   * page arriving.
+   */
+  function paintChrome() {
+    if (disposed) return;
+    const nameEl = titleEl();
+    if (nameEl) nameEl.textContent = current.name;
+    // A source that answers null has lost its route (the drawer outlived a
+    // navigation): there is no page to ask for any more, so the boundary is a
+    // real one again and the counter stops claiming more.
+    if (more && typeof opts.gallery === 'function' && !readSource()) more = false;
+    const shown = hasCounter();
+    const counter = subEl();
+    // `more` makes the total a floor: "100 / 100+" while page two exists.
+    if (counter) counter.textContent = shown ? positionLabel(index, list.length, { more }) : '';
+    const atStart = index <= 0;
+    const atEnd = index >= list.length - 1;
+    nav.hidden = !shown;
+    // NOT the `disabled` attribute: a disabled button cannot hold focus, so
+    // the moment the last picture was reached the focused element fell back
+    // to <body> and every further key press went nowhere — the drawer stopped
+    // responding exactly when the user was still pressing → to see if it would
+    // wrap. aria-disabled keeps the control focusable and announced as
+    // unavailable; stepIndex() already clamps, so the click is a no-op.
+    //
+    // The end of the loaded rows is only a real end when the folder has no
+    // further page: an unbounded directory page (000.png … 099.png followed by
+    // 100.txt, 101.png, …) used to disable → on the 100th row even though 101
+    // was one request away.
+    const atRealEnd = atEnd && !more;
+    prevBtn.setAttribute('aria-disabled', atStart ? 'true' : 'false');
+    nextBtn.setAttribute('aria-disabled', atRealEnd ? 'true' : 'false');
+    prevBtn.classList.toggle('is-disabled', atStart);
+    nextBtn.classList.toggle('is-disabled', atRealEnd);
+    // A load in flight is announced on the control that asked for it, not with
+    // a second spinner over the picture the user is looking at. It stays
+    // focusable and clickable: the request guard, not a dead button, is what
+    // makes a repeated press cheap.
+    if (atEnd && more && loadingMore) nextBtn.setAttribute('aria-busy', 'true');
+    else nextBtn.removeAttribute('aria-busy');
+    // A live region, not the title: the drawer is a layer over the page, and
+    // the page's <title> still describes the folder. "共 100 张以上" while a
+    // page is still unloaded: an exact total would be an invented one.
+    const spoken = handle.el.querySelector('.preview-announce');
+    if (spoken) {
+      const total = more ? '共 ' + list.length + ' 张以上' : '共 ' + list.length + ' 张';
+      spoken.textContent = isGalleryImage(current)
+        ? '第 ' + (index + 1) + ' 张，' + total + '：' + current.name
+        : '预览：' + current.name;
+    }
+    const hasHistory = current.kind === 'file' && (current.version || 1) > 1;
+    if (hasHistory) historyBtn.removeAttribute('hidden');
+    else historyBtn.setAttribute('hidden', 'hidden');
+    editBtn.hidden = !canEditText(current);
+    const gallery = shown && isGalleryImage(current);
+    body.classList.toggle('is-gallery', gallery);
+    gestureHint.hidden = !gallery;
   }
 
   function paintBody() {
@@ -369,6 +580,9 @@ export function openPreview(node, options) {
     zoomBar.setAttribute('hidden', 'hidden');
     body.classList.remove('centered', 'is-zoomed');
     body.style.padding = '';
+    // Derived per node, not once at open: the layout class is fixed at open
+    // time, but the body is painted from whatever `current` is now, so a step
+    // to a neighbour still picks the renderer that neighbour needs.
     const kind = current.kind === 'folder' ? 'folder' : fileKind(current.mime, current.name);
 
     if (current.kind === 'folder') {
@@ -655,7 +869,15 @@ async function loadPdf(node, body, objectUrl, disposed) {
     if (disposed()) return;
     const frame = h('iframe', {
       class: 'preview-frame',
-      attrs: { src: objectUrl(new Blob([blob], { type: 'application/pdf' })), title: 'PDF 预览：' + node.name },
+      // #view=FitH&navpanes=0 is a hint to the native PDF viewer, not part of
+      // the resource: Chrome/Adobe honour it best-effort by fitting the width
+      // and hiding the bookmark rail, while their own toolbar (zoom, page
+      // field, print) is left alone. A viewer that ignores it still loads the
+      // same blob, so there is nothing to feature-detect.
+      attrs: {
+        src: objectUrl(new Blob([blob], { type: 'application/pdf' })) + '#view=FitH&navpanes=0',
+        title: 'PDF 预览：' + node.name,
+      },
     });
     body.replaceChildren(frame);
   } catch (error) {

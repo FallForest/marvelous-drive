@@ -111,9 +111,15 @@ process.exit(await runBrowserCheck({ title: 'UI audit regression check', network
     !viewerPage.buttons.some((text) => text.includes('下载文件'))
     && viewerPage.buttons.some((text) => text.includes('在线预览')), JSON.stringify(viewerPage))
   await page.run(() => [...document.querySelectorAll('.public-actions button')].find((button) => button.textContent.includes('在线预览')).click())
-  await page.waitFor("document.querySelector('.public-card img, .public-card .preview-frame, .public-card .preview-text')", { timeout: 8000 })
-  check('UI01 the viewer preview renders the content', await page.evaluate("Boolean(document.querySelector('.public-card img'))"))
+  await page.waitFor("document.querySelector('.shared-reader img, .shared-reader .preview-frame, .shared-reader .preview-text')", { timeout: 8000 })
+  check('UI01 the viewer preview renders the content', await page.evaluate("Boolean(document.querySelector('.shared-reader img'))"))
 
+  // This public ZIP exercises the attachment-anchor path a browser without the
+  // save picker takes, so hide the picker for this link's documents only. It is
+  // removed after the check; the in-app ZIP cases keep the picker-enabled path.
+  const hideSavePicker = await page.send('Page.addScriptToEvaluateOnNewDocument', {
+    source: "Object.defineProperty(window, 'showSaveFilePicker', { value: undefined, configurable: true })",
+  })
   await page.navigate(server + '/s/' + shareApi.folderDownloaderToken, { settle: 2000 })
   const downloads = []
   const previousHandler = page.onEvent.bind(page)
@@ -139,6 +145,7 @@ process.exit(await runBrowserCheck({ title: 'UI audit regression check', network
   }
   page.onEvent = previousHandler
   check('UI02 the ZIP button starts a folder download', downloads.some((name) => /SharedBundle.*\.zip$/.test(name)), JSON.stringify(downloads))
+  await page.send('Page.removeScriptToEvaluateOnNewDocument', { identifier: hideSavePicker.identifier }).catch(() => {})
 
   /* ── back to the drive for the in-app cases ───────────────── */
   await page.navigate(server + '/', { settle: 1600 })
@@ -421,8 +428,14 @@ process.exit(await runBrowserCheck({ title: 'UI audit regression check', network
     window.fetch = async (input, init) => {
       const url = typeof input === 'string' ? input : String(input && input.url)
       const method = (init && init.method) || 'GET'
-      if (method === 'POST' && url.endsWith('/nodes/' + ids.folder + '/archive')) {
-        const response = await next(input, init)
+      const target = new URL(url, location.origin)
+      if (method === 'POST' && target.pathname.endsWith('/nodes/' + ids.folder + '/archive')) {
+        // Pin this one fixture to the old server contract: strip ?progress=1 by
+        // calling the plain archive URL explicitly, so the endpoint answers one
+        // JSON body that clone().json() below can read. The SSE path is exercised
+        // by the other archive caller (folder/selection ZIP), not here.
+        const legacyUrl = '/api/v1/nodes/' + ids.folder + '/archive'
+        const response = await next(legacyUrl, init)
         // Read the id before the response is handed back: downloadOne() runs on
         // the next tick, and a clone parsed later would miss the fetch below.
         const payload = await response.clone().json().catch(() => null)

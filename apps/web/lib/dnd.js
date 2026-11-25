@@ -256,8 +256,10 @@ export function attachDropZone(shell) {
       return entry ? entry.isDirectory : false;
     });
     if (looksLikeFolder) {
-      const plan = await planFromDataTransfer(items);
-      await runtime.uploadFolderPlan(plan, target);
+      // dnd hands the shell a scan function, not a finished plan: the shell owns
+      // progress and cancellation, and passes `{ signal, onProgress }` back to
+      // planFromDataTransfer. The items were captured before the first await.
+      await runtime.uploadFolderPlan((options) => planFromDataTransfer(items, options), target);
       return;
     }
     const files = Array.from(event.dataTransfer.files || []);

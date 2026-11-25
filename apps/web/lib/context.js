@@ -21,6 +21,7 @@ import {
 } from './actions.js';
 import { openShareDialog } from './share.js';
 import { visibleNodes } from './views.js';
+import { saveDirectoryPrefs } from './directory-prefs.js';
 import { onRowDragStart, onRowDragEnd, onFolderDragOver, onFolderDragLeave, onFolderDrop } from './dnd.js';
 
 /* The sidebar is re-created on every render, so the search field keeps its
@@ -37,14 +38,56 @@ function rememberSearchFocus() {
   }
 }
 
+/**
+ * The input that can actually take the caret back.
+ *
+ * On a narrow window every navigation closes the drawer, and a closed drawer is
+ * `inert`: its search field is still in the document, but focusing it is a
+ * silent no-op and the caret lands on <body>. The page's own search field is
+ * then the only honest target, so it is used as the fallback.
+ */
+function searchField() {
+  const input = document.querySelector('.side-search input');
+  if (input) {
+    const sidebar = input.closest('.sidebar');
+    if (!sidebar || !sidebar.hasAttribute('inert')) return input;
+  }
+  return document.querySelector('.search-form input[type=search]');
+}
+
 export function restoreSearchFocus() {
   if (!searchFocus.active) return;
-  const input = document.querySelector('.side-search input');
+  const input = searchField();
   if (!input) return;
   input.focus();
   if (typeof input.setSelectionRange === 'function') {
     try { input.setSelectionRange(searchFocus.start, searchFocus.end); } catch { /* not a text input */ }
   }
+}
+
+/**
+ * The route the sidebar field is asking for.
+ *
+ * A term typed on the search page narrows what is already there: spreading the
+ * current route keeps folderId / kind / updatedAfter / scope in the URL. From a
+ * folder, a fresh search carries that folder so the results stay scoped to it.
+ * An empty term never borrows a folder — otherwise clearing the box on a folder
+ * page would open a scoped, empty search page.
+ */
+function searchRoute(query) {
+  const route = store.state.route || {};
+  if (route.name === 'search') return { ...route, query };
+  if (query && route.name === 'drive' && route.folderId) {
+    return { name: 'search', query, folderId: route.folderId };
+  }
+  return { name: 'search', query };
+}
+
+/** routePath() for that route, except that a bare empty term means the root. */
+function searchTarget(query) {
+  const route = searchRoute(query);
+  const filtered = Boolean(query || route.folderId || route.kind || route.updatedAfter);
+  return filtered ? routePath(route) : '/';
 }
 
 /**
@@ -65,31 +108,58 @@ export function buildContext(ancestors, selectionSlot) {
       const state = store.state;
       if (state.sortKey === key) state.sortDir = state.sortDir === 'asc' ? 'desc' : 'asc';
       else { state.sortKey = key; state.sortDir = 'asc'; }
+      // Per-directory memory for drive; other pages leave it untouched.
+      saveDirectoryPrefs(state);
       if (state.serverSorted) runtime.reloadRoute();
       else runtime.renderShell();
     },
     onSortDirection: () => {
       store.state.sortDir = store.state.sortDir === 'asc' ? 'desc' : 'asc';
+      saveDirectoryPrefs(store.state);
       if (store.state.serverSorted) runtime.reloadRoute();
       else runtime.renderShell();
     },
     onViewChange: (view) => {
-      store.state.view = view;
-      try { localStorage.setItem('mdrive-view', view); } catch { /* storage disabled */ }
+      const state = store.state;
+      const changed = state.view !== view;
+      state.view = view;
+      // A drive directory remembers its own view. Only the non-drive pages keep
+      // the old global key, so opening a grid folder never changes their start.
+      if (state.route && state.route.name === 'drive') {
+        if (changed) saveDirectoryPrefs(state);
+      } else {
+        try { localStorage.setItem('mdrive-view', view); } catch { /* storage disabled */ }
+      }
       runtime.renderShell();
     },
     onSearchInput: debounce((event) => {
+      // The field is re-created on every render, so the debounced callback can
+      // fire for an input the user has already left behind. Its event is stale:
+      // reading it would navigate back to a query typed a moment ago.
+      const target = event && event.target;
+      if (!target || target.isConnected === false) return;
       rememberSearchFocus();
-      const value = String(event.target.value || '').trim();
-      if (!value) { if (store.state.route.name === 'search') runtime.navigate('/'); return; }
-      if (value.length < 2) return;
-      runtime.navigate(routePath({ name: 'search', query: value }), { replace: store.state.route.name === 'search' });
+      const value = String(target.value || '').trim();
+      // One character is not a search yet, and the page must not flicker for it.
+      if (value.length === 1) return;
+      const path = searchTarget(value);
+      if (path === '/') {
+        // Empty box: leave the page the user is on, unless a search is showing.
+        if (store.state.route.name === 'search') runtime.navigate('/');
+        return;
+      }
+      runtime.navigate(path, { replace: store.state.route.name === 'search' });
     }, 320),
     onSearchCommit: (value) => {
-      const q = String(value || '').trim();
-      runtime.navigate(q ? routePath({ name: 'search', query: q }) : '/');
+      runtime.navigate(searchTarget(String(value || '').trim()));
     },
-    onSearchClear: () => { if (store.state.route.name === 'search') runtime.navigate('/'); },
+    onSearchClear: () => {
+      const route = store.state.route;
+      if (route.name !== 'search') return;
+      // Escape leaves the search but keeps the user where the search was scoped:
+      // a folder-scoped result set goes back to its folder, a plain one to root.
+      runtime.navigate(route.folderId ? '/folder/' + encodeURIComponent(route.folderId) : '/');
+    },
     // The search page's "继续加载": the shell owns the request and the append,
     // the view only renders the button and its busy state.
     onSearchMore: () => runtime.loadMoreSearch(),

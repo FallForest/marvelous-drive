@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict'
 import { after, before, describe, it } from 'node:test'
+import { DatabaseSync } from 'node:sqlite'
+import { join } from 'node:path'
 import { startServer, uniqueEmail } from './helpers.js'
 
 /**
@@ -246,6 +248,248 @@ describe('trash lifecycle', () => {
     const file = await api('POST', '/api/v1/nodes', auth({ body: { name: 'live.txt' } }))
     const purge = await api('DELETE', `/api/v1/nodes/${file.json.node.id}/permanent`, auth())
     assert.equal(purge.status, 400)
+  })
+})
+
+/**
+ * Delete batches, not deletion times.
+ *
+ * The bug: a file trashed on its own, then its parent trashed later, made the
+ * parent's delete report the old child too and made the old child (and its
+ * public link) come back when the parent was restored. The tests below pin the
+ * operation boundary — including two deletions inside the same millisecond and
+ * the legacy rows that predate `trash_batch_id`.
+ */
+describe('trash batches', () => {
+  const addFolder = async (name, parentId = null) => {
+    const response = await api('POST', '/api/v1/nodes', auth({ body: { name, kind: 'folder', parentId } }))
+    assert.equal(response.status, 201, response.text)
+    return response.json.node
+  }
+  const addFile = async (name, parentId = null) => {
+    const response = await api('PUT', `/api/v1/uploads?name=${encodeURIComponent(name)}${parentId ? '&parentId=' + parentId : ''}`, auth({
+      raw: true, body: name + ' bytes', headers: { 'content-type': 'text/plain' },
+    }))
+    assert.equal(response.status, 201, response.text)
+    return response.json.node
+  }
+  const remove = (id) => api('DELETE', `/api/v1/nodes/${id}`, auth())
+  const restore = (id) => api('POST', `/api/v1/nodes/${id}/restore`, auth({ body: {} }))
+  const trashList = async (query = 'sort=name&direction=asc&limit=200') => {
+    const response = await api('GET', '/api/v1/nodes?trash=1&' + query, auth())
+    assert.equal(response.status, 200, response.text)
+    return response.json.nodes
+  }
+  const withDb = (fn) => {
+    const database = new DatabaseSync(join(app.dataDir, 'drive.db'))
+    try { return fn(database) } finally { database.close() }
+  }
+
+  it('counts only the live branch and leaves an independently deleted child in the trash', async () => {
+    const root = await addFolder('batch-root')
+    const kept = await addFile('kept.txt', root.id)
+    const old = await addFile('old.txt', root.id)
+    const nested = await addFolder('nested', root.id)
+    const deep = await addFile('deep.txt', nested.id)
+
+    // The child goes first, on its own; its public link must stop working now.
+    const link = await api('POST', `/api/v1/nodes/${old.id}/share`, auth({ body: {} }))
+    assert.equal(link.status, 201, link.text)
+    assert.equal((await remove(old.id)).status, 200)
+    assert.equal((await api('GET', '/api/v1/shared/' + link.json.share.token)).status, 404)
+
+    // The parent's deletion touches the parent, the live sibling and the whole
+    // live nested branch — four rows, not the already-trashed file.
+    const parentTrash = await remove(root.id)
+    assert.equal(parentTrash.status, 200, parentTrash.text)
+    assert.equal(parentTrash.json.trashed, 4)
+    assert.deepEqual(
+      (await trashList()).filter((node) => [kept.id, deep.id, old.id].includes(node.id)).map((node) => node.id).sort(),
+      [kept.id, deep.id, old.id].sort(),
+    )
+
+    // Restoring the parent brings back its batch only: the old child stays
+    // trashed, and so does the link that points at it.
+    const restored = await restore(root.id)
+    assert.equal(restored.status, 200, restored.text)
+    // The public shape stays {node}: no id list leaks into the response.
+    assert.deepEqual(Object.keys(restored.json), ['node'])
+    assert.equal(restored.json.node.id, root.id)
+    for (const id of [kept.id, nested.id, deep.id]) {
+      const live = await api('GET', `/api/v1/nodes/${id}`, auth())
+      assert.equal(live.status, 200, 'restored descendant ' + id)
+    }
+    const stillTrashed = await api('GET', `/api/v1/nodes/${old.id}`, auth())
+    assert.notEqual(stillTrashed.json.node.deletedAt, null, 'the independently trashed child is not restored')
+    assert.equal((await api('GET', '/api/v1/shared/' + link.json.share.token)).status, 404, 'the independently trashed child stays unreachable')
+
+    // The old child is still its own batch: restoring it works on its own.
+    assert.equal((await restore(old.id)).status, 200)
+    assert.equal((await api('GET', '/api/v1/shared/' + link.json.share.token)).status, 200)
+  })
+
+  it('groups every page with one trashGroup and keeps old batches separate', async () => {
+    const folderA = await addFolder('group-a')
+    await addFile('group-a-1.txt', folderA.id)
+    await addFile('group-a-2.txt', folderA.id)
+    const folderB = await addFolder('group-b')
+    await addFile('group-b-1.txt', folderB.id)
+
+    assert.equal((await remove(folderA.id)).json.trashed, 3)
+    assert.equal((await remove(folderB.id)).json.trashed, 2)
+
+    const rows = (await trashList()).filter((node) => node.name.startsWith('group-'))
+    const groups = new Map()
+    for (const row of rows) {
+      assert.match(row.trashGroup, /^batch:/)
+      groups.set(row.trashGroup, (groups.get(row.trashGroup) ?? 0) + 1)
+    }
+    assert.equal(groups.size, 2, 'two deletions are two groups')
+    assert.deepEqual([...groups.values()].sort(), [2, 3])
+
+    // A page boundary does not invent a new group: the same batch is labelled
+    // the same on every page it appears on.
+    const first = await api('GET', '/api/v1/nodes?trash=1&q=group-a&sort=name&direction=asc&limit=2', auth())
+    const second = await api('GET', '/api/v1/nodes?trash=1&q=group-a&sort=name&direction=asc&limit=2&offset=2', auth())
+    const pages = [...first.json.nodes, ...second.json.nodes]
+    assert.equal(pages.length, 3)
+    assert.equal(new Set(pages.map((node) => node.trashGroup)).size, 1)
+
+    // Only trashed rows carry the field: live JSON is unchanged.
+    const live = await api('GET', '/api/v1/nodes?parentId=root', auth())
+    assert.ok(live.json.nodes.every((node) => !Object.hasOwn(node, 'trashGroup')))
+    // The legacy unpaged trash payload keeps its old shape too.
+    const unpaged = await api('GET', '/api/v1/nodes?trash=1', auth())
+    assert.ok(unpaged.json.nodes.every((node) => !Object.hasOwn(node, 'trashGroup')))
+  })
+
+  it('does not walk across an intervening independently deleted branch', async () => {
+    const outer = await addFolder('outer')
+    const middle = await addFolder('middle', outer.id)
+    const leaf = await addFile('leaf.txt', middle.id)
+    const sibling = await addFile('sibling.txt', outer.id)
+
+    // The middle folder goes as its own batch first; its leaf goes with it.
+    assert.equal((await remove(middle.id)).json.trashed, 2)
+    // Then the outer folder: only what was still live belongs to this batch.
+    assert.equal((await remove(outer.id)).json.trashed, 2)
+
+    assert.equal((await restore(outer.id)).status, 200)
+    assert.equal((await api('GET', `/api/v1/nodes/${sibling.id}`, auth())).status, 200)
+    assert.notEqual((await api('GET', `/api/v1/nodes/${middle.id}`, auth())).json.node.deletedAt, null)
+    assert.notEqual((await api('GET', `/api/v1/nodes/${leaf.id}`, auth())).json.node.deletedAt, null, 'the leaf stays with its branch')
+
+    // The middle folder's own batch is still intact and restorable as a unit.
+    assert.equal((await restore(middle.id)).status, 200)
+    assert.equal((await api('GET', `/api/v1/nodes/${leaf.id}`, auth())).status, 200)
+  })
+
+  it('keeps two deletions with the same timestamp apart', async () => {
+    const one = await addFolder('same-ms-one')
+    await addFile('same-ms-one.txt', one.id)
+    const two = await addFolder('same-ms-two')
+    await addFile('same-ms-two.txt', two.id)
+    assert.equal((await remove(one.id)).json.trashed, 2)
+    assert.equal((await remove(two.id)).json.trashed, 2)
+
+    // Force the state a same-millisecond pair would have produced: equal
+    // deletion stamps, distinct batch ids.
+    const stamp = new Date().toISOString()
+    withDb((database) => database.prepare('UPDATE nodes SET deleted_at=? WHERE id IN (?,?)').run(stamp, one.id, two.id))
+    const groups = (await trashList()).filter((node) => node.name.startsWith('same-ms-'))
+    const oneGroup = new Set(groups.filter((node) => node.name.startsWith('same-ms-one')).map((node) => node.trashGroup))
+    const twoGroup = new Set(groups.filter((node) => node.name.startsWith('same-ms-two')).map((node) => node.trashGroup))
+    assert.equal(oneGroup.size, 1)
+    assert.equal(twoGroup.size, 1)
+    assert.notDeepEqual([...oneGroup], [...twoGroup], 'equal timestamps are still separate batches')
+
+    assert.equal((await restore(one.id)).status, 200)
+    const left = (await trashList()).filter((node) => node.name.startsWith('same-ms-two'))
+    assert.equal(left.length, 2, 'restoring one same-time batch leaves the other in the trash')
+  })
+
+  it('uses the original deletion time for legacy rows, without a backfill', async () => {
+    const folder = await addFolder('legacy-root')
+    const child = await addFile('legacy-child.txt', folder.id)
+    const later = await addFolder('legacy-later')
+    assert.equal((await remove(folder.id)).json.trashed, 2)
+    assert.equal((await remove(later.id)).json.trashed, 1)
+
+    // Two older rows with one stamp (one batch) and one with another (a
+    // different batch), exactly as a pre-column database would hold them.
+    const shared = new Date(Date.now() - 60_000).toISOString()
+    const distinct = new Date(Date.now() - 120_000).toISOString()
+    withDb((database) => {
+      database.prepare('UPDATE nodes SET trash_batch_id=NULL, deleted_at=? WHERE id IN (?,?)').run(shared, folder.id, child.id)
+      database.prepare('UPDATE nodes SET trash_batch_id=NULL, deleted_at=? WHERE id=?').run(distinct, later.id)
+    })
+    const rows = (await trashList()).filter((node) => node.name.startsWith('legacy-'))
+    const byName = new Map(rows.map((node) => [node.name, node.trashGroup]))
+    assert.equal(byName.get('legacy-root'), 'legacy:' + shared)
+    assert.equal(byName.get('legacy-child.txt'), 'legacy:' + shared)
+    assert.equal(byName.get('legacy-later'), 'legacy:' + distinct)
+
+    assert.equal((await restore(folder.id)).status, 200)
+    assert.equal((await api('GET', `/api/v1/nodes/${child.id}`, auth())).status, 200, 'the same-time legacy child is restored')
+    assert.notEqual((await api('GET', `/api/v1/nodes/${later.id}`, auth())).json.node.deletedAt, null, 'the other legacy stamp stays trashed')
+  })
+
+  it('scopes a member\'s delete to the root workspace', async () => {
+    const member = (await api('POST', '/api/v1/auth/register', { body: { email: uniqueEmail(), password: 'batch member password' } })).json
+    const shared = await addFolder('batch-shared')
+    const inside = await addFile('inside.txt', shared.id)
+    const { addMember } = await import('../src/workspaces.js')
+    addMember((await api('GET', '/api/v1/me', auth())).json.user.workspace.id, member.user.id, 'member')
+
+    const removed = await api('DELETE', `/api/v1/nodes/${shared.id}`, { token: member.token })
+    assert.equal(removed.status, 200, removed.text)
+    assert.equal(removed.json.trashed, 2, 'the member trashed the shared branch, not their own empty drive')
+    assert.equal((await restore(shared.id)).status, 200)
+    assert.equal((await api('GET', `/api/v1/nodes/${inside.id}`, { token: member.token })).status, 200)
+  })
+
+  it('renames a restored file whose name a workspace member reused', async () => {
+    const member = (await api('POST', '/api/v1/auth/register', { body: { email: uniqueEmail(), password: 'restore member password' } })).json
+    const { addMember } = await import('../src/workspaces.js')
+    addMember((await api('GET', '/api/v1/me', auth())).json.user.workspace.id, member.user.id, 'member')
+
+    // Reproduced over real HTTP: the owner trashes its file, the member writes
+    // the same name into the same shared folder, then the owner restores.
+    const shared = await addFolder('restore-shared')
+    const ownerFile = await addFile('Budget.txt', shared.id)
+    assert.equal((await remove(ownerFile.id)).status, 200)
+    const memberUpload = await api('PUT', `/api/v1/uploads?name=Budget.txt&parentId=${shared.id}`, {
+      token: member.token, raw: true, body: 'member budget', headers: { 'content-type': 'text/plain' },
+    })
+    assert.equal(memberUpload.status, 201, memberUpload.text)
+
+    const restored = await restore(ownerFile.id)
+    assert.equal(restored.status, 200, restored.text)
+    assert.equal(restored.json.node.name, 'Budget.txt (restored)')
+    const listed = await api('GET', `/api/v1/nodes?parentId=${shared.id}`, auth())
+    assert.deepEqual(
+      listed.json.nodes.filter((node) => node.name.startsWith('Budget.txt')).map((node) => node.name).sort(),
+      ['Budget.txt', 'Budget.txt (restored)'],
+      'the shared folder has two distinct names, not two rows named alike',
+    )
+    // Both files keep their own bytes: the member's upload did not overwrite the
+    // trashed row, and the restore did not touch the live one.
+    assert.equal((await api('GET', `/api/v1/files/${ownerFile.id}/content`, auth())).text, 'Budget.txt bytes')
+    assert.equal((await api('GET', `/api/v1/files/${memberUpload.json.node.id}/content`, auth())).text, 'member budget')
+
+    // At the root the namespace is the row owner's, not the caller's: the member
+    // restores the owner's trashed root file while the owner has reused the name.
+    const rootOld = await addFile('Budget-root.txt')
+    assert.equal((await remove(rootOld.id)).status, 200)
+    const rootLive = await api('PUT', '/api/v1/uploads?name=Budget-root.txt', auth({
+      raw: true, body: 'owner replacement bytes', headers: { 'content-type': 'text/plain' },
+    }))
+    assert.equal(rootLive.status, 201, rootLive.text)
+    const memberRestore = await api('POST', `/api/v1/nodes/${rootOld.id}/restore`, { token: member.token, body: {} })
+    assert.equal(memberRestore.status, 200, memberRestore.text)
+    assert.equal(memberRestore.json.node.name, 'Budget-root.txt (restored)')
+    assert.equal((await api('GET', `/api/v1/files/${rootOld.id}/content`, auth())).text, 'Budget-root.txt bytes')
+    assert.equal((await api('GET', `/api/v1/files/${rootLive.json.node.id}/content`, auth())).text, 'owner replacement bytes')
   })
 })
 

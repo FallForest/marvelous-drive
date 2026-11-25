@@ -22,7 +22,7 @@
 
 import { h, raw, mount } from './dom.js';
 import { icon, bytes } from './format.js';
-import { aggregateTasks, summaryLabel, taskRowStatus, formatEta } from './upload-stats.js';
+import { aggregateTasks, summaryLabel, taskRowStatus, formatEta, hashStageProgress } from './upload-stats.js';
 import { formatSpeed } from './upload.js';
 
 /* The two transport controls the queue owns; the shared icon set stays untouched. */
@@ -40,6 +40,11 @@ const playIcon = (size) => glyph(PLAY_GLYPH, size);
 export function createQueuePanel(options) {
   const opts = options || {};
   const rows = new Map();
+  // Folder walks that have not enqueued a file yet. Kept apart from `rows` on
+  // purpose: they are not tasks, so they must not reach the batch arithmetic.
+  const preparations = new Map();
+  let preparationSeq = 0;
+  let destroyed = false;
   const panelId = 'queue-panel-' + Math.random().toString(36).slice(2, 8);
   const list = h('div', { class: 'queue-list' });
   const summary = h('span', { class: 'qsummary', text: '0 个任务' });
@@ -172,16 +177,25 @@ export function createQueuePanel(options) {
     const live = tasks.filter((row) => !row.history && !row.resumable);
     const resumable = tasks.filter((row) => row.resumable).length;
     const stats = aggregateTasks(live.map((row) => row.task));
-    const label = paused && active
+    const base = paused && active
       ? '已暂停 · ' + active + ' 个待继续'
       : (paused ? '已暂停' : (stats.files ? summaryLabel(stats) : resumable ? resumable + ' 个可继续' : summaryLabel(stats)));
+    // Folders still being walked are neither files nor bytes: they get their
+    // own count so the header never pretends a transfer has started.
+    const preparing = preparations.size;
+    const preparingLabel = preparing
+      ? (preparing === 1 ? '1 个文件夹准备中' : preparing + ' 个文件夹准备中')
+      : '';
+    const label = preparingLabel
+      ? (stats.files || resumable || paused ? base + ' · ' + preparingLabel : preparingLabel)
+      : base;
     summary.textContent = label;
     launcherLabel.textContent = label;
     pauseBtn.setAttribute('aria-label', paused ? '全部继续' : '全部暂停');
     pauseBtn.setAttribute('title', paused ? '全部继续' : '全部暂停');
     pauseBtn.innerHTML = paused ? playIcon(13) : pauseIcon(13);
     pauseBtn.classList.toggle('is-active', paused);
-    if (!tasks.length) {
+    if (!tasks.length && !preparing) {
       hide();
       // The fold belonged to the batch that just went away; a brand new drop
       // must announce itself like the first one did.
@@ -244,6 +258,14 @@ export function createQueuePanel(options) {
     const main = h('div', { class: 'qmain' }, name, line);
     const bar = h('i', { style: { transform: 'scaleX(0)' } });
     const progress = h('div', { class: 'qbar', attrs: { role: 'progressbar', 'aria-valuemin': '0', 'aria-valuemax': '100', 'aria-valuenow': '0', 'aria-label': '上传进度：' + task.name } }, bar);
+    // Hashing has no honest percentage until the transport reports real bytes:
+    // the native indeterminate <progress> is the busy answer, and it borrows the
+    // preparation row's .qbar-prep-busy style instead of growing a second one.
+    // While the network moves it stays hidden and the row keeps its transfer bar.
+    const hashBusy = h('progress', {
+      class: 'qbar-prep-busy',
+      attrs: { max: '1', hidden: 'hidden', 'aria-label': '校验进度：' + task.name },
+    });
     const retryBtn = h('button', {
       class: 'icon-btn', attrs: { type: 'button', 'aria-label': '重试 ' + task.name, title: '重试', hidden: 'hidden' },
       html: icon('refresh', 11),
@@ -265,9 +287,9 @@ export function createQueuePanel(options) {
       on: { click: () => task.cancel() },
     });
     const actions = h('span', { class: 'qactions' }, retryBtn, pauseBtnRow, resumeBtnRow, cancelBtn);
-    const row = h('div', { class: 'qitem', dataset: { id: task.id } }, main, actions, progress);
+    const row = h('div', { class: 'qitem', dataset: { id: task.id } }, main, actions, progress, hashBusy);
     const entry = {
-      task, row, state: stateWord, detail, bar, progress, actions,
+      task, row, state: stateWord, detail, bar, progress, hashBusy, actions,
       retryBtn, pauseBtn: pauseBtnRow, resumeBtn: resumeBtnRow, cancelBtn,
       history: task.history === true,
       resumable: task.state === 'resumable',
@@ -285,11 +307,38 @@ export function createQueuePanel(options) {
 
   function paint(entry) {
     const { task } = entry;
-    const pct = Math.round((task.progress || 0) * 100);
-    // scaleX, not width: a width transition relayouts the row on every progress
-    // event, and there are several per second while a file is uploading.
-    entry.bar.style.transform = 'scaleX(' + (pct / 100).toFixed(3) + ')';
-    entry.progress.setAttribute('aria-valuenow', String(pct));
+    // Hashing and transferring are two different meters over the same 4px slot.
+    // `task.progress` / `task.uploaded` are network bytes and are never borrowed
+    // for the hashing stage; `task.hashBytes` is the transport's real read count
+    // and stays null until it reports one.
+    const stage = hashStageProgress(task);
+    if (stage && stage.known) {
+      // Honest percentage: floor, and 100% only once every byte was really read.
+      // aria-valuenow alone carries it — the row's label already says 校验进度,
+      // so an aria-valuetext copy would only be read out twice.
+      entry.bar.style.transform = 'scaleX(' + stage.ratio.toFixed(3) + ')';
+      entry.progress.setAttribute('aria-valuenow', String(stage.pct));
+      entry.progress.removeAttribute('aria-valuetext');
+      entry.progress.setAttribute('aria-label', '校验进度：' + task.name);
+      entry.progress.removeAttribute('hidden');
+      entry.hashBusy.setAttribute('hidden', 'hidden');
+    } else if (stage) {
+      // Unknown read count (no report yet, a zero-byte file, an older transport):
+      // an indeterminate native <progress> — no aria-valuenow at all — instead of
+      // an invented 0%. Same element and style the preparation row uses.
+      entry.progress.setAttribute('hidden', 'hidden');
+      entry.hashBusy.removeAttribute('hidden');
+    } else {
+      const pct = Math.round((task.progress || 0) * 100);
+      // scaleX, not width: a width transition relayouts the row on every progress
+      // event, and there are several per second while a file is uploading.
+      entry.bar.style.transform = 'scaleX(' + (pct / 100).toFixed(3) + ')';
+      entry.progress.removeAttribute('aria-valuetext');
+      entry.progress.setAttribute('aria-label', '上传进度：' + task.name);
+      entry.progress.setAttribute('aria-valuenow', String(pct));
+      entry.progress.removeAttribute('hidden');
+      entry.hashBusy.setAttribute('hidden', 'hidden');
+    }
     const status = taskRowStatus(task);
     entry.row.classList.toggle('is-error', task.state === 'error');
     entry.row.classList.toggle('is-done', task.state === 'done');
@@ -352,6 +401,11 @@ export function createQueuePanel(options) {
     // The row is repainted per event; the header is throttled inside
     // updateSummary(), so a progress tick is cheap even with the whole batch open.
     task.on('progress', () => { paint(entry); updateSummary(); });
+    // Hashing has its own meter, so it has its own event: `hash-progress` carries
+    // { task, phase, hashBytes, hashTotal } and repaints only the row. paint()
+    // reads `task.hashBytes` off the task; the aggregate header keeps reading
+    // network bytes only, so hashing must not repaint the transfer summary.
+    task.on('hash-progress', () => paint(entry));
     task.on('state', () => { paint(entry); updateSummary(true); });
     task.on('done', () => {
       paint(entry);
@@ -424,6 +478,197 @@ export function createQueuePanel(options) {
     return entry;
   }
 
+  /**
+   * A folder is being walked before any of its files has a task.
+   *
+   * Listing directories, hashing and the conflict question can easily outlive
+   * the one toast that used to announce them, which left the panel looking idle
+   * while the browser was busy. This row is the visible answer: one line per
+   * folder, named after it, saying what is still being checked.
+   *
+   * Preparation rows are kept in their own map, not in `rows`: they are not
+   * tasks. They carry no bytes, so nothing here can reach the batch arithmetic
+   * in updateSummary() — a folder walk is a stage, not a transfer.
+   *
+   * The third argument opts into cancelling the walk: `{ onCancel }`. With no
+   * callback the row has no cancel control at all (the old shape); with one it
+   * grows a 取消准备 button that disables itself on the first click, so a
+   * double-tap cannot fire the caller's abort twice.
+   *
+   * `update({ count, detail, progress })` may report progress as 0..1, or as
+   * null for "still working, no honest percentage" (then the row shows an
+   * indeterminate native <progress>). Reporting no progress at all keeps the
+   * row exactly as it was: one sentence, no bar. Returns a handle whose
+   * `end()` is idempotent, so a caller can end it both at first enqueue and
+   * from a `finally`.
+   */
+  function beginPreparation(name, count, options) {
+    const opt = options || {};
+    const onCancel = typeof opt.onCancel === 'function' ? opt.onCancel : null;
+    if (destroyed) {
+      return {
+        name: String(name || ''),
+        update() {},
+        end() {},
+        cancel() { return false; },
+        get canceled() { return false; },
+      };
+    }
+    const key = 'prepare-' + (++preparationSeq);
+    const label = String(name || '文件夹');
+    const state = h('span', { class: 'qstate' });
+    const detail = h('span', { class: 'qdetail' });
+    const line = h('span', { class: 'qline' }, state, detail);
+    const title = h('span', { class: 'qname', attrs: { title: label } });
+    title.textContent = label;
+    const main = h('div', { class: 'qmain' }, title, line);
+    // The determinate bar reuses the row bar (.qbar + <i>) so it looks like the
+    // transfer bars, but it is not one: it carries its own aria-label and its
+    // value comes from the folder walk, never from uploaded bytes.
+    const barFill = h('i', { style: { transform: 'scaleX(0)' } });
+    const bar = h('div', {
+      class: 'qbar qbar-prep',
+      attrs: {
+        role: 'progressbar', 'aria-valuemin': '0', 'aria-valuemax': '100', 'aria-valuenow': '0',
+        'aria-label': '准备进度：' + label, hidden: 'hidden',
+      },
+    }, barFill);
+    // Unknown phase: a native indeterminate <progress> — no value attribute at
+    // all — so assistive tech reports busy instead of an invented percentage.
+    // max="1" keeps it a 0..1 meter the moment a caller does have a number.
+    const busy = h('progress', {
+      class: 'qbar-prep-busy',
+      attrs: { max: '1', hidden: 'hidden', 'aria-label': '准备中：' + label },
+    });
+    let cancelBtn = null;
+    let actions = null;
+    const entry = {
+      name: label,
+      count: Math.max(0, Math.floor(Number(count) || 0)),
+      detail: '',
+      // undefined: nobody reports progress. null: reported as unknown. number:
+      // a real 0..1 stage ratio.
+      progress: undefined,
+      row: null,
+      state,
+      detailEl: detail,
+      bar,
+      barFill,
+      busy,
+      ended: false,
+      canceled: false,
+    };
+
+    /** Swap between the determinate bar, the indeterminate one and neither. */
+    function paintPreparationProgress() {
+      const value = entry.progress;
+      if (typeof value === 'number' && Number.isFinite(value)) {
+        const ratio = Math.max(0, Math.min(1, value));
+        const pct = Math.round(ratio * 100);
+        entry.barFill.style.transform = 'scaleX(' + ratio.toFixed(3) + ')';
+        entry.bar.setAttribute('aria-valuenow', String(pct));
+        entry.bar.setAttribute('aria-valuetext', pct + '%');
+        entry.bar.removeAttribute('hidden');
+        entry.busy.setAttribute('hidden', 'hidden');
+        return;
+      }
+      entry.bar.setAttribute('hidden', 'hidden');
+      if (value === null) entry.busy.removeAttribute('hidden');
+      else entry.busy.setAttribute('hidden', 'hidden');
+    }
+
+    const paintPreparation = () => {
+      if (entry.ended) return;
+      entry.state.textContent = entry.canceled ? '正在取消准备' : '正在准备';
+      const fallback = entry.canceled
+        ? '正在停止检查目录和文件变更'
+        : '正在检查目录和文件变更';
+      entry.detailEl.textContent = entry.detail
+        || (fallback + (entry.count ? ' · 已知 ' + entry.count + ' 个文件' : ''));
+      paintPreparationProgress();
+    };
+
+    /**
+     * One request per row: the button is disabled on the first click and the
+     * flag survives it, so neither a double-tap nor a programmatic call can
+     * abort the same walk twice.
+     */
+    function requestCancel() {
+      if (entry.ended || entry.canceled || !onCancel) return false;
+      entry.canceled = true;
+      if (cancelBtn) {
+        cancelBtn.setAttribute('disabled', '');
+        cancelBtn.setAttribute('aria-disabled', 'true');
+        cancelBtn.classList.add('is-busy');
+      }
+      paintPreparation();
+      // A cancel request is the only thing a preparation row ever speaks; the
+      // count and the progress ticks stay out of the live region.
+      announcer.textContent = label + '：已请求取消准备';
+      try {
+        const result = onCancel({ name: entry.name, count: entry.count });
+        // A caller that aborts asynchronously must not leave a rejection behind.
+        if (result && typeof result.then === 'function') result.catch(() => {});
+      } catch {
+        // The request stands (the control stays disabled); ending the row is
+        // still the caller's `end()`, not this click handler.
+      }
+      return true;
+    }
+
+    if (onCancel) {
+      cancelBtn = h('button', {
+        class: 'icon-btn',
+        attrs: { type: 'button', 'aria-label': '取消准备 ' + label, title: '取消准备' },
+        html: icon('x', 11),
+        on: { click: () => { requestCancel(); } },
+      });
+      actions = h('span', { class: 'qactions' }, cancelBtn);
+    }
+
+    const row = h('div', { class: 'qitem is-preparing', dataset: { id: key } }, main, actions, bar, busy);
+    entry.row = row;
+    preparations.set(key, entry);
+    list.appendChild(row);
+    row.classList.add('motion-rise');
+    paintPreparation();
+    announcer.textContent = label + '：正在检查目录和文件变更';
+    updateSummary(true);
+
+    return {
+      name: entry.name,
+      get count() { return entry.count; },
+      get canceled() { return entry.canceled; },
+      /**
+       * count/detail change while the walk moves on; `progress` is a 0..1 stage
+       * ratio or null for "unknown". Deliberately no updateSummary(): a
+       * preparing row has no bytes, and the header repaint is also the one code
+       * path that could re-open a folded panel behind the user's back.
+       */
+      update(patch) {
+        if (entry.ended) return;
+        const next = patch || {};
+        if (next.count !== undefined) entry.count = Math.max(0, Math.floor(Number(next.count) || 0));
+        if (next.detail !== undefined) entry.detail = String(next.detail || '');
+        if ('progress' in next) {
+          const ratio = next.progress === null || next.progress === undefined ? null : Number(next.progress);
+          entry.progress = Number.isFinite(ratio) ? ratio : null;
+        }
+        paintPreparation();
+      },
+      cancel: requestCancel,
+      end() {
+        if (entry.ended) return;
+        // From here on update() and cancel() are no-ops: a late tick from a
+        // stopped walk must not repaint a row that is already gone.
+        entry.ended = true;
+        preparations.delete(key);
+        row.remove();
+        updateSummary(true);
+      },
+    };
+  }
+
   /** Removes a resumable row after the user resumed or discarded it. */
   function dropResumable(sessionId) {
     const key = 'resume-' + sessionId;
@@ -468,6 +713,14 @@ export function createQueuePanel(options) {
   function destroy() {
     if (totalsTimer) clearTimeout(totalsTimer);
     totalsTimer = 0;
+    destroyed = true;
+    // A folder walk may still be in flight after the panel is gone; its handle
+    // must keep working (and stay a no-op) instead of resurrecting a row.
+    for (const entry of preparations.values()) {
+      entry.ended = true;
+      entry.row.remove();
+    }
+    preparations.clear();
     rows.clear();
     mount(list, []);
     panel.remove();
@@ -483,6 +736,7 @@ export function createQueuePanel(options) {
     trackHistory,
     trackResumable,
     dropResumable,
+    beginPreparation,
     show,
     hide,
     fold,
@@ -502,6 +756,11 @@ export function createQueuePanel(options) {
       updateSummary();
     },
     clear() {
+      for (const entry of preparations.values()) {
+        entry.ended = true;
+        entry.row.remove();
+      }
+      preparations.clear();
       rows.clear();
       mount(list, []);
       updateSummary();

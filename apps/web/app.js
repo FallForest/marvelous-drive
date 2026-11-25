@@ -15,12 +15,13 @@
  */
 
 import { h, raw, mount } from './lib/dom.js';
-import { icon } from './lib/format.js';
+import { icon, bytes } from './lib/format.js';
 import { api, request, putRaw, onUnauthorized, getToken } from './lib/api.js';
 import { toast, closeTopLayer } from './lib/ui.js';
 import { renderAuth } from './lib/auth.js';
 import { renderSidebar, renderBreadcrumb, renderToolbar } from './lib/sidebar.js';
 import { renderShared } from './lib/share.js';
+import { createSharesView } from './lib/shares-view.js';
 import { createQueuePanel } from './lib/queue.js';
 import { createUploader } from './lib/upload-queue.js';
 import { parseLocation, routePath, buildIndex, ancestorPath } from './lib/state.js';
@@ -28,12 +29,13 @@ import {
   DURATION, MOTION_ATTRS, STAGGER, announceEntrance, markAnimating, onceOnRoute, prefersReducedMotion, withViewTransition,
 } from './lib/motion.js';
 import { store, session } from './lib/session.js';
-import { createRouteData, mergeNavigationNodes, NODE_PAGE_SIZE } from './lib/route-data.js';
+import { createRouteData, mergeNavigationNodes, searchPagePath, NODE_PAGE_SIZE } from './lib/route-data.js';
 import { runtime, wire } from './lib/runtime.js';
 import { viewContent, statusContent, titleFor } from './lib/views.js';
 import { buildContext, restoreSearchFocus } from './lib/context.js';
+import { loadDirectoryPrefs } from './lib/directory-prefs.js';
 import {
-  openPreviewFor, lookupNode, startRename, startDelete, startPurge, deleteSelection, moveSelection,
+  openPreviewFor, lookupNode, startRename, startDelete, startPurge, deleteSelection, restoreSelection, moveSelection,
   downloadSelection, downloadSelectionArchive, downloadFolderArchive,
 } from './lib/actions.js';
 import { downloadEntry, downloadCenter } from './lib/downloads.js';
@@ -52,6 +54,13 @@ const uploader = createUploader({ queue, api: { request, putRaw } });
 
 const root = document.getElementById('app');
 const routeData = createRouteData(api);
+/* The public preview drawer lives outside the shell and outside body's flow, so
+   it must be torn down explicitly when a public link is left by back/forward. */
+let sharedView = null;
+/* The owner's link-management page is built once per visit and re-mounted on a
+   local repaint: rebuilding it every render would refetch page one each time
+   the toolbar, the sidebar or the scroll state changed. */
+let sharesPage = null;
 
 /* ═══ routing ══════════════════════════════════════════════════ */
 function navigate(path, options) {
@@ -71,11 +80,15 @@ async function handleRoute() {
   // A navigation is a dismissal: on a phone the drawer must not stay over the
   // page the user just asked for.
   if (session.shellEls && session.shellEls.shell.classList.contains('nav-open')) setNavOpen(false);
+  if (sharedView) { sharedView.destroy(); sharedView = null; }
+  // Leaving the management page (or re-entering it) starts from a fresh list,
+  // so a link revoked elsewhere can never be shown as still valid.
+  if (route.name !== 'shares') sharesPage = null;
 
   if (route.name === 'shared') {
     session.shellEls = null;
     session.paintedToken = null;
-    renderShared(root, route.token, { onHome: () => navigate('/') });
+    sharedView = renderShared(root, route.token, { onHome: () => navigate('/') });
     return;
   }
   if (route.name === 'notFound') { navigate('/', { replace: true }); return; }
@@ -84,6 +97,26 @@ async function handleRoute() {
     const user = await bootstrapSession();
     if (!user) return;
   }
+  // The owner's links are not part of the file tree, so they take neither a
+  // node page nor the directory preferences: the shell is mounted and the page
+  // loads its own first page.
+  if (route.name === 'shares') {
+    store.state.loading = false;
+    store.state.loadError = null;
+    store.state.nodes = [];
+    store.state.trash = [];
+    store.state.searchResults = [];
+    store.state.searchMore = null;
+    store.state.nodeMore = null;
+    store.state.selection = new Set();
+    store.state.anchorId = null;
+    if (!session.index) session.index = buildIndex([]);
+    paintRoute(route);
+    return;
+  }
+  // The directory's own list/grid + sort must be in place before the load paints
+  // it. Non-drive routes and a blocked storage leave the state as it was.
+  loadDirectoryPrefs(store.state);
   await loadRoute(route);
 }
 
@@ -121,7 +154,7 @@ async function loadRoute(route, options) {
   // only ids that no longer exist are dropped. A route change still starts clean.
   const carried = opts.keepSelection ? new Set(store.state.selection) : null;
   const ticket = ++routeLoadSeq;
-  const current = () => ticket === routeLoadSeq;
+  const current = () => ticket === routeLoadSeq && store.state.route === route;
   store.state.loading = true;
   store.state.loadError = null;
   // The skeleton is a loading state, not a navigation: paint it plainly and
@@ -185,9 +218,10 @@ async function loadMoreSearch() {
   more.loading = true;
   runtime.renderShell();
   try {
-    const payload = await api.get('/search?q=' + encodeURIComponent(route.query || '')
-      + '&limit=' + encodeURIComponent(String(more.limit))
-      + '&offset=' + encodeURIComponent(String(more.offset + more.limit)));
+    const payload = await api.get(searchPagePath(route, {
+      limit: more.limit,
+      offset: more.offset + more.limit,
+    }));
     if (!current()) return;
     const page = payload && Array.isArray(payload.results) ? payload.results : [];
     store.state.searchResults = mergeNavigationNodes(store.state.searchResults, page);
@@ -257,34 +291,70 @@ function paintRoute(route) {
  * call: a second mutation that starts inside the window still changes server
  * state, and returning a resolved promise without refreshing left the UI
  * showing the state from before it — a star toggled twice in quick succession
- * ended up unstarred on the server and painted as starred. A call inside the
- * window now schedules one trailing refresh, and every caller gets the promise
- * that resolves when a refresh (its own or the trailing one) has landed.
+ * ended up unstarred on the server and painted as starred.
+ *
+ * Callers are queued rather than sharing one in-flight promise. A run takes
+ * only the waiters queued when it starts, so a caller that arrives while that
+ * load is running belongs to the next batch and waits for its own loadRoute —
+ * not for a previous one. Each batch settles exactly its own waiters and then
+ * schedules the next batch (if any) in `finally`, so a failed load cannot wedge
+ * the queue. `mountAuth` bumps `refreshGeneration` and empties the queue so a
+ * sign-out/sign-in cannot let old-account loads settle new waiters.
  */
+let refreshTimer = null;
+let refreshWaiters = [];
+let refreshBatch = null;
+let refreshGeneration = 0;
+
+function scheduleRefresh() {
+  if (refreshTimer || refreshBatch || !refreshWaiters.length) return;
+  const wait = Math.max(0, 120 - (Date.now() - session.lastRefreshAt));
+  if (wait === 0) { startRefresh(); return; }
+  refreshTimer = setTimeout(() => {
+    refreshTimer = null;
+    startRefresh();
+  }, wait);
+  if (typeof refreshTimer.unref === 'function') refreshTimer.unref();
+}
+
+function startRefresh() {
+  if (refreshBatch || !refreshWaiters.length) return;
+  const batch = refreshWaiters;
+  refreshWaiters = [];
+  const generation = refreshGeneration;
+  session.lastRefreshAt = Date.now();
+  refreshBatch = batch;
+  const settle = () => {
+    // `refreshBatch` may already have been disowned by mountAuth; only clear it
+    // when this is still the current batch.
+    if (refreshBatch === batch) refreshBatch = null;
+    for (const waiter of batch) waiter.resolve();
+    // A refresh that started before mountAuth must not schedule work for the
+    // next account. Waiters added after it are already in refreshWaiters.
+    if (generation === refreshGeneration) scheduleRefresh();
+  };
+  let run;
+  try {
+    // On the links page a refresh reloads the link list; loadRoute() would ask
+    // for a node page the route does not have and paint an empty drive over it.
+    if (store.state.route && store.state.route.name === 'shares' && sharesPage) {
+      run = sharesPage.reload();
+    } else {
+      run = loadRoute(store.state.route, { keepSelection: true, force: true });
+    }
+  } catch (error) {
+    settle();
+    return;
+  }
+  Promise.resolve(run).then(settle, settle);
+}
+
 function refreshData() {
-  const now = Date.now();
-  if (now - session.lastRefreshAt >= 120 && !session.refreshPending) {
-    session.lastRefreshAt = now;
-    const pending = loadRoute(store.state.route, { keepSelection: true, force: true });
-    session.refreshPending = pending.finally(() => {
-      if (session.refreshPending === pending) session.refreshPending = null;
-    });
-    return session.refreshPending;
-  }
-  // Inside the window: one trailing run, shared by every caller that asks for it.
-  if (!session.refreshTimer) {
-    const wait = Math.max(0, 120 - (now - session.lastRefreshAt));
-    session.refreshTimer = setTimeout(() => {
-      session.refreshTimer = null;
-      session.lastRefreshAt = Date.now();
-      const trailing = loadRoute(store.state.route, { keepSelection: true, force: true });
-      session.refreshPending = trailing.finally(() => {
-        if (session.refreshPending === trailing) session.refreshPending = null;
-      });
-    }, wait);
-    if (typeof session.refreshTimer.unref === 'function') session.refreshTimer.unref();
-  }
-  return session.refreshPending || Promise.resolve();
+  const waiter = {};
+  waiter.promise = new Promise((resolve) => { waiter.resolve = resolve; });
+  refreshWaiters.push(waiter);
+  scheduleRefresh();
+  return waiter.promise;
 }
 
 /** Selected ids that still exist in the refreshed tree. */
@@ -297,6 +367,17 @@ function keepLiveIds(ids, index) {
 /* ═══ auth ═════════════════════════════════════════════════════ */
 function mountAuth() {
   routeLoadSeq += 1;
+  // Any refresh queued or running belongs to the account that just left. Stop
+  // the timer, disown the in-flight batch (its own loadRoute still settles its
+  // waiters) and release queued waiters that will never run, so no caller is
+  // left hanging and no old-account response settles a promise of this session.
+  refreshGeneration += 1;
+  if (refreshTimer) { clearTimeout(refreshTimer); refreshTimer = null; }
+  refreshBatch = null;
+  const abandoned = refreshWaiters;
+  refreshWaiters = [];
+  for (const waiter of abandoned) waiter.resolve();
+  session.lastRefreshAt = 0;
   routeData.clear();
   session.navigationNodes = [];
   session.index = buildIndex([]);
@@ -318,7 +399,10 @@ function mountAuth() {
       store.state.user = user || null;
       if (!store.state.user) await bootstrapSession();
       const route = parseLocation(window.location);
-      if (route.name === 'shared') { handleRoute(); return; }
+      // A private bookmark may be the public page, the owner's links page or the
+      // trash (query included); re-running the route keeps the visitor where the
+      // link points instead of dropping them on the drive root.
+      if (route.name === 'shared' || route.name === 'shares' || route.name === 'trash') { handleRoute(); return; }
       navigate(routePath({ name: 'drive', folderId: route.folderId || null }), { replace: true });
     },
   });
@@ -376,7 +460,7 @@ function renderShell() {
 
   const route = state.route;
   const ancestors = route.name === 'drive' && route.folderId ? ancestorPath(session.index, route.folderId) : [];
-  session.selectionSlot = h('div', { style: { display: 'contents' } });
+  session.selectionSlot = h('div', { class: 'selection-slot' });
   const ctx = buildContext(ancestors, session.selectionSlot);
 
   mount(session.shellEls.sidebarHost, renderSidebar(ctx));
@@ -385,15 +469,19 @@ function renderShell() {
   syncNavInert();
   mount(session.shellEls.topbar, topbarContent(ctx));
   session.shellEls.toolbar.hidden = route.name === 'search';
-  mount(session.shellEls.toolbar, renderToolbar(ctx));
-  mount(session.shellEls.viewEl, viewContent(ctx));
-  mount(session.shellEls.statusbar, statusContent());
+  mount(session.shellEls.toolbar,
+    h('div', { class: 'toolbar-default' }, renderToolbar(ctx)),
+    // The selection bar lives beside the default controls inside the same
+    // toolbar. Search owns the slot region instead; its view mounts its own.
+    route.name === 'search' ? null : session.selectionSlot);
+  mount(session.shellEls.viewEl, route.name === 'shares' ? sharesViewContent(route) : viewContent(ctx));
+  mount(session.shellEls.statusbar, route.name === 'shares' ? sharesStatusContent() : statusContent());
   // The view is only in the document at this point. A paint that ran while it was
   // being built found the selection slot detached and skipped the bar, which is
   // how a refresh after a partly failed delete lost the visible retry affordance
   // even though the selection itself survived. Re-assert it on a whole shell.
   if (store.state.selection.size) paintSelection();
-  document.title = titleFor(route);
+  document.title = route.name === 'shares' ? '我分享的 · Marvelous Drive' : titleFor(route);
   restoreSearchFocus();
   // restoreSearchFocus() wins when the user was typing: the caret belongs in the
   // field they were using, not on the heading of the page it landed on.
@@ -516,8 +604,40 @@ if (narrowLayout) {
 function routeToken(route) {
   if (!route) return 'none';
   if (route.name === 'drive') return 'drive:' + (route.folderId || 'root');
-  if (route.name === 'search') return 'search:' + (route.query || '');
+  // A search token must cover the filters too: ?q= alone would let a narrower
+  // search paint as unchanged and skip the transition it deserves.
+  if (route.name === 'search') return 'search:' + routePath(route);
+  // Same rule for the owner's list: /shares?state=trashed is a different page
+  // than bare /shares, and a filter change must not paint as "unchanged".
+  if (route.name === 'shares') return 'shares:' + routePath(route);
   return route.name;
+}
+
+/* ═══ owner share management ═══════════════════════════════════ */
+/**
+ * The body of /shares.
+ *
+ * Kept here rather than in views.js because it is its own page with its own
+ * data, not a shape of the file list: it never looks at state.nodes, never
+ * mounts the file list and never answers a row click as "open this file".
+ * `sharesPage` is created once per visit and re-attached on every repaint, so
+ * the sidebar or the status bar can be refreshed without re-reading page one.
+ * A /shares?q=…&state=… navigation is handed to the same page through show(),
+ * so the filter controls (and the caret in them) survive the query change; the
+ * page decides whether the filter really changed and re-reads page one only
+ * then.
+ */
+function sharesViewContent(route) {
+  if (!sharesPage) sharesPage = createSharesView(route);
+  else sharesPage.show(route);
+  return sharesPage.el;
+}
+
+/** The status bar for /shares: the page counts itself, the shell adds usage. */
+function sharesStatusContent() {
+  const parts = ['我分享的', store.state.user ? store.state.user.email || '' : ''];
+  if (store.state.stats) parts.splice(1, 0, '已用 ' + bytes(store.state.stats.bytes));
+  return parts.filter(Boolean).map((text) => h('span', { text }));
 }
 
 function topbarContent(ctx) {
@@ -585,26 +705,102 @@ function paintSelection() {
 function selectionBar() {
   const nodes = Array.from(store.state.selection).map(lookupNode).filter(Boolean);
   const count = store.state.selection.size;
-  return h('div', { class: 'sel-bar motion-sink', attrs: { role: 'region', 'aria-label': '批量操作' } },
-    h('b', { text: '已选择 ' + count + ' 项' }),
-    h('button', {
-      class: 'btn btn-sm', attrs: { type: 'button' },
-      on: { click: () => downloadSelection(nodes) },
-    }, raw(icon('download', 13)), '下载'),
-    h('button', {
-      class: 'btn btn-sm', attrs: { type: 'button', title: 'Ctrl+Shift+M' },
-      on: { click: () => moveSelection(nodes) },
-    }, raw(icon('move', 13)), '移动到…'),
-    h('button', {
-      class: 'btn btn-sm', attrs: { type: 'button' },
-      on: { click: () => deleteSelection(nodes) },
-    }, raw(icon('trash', 13)), '删除'),
+  const inTrash = store.state.route.name === 'trash';
+  // The headline lives in a variable because a restore batch writes its progress
+  // into it ("还原中 1/2") instead of remounting the bar. Only the trash can
+  // rewrite it while a batch runs, so only there is it a live region: elsewhere
+  // it would announce the selection count on every repaint.
+  const status = h('b', {
+    text: '已选择 ' + count + ' 项',
+    attrs: inTrash ? { 'aria-live': 'polite' } : {},
+  });
+  // The trash is the one route where the bar's verbs are restore/purge: the
+  // drive verbs (download, move, delete) would either 404 or re-trash a row
+  // that is already there. Same classes and height as the drive bar so the
+  // toolbar never resizes when the selection changes route.
+  let restoreBtn = null;
+  if (inTrash) {
+    restoreBtn = h('button', {
+      class: 'btn btn-sm', attrs: { type: 'button', 'aria-label': '还原所选项目' },
+      on: {
+        click: async () => {
+          // A batch is serial and can take a while: the press looks accepted,
+          // and the headline carries the count so the bar is not simply frozen.
+          // The original label is captured first — the progress writes over it.
+          const label = status.textContent;
+          restoreBtn.disabled = true;
+          restoreBtn.setAttribute('aria-busy', 'true');
+          try {
+            await restoreSelection(nodes, (done, total) => {
+              status.textContent = '还原中 ' + done + '/' + total;
+            });
+          } finally {
+            // The refresh at the end of a batch rebuilds this bar, so both nodes
+            // may already be detached: write only to a bar still on screen.
+            if (status.isConnected) status.textContent = label;
+            if (restoreBtn.isConnected) {
+              restoreBtn.disabled = false;
+              restoreBtn.removeAttribute('aria-busy');
+            }
+          }
+        },
+      },
+    }, raw(icon('rotate-ccw', 13)), h('span', { class: 'sel-action-label', text: '还原' }));
+  }
+  const actions = inTrash
+    ? [
+      restoreBtn,
+      h('button', {
+        class: 'btn btn-sm sel-delete', attrs: { type: 'button', 'aria-label': '永久删除所选项目' },
+        on: { click: () => deleteSelection(nodes) },
+      }, raw(icon('trash', 13)), h('span', { class: 'sel-action-label', text: '永久删除' })),
+    ]
+    : [
+      h('button', {
+        class: 'btn btn-sm', attrs: { type: 'button', 'aria-label': '下载所选项目' },
+        on: { click: () => downloadSelection(nodes) },
+      }, raw(icon('download', 13)), h('span', { class: 'sel-action-label', text: '下载' })),
+      h('button', {
+        class: 'btn btn-sm', attrs: { type: 'button', 'aria-label': '将所选项目移动到…', title: 'Ctrl+Shift+M' },
+        on: { click: () => moveSelection(nodes) },
+      }, raw(icon('move', 13)), h('span', { class: 'sel-action-label', text: '移动到…' })),
+      h('button', {
+        class: 'btn btn-sm sel-delete', attrs: { type: 'button', 'aria-label': '删除所选项目' },
+        on: { click: () => deleteSelection(nodes) },
+      }, raw(icon('trash', 13)), h('span', { class: 'sel-action-label', text: '删除' })),
+    ];
+  return h('div', { class: 'sel-bar', attrs: { role: 'region', 'aria-label': '批量操作' } },
+    status,
+    ...actions,
     h('span', { class: 'push' }),
     h('button', {
       class: 'icon-btn', attrs: { type: 'button', 'aria-label': '取消选择' }, html: icon('x', 14),
-      on: { click: () => { store.state.selection = new Set(); paintSelection(); } },
+      on: { click: () => clearSelection() },
     }),
   );
+}
+
+/**
+ * Clear the selection from the bar without dropping the caret on <body>.
+ *
+ * Both the X and Escape destroy the bar (or the row it belongs to), so the
+ * browser would otherwise leave focus nowhere. When the user was standing in
+ * the bar, hand it back to the first selected row's checkbox if that row is
+ * still on screen, and to the view when it is not.
+ */
+function clearSelection() {
+  const active = document.activeElement;
+  const wasInBar = !!(session.selectionSlot && active && session.selectionSlot.contains(active));
+  const firstId = store.state.selection.values().next().value;
+  const view = session.shellEls ? session.shellEls.viewEl : null;
+  const box = view && firstId
+    ? view.querySelector('.frow[data-id="' + firstId + '"] .pick, .gcard[data-id="' + firstId + '"] .pick')
+    : null;
+  store.state.selection = new Set();
+  paintSelection();
+  if (!wasInBar) return;
+  if (box && box.isConnected) box.focus({ preventScroll: true });
+  else if (view) view.focus({ preventScroll: true });
 }
 
 /* ═══ global keyboard ══════════════════════════════════════════ */
@@ -636,8 +832,7 @@ document.addEventListener('keydown', (event) => {
       return;
     }
     if (store.state.selection && store.state.selection.size) {
-      store.state.selection = new Set();
-      paintSelection();
+      clearSelection();
       event.preventDefault();
     }
     return;
@@ -689,7 +884,13 @@ document.addEventListener('keydown', (event) => {
   }
   if (event.key === 'Delete' && selected.length) {
     event.preventDefault();
-    if (store.state.route.name === 'trash') startPurge(selected[0]);
+    if (store.state.route.name === 'trash') {
+      // One row keeps the single-item confirmation (its title names the file);
+      // several rows go through the batch, which counts them and keeps the
+      // failures selected. Purging only selected[0] silently ignored the rest.
+      if (selected.length === 1) startPurge(selected[0]);
+      else deleteSelection(selected);
+    }
     else if (selected.length === 1) startDelete(selected[0]);
     else deleteSelection(selected);
     return;

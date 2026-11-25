@@ -100,6 +100,30 @@ describe('trash retention', () => {
     const expires = Date.parse(stats.json.stats.trash.expiresAt);
     assert.ok(expires > Date.now(), 'expiry is in the future');
   });
+
+  it('does not purge a backdated node when retention is 0', async () => {
+    const { config } = await import('../src/config.js');
+    const { sweepExpiredTrash } = await import('../src/ops/retention.js');
+    const file = await upload('zero-retention.txt', 'keep me');
+    await api('DELETE', `/api/v1/nodes/${file.id}`, auth());
+    // Far past any window: with a 0-day cutoff this row is purged instantly.
+    const aged = new Date(Date.now() - 40 * 86400000).toISOString();
+    withDb((db) => db.prepare('UPDATE nodes SET deleted_at=? WHERE id=?').run(aged, file.id));
+
+    const previous = config.trashRetentionDays;
+    let summary;
+    try {
+      config.trashRetentionDays = 0;
+      summary = await sweepExpiredTrash();
+    } finally {
+      config.trashRetentionDays = previous;
+    }
+    assert.equal(summary.nodes, 0, JSON.stringify(summary));
+    assert.equal(summary.roots, 0, JSON.stringify(summary));
+    assert.equal(summary.cutoff, null);
+    const kept = withDb((db) => db.prepare('SELECT COUNT(*) AS n FROM nodes WHERE id=?').get(file.id));
+    assert.equal(kept.n, 1, 'retention 0 disables trash auto-purge');
+  });
 });
 
 describe('storage report', () => {

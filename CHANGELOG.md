@@ -6,6 +6,160 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.28.0] - 2026-11-25
+
+Links become manageable, and the trash becomes searchable.
+
+A share link used to be write-only: it was created in a file's dialog, and the
+only way to see it again was to remember which file it came from. There is now a
+`/shares` page for every link the account created, with the state the server says
+it is in, an in-place editor for its expiry, password and budget, and a revoke
+that works even when the source sits in the trash. In the same pass the recycle
+bin grew the filters a bin needs to be usable, "download selected" stopped
+leaving a ZIP file the user never asked to keep, and a folder archive larger than
+4 GiB stopped being an unopenable 65 535-entry ZIP.
+
+### Added
+
+- **My shares** (`apps/web/lib/shares-view.js`, `styles/shares.css`).
+  `GET /api/v1/shares?limit=&offset=&q=&state=` lists every link the account
+  created, newest first, with `state` (`active` / `expired` / `exhausted` /
+  `trashed`), `usable`, `canDownload` and the source node. The page never
+  re-derives state from its own clock: `可用` and the copy/open buttons come from
+  the server's answer, so an expired link cannot look alive because this tab
+  disagrees, and a stalled tab cannot keep offering a budget another tab spent.
+  Filtering is route state, applied by the server before `LIMIT`/`OFFSET`, so a
+  match on a later page is reachable and Back / reload / clearing starts at page
+  one. `shares_owner(user_id, created_at DESC, id DESC)` matches the query's
+  order exactly, so paging is index reads rather than a per-page sort.
+- **One in-place link editor** (`apps/web/lib/share-edit.js`), shared by the
+  file's share dialog and a row of 我的分享. It seeds from the live row and sends
+  only the fields the owner actually touched, so "opened and pressed 保存" cannot
+  reset an expiry or clear a cap that was never on screen. The old password is
+  never in the DOM and never on the wire — the dialog knows only `hasPassword`,
+  and keeping it is the default. Cancel sends nothing, submitting is
+  single-flight, and a failure keeps the entered values so a retry does not mean
+  retyping. Renewing an expired link happens on the same token.
+- **Temporary archive downloads** (`apps/server/src/ops/archive-downloads.js`).
+  `POST /nodes/:id/archive?temporary=1` now answers a carrier row instead of
+  writing a `.zip` file node: `{id,name,size,mime,expiresAt,temporary:true}`,
+  fetched through `GET /archive-downloads/:id` (with `Range`) and released with
+  an idempotent `DELETE`. The row owns exactly one blob reference and lives 24 h,
+  so "download selected" no longer means "clean up a file you never asked for".
+  Releasing, expiry and a sweep all free the same reference exactly once: the
+  hash comes back from the `DELETE … RETURNING` that removed the row, and the
+  read-count check is in the same synchronous step, so a reader cannot lose its
+  bytes halfway through a response. Legacy servers that ignore `temporary` keep
+  answering `{node}` and the client accepts both without retrying the build.
+- **ZIP64 for large archives** (`apps/server/src/text/zip-records.js`). Folder
+  and selection archives now switch to ZIP64 only when a size, offset or entry
+  count reaches its 32-bit sentinel: a streamed entry carries a data descriptor
+  (bit 3) with the real CRC and sizes in the central directory, the tail gains
+  the ZIP64 EOCD and locator, and ordinary archives keep the classic layout byte
+  for byte. Below 4 GiB and 65 535 entries nothing changes; above it the archive
+  is one unzip software can actually open.
+- **Trash filters** (`apps/web/lib/trash-filter.js`). `/trash?q=&kind=&deletedWithin=`
+  narrows the bin by literal name substring, node kind and a deletion window,
+  all applied by the server before paging. `deletedWithin` is a *rolling* UTC
+  duration (24h / 7d / 30d from the request), not "today" in the reader's zone,
+  so the answer is the same at 00:05 and 23:55 and in every timezone; any other
+  value is a `400` rather than a silently ignored filter. The client caps its
+  field at the server's 100 characters.
+- **Search filters** (`apps/server/src/ops/search-filters.js`, `apps/web/lib/search-form.js`).
+  `kind`, `folderId` and `updatedAfter` are built once as a fixed SQL fragment
+  with bound values and handed to both the name query and the content index, so
+  the two halves of one search can no longer answer slightly different
+  questions. A body whose node is trashed or invisible never occupies a page
+  slot. Only ISO 8601 with an explicit zone is accepted — bare years and
+  "March 5" would turn a typo into a filter nobody asked for.
+- **Trash as one operation** (`nodes.js`, `db.js`). Every live node a soft delete
+  actually trashed now carries a shared `trash_batch_id`, so restore follows the
+  deletion that was performed rather than everything that shares a timestamp: a
+  child deleted separately earlier is neither retagged nor restored by a later
+  parent delete, and two deletions in the same millisecond stay separate. Old
+  rows keep a NULL batch and fall back to their `deleted_at` — nothing is
+  backfilled. Restore resolves its name in the target namespace
+  (`name (restored)`, then `(1)`, `(2)`…), and a member restoring a root node
+  renames against the row owner's namespace.
+- **Background hashing** (`apps/web/lib/sha256-worker.js`). A local file over
+  64 MiB is hashed on one shared module worker instead of the page's main
+  thread, in 4 MiB slices, with its own progress and cancel path. The Blob is
+  structured-cloned into the worker, so bytes never travel through
+  `postMessage`, peak memory stays bounded, and a cancelled or failed hash can
+  never deliver a stale digest.
+- **Per-directory view memory** (`apps/web/lib/directory-prefs.js`). The
+  list/grid switch and the sort order are remembered per user *and* per folder:
+  "grid, by size, descending" in a photo folder says nothing about the root.
+  Non-drive routes keep the shell's global behaviour, and a browser with storage
+  blocked still renders and re-sorts normally.
+- **A full-viewport public reader** (`styles/shared-reader.css`). A visitor
+  opening a shared PDF used to read it in a 430×150 frame inside the 476 px card.
+  The public page now hands the file to the same drawer the drive uses and pins
+  it to all four sides. Text keeps the line measure narrow — the panel is what
+  grows, not the paragraph.
+- **`scripts/share-check.mjs` grew the management half** — over 580 new lines:
+  the in-place edit from both surfaces, the two list filters, revoke followed by
+  restore, and links whose source is in the trash. It boots its own server on an
+  ephemeral port pinned to `DRIVE_STORAGE=local`, so an ambient object-store
+  configuration cannot send the fixtures to a remote bucket.
+
+### Changed
+
+- **The public page has its own download center** (`styles/share-downloads.css`).
+  A recipient's tasks stay private to the link they opened and never join the
+  signed-in drive's list. Small pre-known files are assembled and saved as one
+  Blob; anything large, unknown-sized or a ZIP is streamed into a file the
+  visitor picks, because holding an archive in memory first costs its size in
+  RAM (and fails outright on iOS). A browser without the picker keeps the plain
+  attachment anchor, which streams to disk by itself.
+- **Archives stream their progress.** `POST …/archive?progress=1` answers SSE
+  with the four build counters, then a `complete` frame carrying whichever
+  payload applies; an older server ignores it and answers one JSON body, which
+  the client accepts without a retry — so a build can never run twice. A stream
+  that closes before either frame is an error, never a silent success.
+- **A disconnected client stops the body.** `sendBlob()` now watches `close` and
+  destroys the backend reader and its own wait, so a vanished client no longer
+  leaves a stream open until GC, and no longer spends a share's download budget
+  on a socket that is already gone.
+- **Blob adopt and release are serialized per hash** (`storage/blobs.js`). Both
+  read the backend and then mutate the row with real I/O in between, so
+  interleaved they could let an adopt take a reference to bytes a release was
+  already deleting. One promise chain per hash closes that window; different
+  hashes never wait on each other, and a failed operation cannot poison the
+  queue behind it.
+- **The sidebar opens a trail once per route**, not per render. A star toggle, a
+  sort or a caret click repaints the shell; re-expanding there would undo the
+  branch the user just collapsed.
+- **Paged trash rows carry `trashGroup`**, so a deletion stays identifiable on
+  every page it appears on. The unpaged listing keeps its old shape.
+- **A drawer left open across a navigation cannot pull the next page** of the
+  folder the user left: the gallery source is captured with its route and
+  returns null once the route behind it moved.
+
+### Fixed
+
+- **A trashed child was restored by its parent's delete.** Restore matched on
+  `deleted_at`, so a subtree deleted earlier came back with a later parent. It
+  follows `trash_batch_id` now, and legacy rows fall back to the connected branch
+  with the same original timestamp.
+- **A restore onto a taken name failed instead of picking one.** It now resolves
+  `name (restored)`, `(1)`, `(2)` inside the target namespace — including the
+  workspace members' namespace — in the same transaction that restores the rows.
+- **Every content-search page past 50 hits was empty.** The index capped its
+  fetch at 50 while the route asked for `offset+limit+1`; the cap is now the
+  route's window, and the LIKE fallback only fills a page FTS did not fill, so
+  the merged order no longer depends on the cap.
+- **`updatedAfter` accepted `2024-02-31`.** `Date.parse` rolls it over to March;
+  the shape is rejected now, and a time without a zone is read as UTC as the API
+  documents rather than in the server's locale.
+- **A cancelled folder re-upload left created folders behind.** The conflict
+  question is asked *before* anything is written, so cancelling it leaves no
+  trace on the server.
+- **A large upload showed a fake hashing percentage.** Hashing is a native
+  indeterminate meter until the transport reports real bytes read; 100% appears
+  only once every byte was actually hashed, and the transfer bar takes the slot
+  back the moment the network moves.
+
 ## [0.27.0] - 2026-11-24
 
 Downloads become a place, and a picture becomes a viewer.

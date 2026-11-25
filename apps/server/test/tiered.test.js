@@ -5,7 +5,6 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, before, describe, it } from 'node:test';
 import { createHash } from 'node:crypto';
-import { LocalBackend } from '../src/storage/backend.js';
 import { S3Backend } from '../src/storage/s3.js';
 import { TieredBackend } from '../src/storage/tiered.js';
 
@@ -15,6 +14,11 @@ import { TieredBackend } from '../src/storage/tiered.js';
  * Reads must not care which tier a blob is in; writes land hot; and a migration
  * must never delete the source before the destination is proven to hold the same
  * bytes — that is the one failure mode that loses data.
+ *
+ * `../src/storage/backend.js` is imported inside `before`, not here: it pulls in
+ * config.js and (statically) cluster.js → db.js, so a static import would open
+ * the checkout's database and blobs before this suite could isolate itself.
+ * S3Backend and TieredBackend are pure modules and stay static.
  */
 
 const CREDENTIALS = {
@@ -53,12 +57,23 @@ function stubS3() {
   return { objects, calls, fetchImpl };
 }
 
+let suiteDir;
 let hotDir;
 let srv;
 let store;
+let LocalBackend;
+let db;
+let savedDataDir;
 
-before(() => {
-  hotDir = mkdtempSync(join(tmpdir(), 'tier-hot-'));
+before(async () => {
+  suiteDir = mkdtempSync(join(tmpdir(), 'tier-hot-'));
+  hotDir = join(suiteDir, 'hot');
+  // config.js resolves paths once, at import time: point it at this suite's own
+  // directory before backend.js (and the db it transitively opens) is evaluated.
+  savedDataDir = process.env.DRIVE_DATA_DIR;
+  process.env.DRIVE_DATA_DIR = suiteDir;
+  ;({ LocalBackend } = await import('../src/storage/backend.js'));
+  ;({ db } = await import('../src/db.js'));
   srv = stubS3();
   store = new TieredBackend({
     hot: new LocalBackend(hotDir),
@@ -70,7 +85,12 @@ before(() => {
 });
 
 after(() => {
-  try { rmSync(hotDir, { recursive: true, force: true }); } catch { /* locked */ }
+  // `before` may have thrown before `db` or `suiteDir` existed: neither a double
+  // failure nor a TypeError here should mask the real one.
+  try { db.close(); } catch { /* never opened, or already closed */ }
+  if (savedDataDir === undefined) delete process.env.DRIVE_DATA_DIR;
+  else process.env.DRIVE_DATA_DIR = savedDataDir;
+  if (suiteDir) { try { rmSync(suiteDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); } catch { /* locked */ } }
 });
 
 const sha = (text) => createHash('sha256').update(text).digest('hex');

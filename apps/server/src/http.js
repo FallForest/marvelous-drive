@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto'
+import { once } from 'node:events'
 import { createReadStream, createWriteStream } from 'node:fs'
 import { readFile, stat, unlink } from 'node:fs/promises'
 import { gzipSync } from 'node:zlib'
@@ -155,6 +156,9 @@ function parseRange(header, size) {
 export async function sendBlob(req, res, backend, key, { mime, download = false, filename, headers: extraHeaders, acceptRanges = true, onStart } = {}) {
   const info = await backend.stat(key)
   if (!info) throw fail(404, 'NOT_FOUND', 'File was not found.')
+  // The client can vanish while the backend answers; do not start a body (or
+  // spend a share's download budget) for a socket that is already gone.
+  if (res.destroyed) return
   const size = info.size
   const headers = {
     'content-type': mime || 'application/octet-stream',
@@ -187,28 +191,46 @@ export async function sendBlob(req, res, backend, key, { mime, download = false,
     res.writeHead(200, headers)
   }
   if (req.method === 'HEAD' || size === 0) { res.end(); return }
+  // Headers are written, but the socket may have died in between; opening a
+  // backend reader for it would leak that reader until the next GC.
+  if (res.destroyed) return
 
   // Stream and drop the bytes before `start`: a range request must not buffer the
   // prefix it does not want.
   const source = backend.get(key)
+  // A disconnected client never emits `drain`, so waiting for it would hang the
+  // request forever and keep `source` (and a temp ZIP's reader) open. One
+  // controller per response lets `close` settle both the wait and the reader.
+  const controller = new AbortController()
+  const onClose = () => {
+    controller.abort()
+    source.destroy()
+  }
+  res.once('close', onClose)
   let position = 0
   try {
     for await (const chunk of source) {
+      if (controller.signal.aborted || res.destroyed) break
       const chunkStart = position
       const chunkEnd = position + chunk.length - 1
       position += chunk.length
       if (chunkEnd < start) continue
       const slice = chunk.subarray(Math.max(0, start - chunkStart), Math.min(chunk.length, end - chunkStart + 1))
-      if (!res.write(slice)) await new Promise((resolve) => res.once('drain', resolve))
+      if (!res.write(slice)) {
+        await once(res, 'drain', { signal: controller.signal })
+        if (controller.signal.aborted || res.destroyed) break
+      }
       if (position > end) break
     }
   } catch (error) {
     // Headers are already out; the only honest thing left is to cut the socket.
-    res.destroy(error)
+    if (!res.destroyed) res.destroy(error)
     return
+  } finally {
+    res.removeListener('close', onClose)
+    source.destroy()
   }
-  source.destroy()
-  res.end()
+  if (!res.destroyed && !controller.signal.aborted) res.end()
 }
 
 /** Below this, the gzip header costs more than the compression saves. */

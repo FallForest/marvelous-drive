@@ -197,7 +197,9 @@ process.exit(await runBrowserCheck({ title: 'Download center check', network: tr
     window.__restoreArchiveFetch = () => { window.fetch = next }
     window.fetch = async (input, init) => {
       const url = typeof input === 'string' ? input : String(input && input.url)
-      if (init && init.method === 'POST' && url.endsWith('/nodes/' + id + '/archive')) {
+      // The archive POST now carries ?progress=1, so compare the path only.
+      if (init && init.method === 'POST'
+        && new URL(url, location.origin).pathname.endsWith('/nodes/' + id + '/archive')) {
         await new Promise((resolve) => setTimeout(resolve, 900))
       }
       return next(input, init)

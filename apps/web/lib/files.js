@@ -10,6 +10,7 @@ import { openMenu } from './ui.js';
 import { api, fetchBlob, getToken } from './api.js';
 import { rememberThumb, THUMBNAIL_MIMES } from './thumb-cache.js';
 import { createThumbnailLoader } from './thumbnail-loader.js';
+import { isTrashFilterActive, trashFilterEmptyText } from './trash-filter.js';
 
 const COLUMNS = [
   { key: 'name', label: '名称', cls: 'col-name' },
@@ -72,9 +73,76 @@ function selectAllBox(ctx, nodes, selectedCount) {
   return box;
 }
 
+/** Whether the current route is the trash list. */
+function isTrashRoute(ctx) {
+  return Boolean(ctx && ctx.state && ctx.state.route && ctx.state.route.name === 'trash');
+}
+
+/**
+ * Where a trashed item used to live, as one readable line.
+ *
+ * The server sends `originalPath` root-to-parent for the trash page, `[]` for
+ * an item deleted from the root, and `null` when an ancestor is no longer
+ * visible. A missing path on a row whose parentId is still root is also a root
+ * item; anything else without a path cannot say where it was.
+ */
+function trashOrigin(node) {
+  const path = node && node.originalPath;
+  if (Array.isArray(path)) {
+    const names = path
+      .map((segment) => (typeof segment === 'string' ? segment : segment && (segment.name || segment.title)) || '')
+      .filter(Boolean);
+    const segments = ['我的云盘'].concat(names);
+    return { text: segments.slice(-2).join(' / '), full: segments.join(' / ') };
+  }
+  const parentId = node && node.parentId;
+  if (parentId === null || parentId === undefined || parentId === '' || parentId === 'root') {
+    return { text: '我的云盘', full: '我的云盘' };
+  }
+  return { text: '原位置不可用', full: '原位置不可用' };
+}
+
+/**
+ * The one secondary line a trashed row or card carries: when it was deleted
+ * plus its original folder, because the date column disappears on narrow
+ * screens. The time leads so truncation cannot hide it. Pure formatting — no
+ * path request, and no link back into the trash.
+ */
+function trashMeta(node) {
+  const origin = trashOrigin(node);
+  const deletedAt = node && node.deletedAt;
+  const when = relativeTime(deletedAt);
+  const text = when ? when + '删除 · ' + origin.text : origin.text;
+  const fullWhen = formatDate(deletedAt);
+  const title = fullWhen ? origin.full + ' · 删除于 ' + fullWhen : origin.full;
+  return { text, title };
+}
+
+/**
+ * Muted single-line element for trashMeta, truncated like searchLocation.
+ *
+ * Rows have no CSS class of their own for this line, so the muted typography
+ * is inline; cards already style `.gmeta`, which is why only the truncation is
+ * applied there (the caller passes its class name).
+ */
+function trashMetaEl(node, className, { typography = true } = {}) {
+  const meta = trashMeta(node);
+  const el = h('div', { class: className, attrs: { title: meta.title }, text: meta.text });
+  Object.assign(el.style, {
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
+    whiteSpace: 'nowrap',
+    minWidth: '0',
+    maxWidth: '100%',
+    ...(typography ? { fontSize: 'var(--fs-xs)', color: 'var(--text-muted)', lineHeight: '1.2' } : null),
+  });
+  return el;
+}
+
 /** Rows + header. ctx: { nodes, sortKey, sortDir, selection, view, onSort } */
 export function renderFileList(ctx) {
   const state = ctx.state;
+  const trash = isTrashRoute(ctx);
   const nodes = state.serverSorted ? state.nodes : sortNodes(state.nodes, state.sortKey, state.sortDir);
   const wrap = h('div', { class: 'list' });
 
@@ -84,7 +152,9 @@ export function renderFileList(ctx) {
   }
 
   if (state.view === 'grid') {
-    wrap.appendChild(renderGrid(ctx, nodes));
+    // Folders and files may live in two grids of their own; the caller only
+    // cares that each one lands in the same list wrapper.
+    for (const grid of renderGrid(ctx, nodes)) wrap.appendChild(grid);
     return wrap;
   }
 
@@ -93,6 +163,9 @@ export function renderFileList(ctx) {
   head.appendChild(h('span', { class: 'col-pick' }, selectAllBox(ctx, nodes, selectedCount)));
   for (const column of COLUMNS) {
     const active = state.sortKey === column.key;
+    // The paged trash is ordered by deleted_at, so the same column is labelled
+    // for what it actually sorts there.
+    const label = trash && column.key === 'updated' ? '删除时间' : column.label;
     head.appendChild(h('button', {
       class: column.cls,
       attrs: {
@@ -102,7 +175,7 @@ export function renderFileList(ctx) {
         'data-sort': column.key,
       },
       on: { click: () => ctx.onSort(column.key) },
-    }, column.label, active ? raw(icon(state.sortDir === 'asc' ? 'arrow-up' : 'arrow-down', 11)) : null));
+    }, label, active ? raw(icon(state.sortDir === 'asc' ? 'arrow-up' : 'arrow-down', 11)) : null));
   }
   head.appendChild(h('span', { attrs: { 'aria-hidden': 'true' } }));
   head.appendChild(h('span', { attrs: { 'aria-hidden': 'true' } }));
@@ -134,8 +207,60 @@ function dropTargetHandlers(ctx, node) {
   };
 }
 
+/**
+ * Where a search hit came from, as a small button that opens its folder.
+ *
+ * Outside /search a row is already in its own folder, so this is null. The
+ * last two segments are enough to tell two same-named files apart; the full
+ * path stays in the tooltip and the accessible name.
+ */
+function searchLocation(ctx, node) {
+  if (!ctx || !ctx.state || !ctx.state.route || ctx.state.route.name !== 'search') return null;
+  const path = node && node.path;
+  if (!Array.isArray(path)) return null;
+  const names = path
+    .map((segment) => (typeof segment === 'string' ? segment : segment && (segment.name || segment.title)) || '')
+    .filter(Boolean);
+  const segments = ['我的云盘'].concat(names);
+  const fullPath = segments.join(' / ');
+  const button = h('button', {
+    class: 'btn-link',
+    text: segments.slice(-2).join(' / '),
+    attrs: { type: 'button', title: fullPath, 'aria-label': '打开所在文件夹：' + fullPath },
+    on: {
+      click: (event) => {
+        event.stopPropagation();
+        if (ctx.navigate) ctx.navigate(node.parentId ? '/folder/' + encodeURIComponent(node.parentId) : '/');
+      },
+      // The row listens for keys to open and rename; this button is its own target.
+      keydown: (event) => { event.stopPropagation(); },
+    },
+  });
+  Object.assign(button.style, {
+    fontSize: 'var(--fs-xs)',
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
+    whiteSpace: 'nowrap',
+    minWidth: '0',
+    maxWidth: '100%',
+    display: 'block',
+    textAlign: 'left',
+  });
+  return button;
+}
+
+function gnameWithLocation(ctx, node) {
+  const locationEl = searchLocation(ctx, node);
+  // The span carries the untouched name: a folder name is clamped to two lines,
+  // so the full string has to stay reachable as the native tooltip.
+  const gname = h('div', { class: 'gname' }, h('span', { text: node.name, attrs: { title: node.name } }), locationEl);
+  if (locationEl) gname.style.minWidth = '0';
+  return gname;
+}
+
 function renderRow(ctx, node, selected) {
   const state = ctx.state;
+  const trash = isTrashRoute(ctx);
   const isFolder = node.kind === 'folder';
   const kind = isFolder ? 'folder' : fileKind(node.mime, node.name);
   const nameEl = h('span', { class: 'name', attrs: { title: node.name }, text: node.name });
@@ -147,30 +272,49 @@ function renderRow(ctx, node, selected) {
   // same way, so it is used as the thumbnail source too — the decoded preview
   // is cached on the server by blobHash, so the list and the drawer share one
   // decode.
-  const thumbSource = thumbnailSourceFor(node);
+  //
+  // The thumbnail routes only serve live files, so a trashed row keeps its icon
+  // instead of issuing a request the server is guaranteed to refuse.
+  const thumbSource = trash ? null : thumbnailSourceFor(node);
   if (!isFolder && thumbSource) attachRowThumb(kindEl, node, thumbSource);
+  // In search results the name alone does not say where the hit lives, and in
+  // the trash the deleted item is no longer there: both grow a second line.
+  const locationEl = trash ? null : searchLocation(ctx, node);
+  const secondaryEl = trash ? trashMetaEl(node, 'trash-meta') : locationEl;
+  const nameBox = secondaryEl ? h('div', { class: 'stack' }, nameEl, secondaryEl) : nameEl;
+  if (secondaryEl) nameBox.style.minWidth = '0';
   const main = h('div', { class: 'frow-main' },
     kindEl,
-    nameEl,
+    nameBox,
     // A folder advertises the click that goes in; a file has nothing to promise.
     isFolder ? h('span', { class: 'open-hint', html: icon('chevron-right', 12) }) : null,
   );
 
-  const starBtn = h('button', {
-    class: 'icon-btn star',
-    attrs: {
-      type: 'button',
-      'aria-label': node.starred ? '取消星标' : '加星标',
-      'aria-pressed': node.starred ? 'true' : 'false',
-      'data-action': 'star',
-    },
-    html: icon('star', 13),
-    on: {
-      click: (event) => { event.stopPropagation(); ctx.onToggleStar(node); },
-      keydown: (event) => event.stopPropagation(),
-    },
-  });
-  if (node.starred) starBtn.classList.add('is-on');
+  // Trashed items cannot be starred, so the button is not built at all; an
+  // empty span keeps the desktop grid's row/column alignment for the actions
+  // that remain. It carries `star` so the narrow-screen rules that drop that
+  // column (`@media (max-width:880px)`) drop the placeholder too.
+  let starSlot = null;
+  if (trash) {
+    starSlot = h('span', { class: 'star', attrs: { 'aria-hidden': 'true' } });
+  } else {
+    const starBtn = h('button', {
+      class: 'icon-btn star',
+      attrs: {
+        type: 'button',
+        'aria-label': node.starred ? '取消星标' : '加星标',
+        'aria-pressed': node.starred ? 'true' : 'false',
+        'data-action': 'star',
+      },
+      html: icon('star', 13),
+      on: {
+        click: (event) => { event.stopPropagation(); ctx.onToggleStar(node); },
+        keydown: (event) => event.stopPropagation(),
+      },
+    });
+    if (node.starred) starBtn.classList.add('is-on');
+    starSlot = starBtn;
+  }
 
   const moreBtn = h('button', {
     class: 'icon-btn more',
@@ -182,6 +326,7 @@ function renderRow(ctx, node, selected) {
     },
   });
 
+  const dateValue = trash ? node.deletedAt : node.updatedAt;
   const row = h('div', {
     class: 'frow' + (isFolder ? ' is-folder' : ''),
     dataset: { id: node.id, selected: selected ? 'true' : 'false', kind: node.kind || 'file' },
@@ -203,8 +348,8 @@ function renderRow(ctx, node, selected) {
     selectionBox(ctx, node, selected, 'row-pick'),
     main,
     h('span', { class: 'meta num', attrs: { role: 'cell' }, text: isFolder ? '—' : bytes(node.size) }),
-    h('span', { class: 'meta date', attrs: { role: 'cell', title: formatDate(node.updatedAt) }, text: relativeTime(node.updatedAt) }),
-    starBtn,
+    h('span', { class: 'meta date', attrs: { role: 'cell', title: formatDate(dateValue) }, text: relativeTime(dateValue) }),
+    starSlot,
     moreBtn,
   );
   return row;
@@ -290,65 +435,150 @@ function attachRowThumb(kindEl, node, source) {
     .catch(() => { /* no thumbnail: the icon stays */ }));
 }
 
-function renderGrid(ctx, nodes) {
-  const grid = h('div', { class: 'grid', attrs: { role: 'list' } });
-  for (const node of nodes) {
-    const isFolder = node.kind === 'folder';
-    const kind = isFolder ? 'folder' : fileKind(node.mime, node.name);
-    const selected = ctx.state.selection.has(node.id);
-    const thumb = h('div', { class: 'thumb' });
-    const gridSource = thumbnailSourceFor(node);
-    if (kind === 'image') {
-      const placeholder = raw(icon('file-image', 26));
-      thumb.appendChild(placeholder);
-      // A format no route can decode has no thumbnail to ask for; the icon IS
-      // the answer, and asking would only produce a failed request per row.
-      if (gridSource) {
-        thumbnailLoader.watch(thumb, () => thumbFor(node, THUMBNAIL_WIDTH, gridSource).then((url) => {
-          if (!thumb.isConnected) return;
-          const img = h('img', { attrs: { alt: '', loading: 'lazy', decoding: 'async', draggable: 'false', src: url } });
-          thumb.replaceChildren(img);
-        }).catch(() => { /* keep the icon placeholder */ }));
-      }
-    } else {
-      thumb.innerHTML = icon(kindIcon(kind, node.name), 26);
-    }
+/**
+ * The counts line under a folder's name, from the server's childCounts.
+ *
+ * Only the direct children are counted (that is the server's contract), and a
+ * missing field is left out rather than shown as 0 — "unknown" and "none" are
+ * different answers. With no counts at all the line falls back to the noun.
+ */
+function folderMetaText(node) {
+  const counts = node && node.childCounts;
+  if (!counts) return '文件夹';
+  const num = (value) => (typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : null);
+  const folders = num(counts.folders);
+  const files = num(counts.files);
+  if (folders === null && files === null) return '文件夹';
+  if (!folders && !files) return '空文件夹';
+  const parts = [];
+  if (folders) parts.push(folders + ' 个文件夹');
+  if (files) parts.push(files + ' 个文件');
+  return parts.join(' · ');
+}
 
-    const starBtn = h('button', {
-      class: 'icon-btn' + (node.starred ? ' is-on' : ''),
-      attrs: { type: 'button', 'aria-label': node.starred ? '取消星标' : '加星标', 'aria-pressed': node.starred ? 'true' : 'false' },
-      html: icon('star', 13),
-      on: { click: (event) => { event.stopPropagation(); ctx.onToggleStar(node); } },
-    });
-    const moreBtn = h('button', {
-      class: 'icon-btn',
-      attrs: { type: 'button', 'aria-label': '更多操作', 'aria-haspopup': 'menu', 'aria-expanded': 'false' },
-      html: icon('more-horizontal', 13),
-      on: { click: (event) => { event.stopPropagation(); openRowMenu(ctx, node, event.currentTarget); } },
-    });
+/** Star + overflow, shared by both card shapes. */
+function cardActions(ctx, node) {
+  // A trashed card cannot be starred, so only the overflow action remains.
+  const starBtn = isTrashRoute(ctx) ? null : h('button', {
+    class: 'icon-btn' + (node.starred ? ' is-on' : ''),
+    attrs: { type: 'button', 'aria-label': node.starred ? '取消星标' : '加星标', 'aria-pressed': node.starred ? 'true' : 'false' },
+    html: icon('star', 13),
+    on: { click: (event) => { event.stopPropagation(); ctx.onToggleStar(node); } },
+  });
+  const moreBtn = h('button', {
+    class: 'icon-btn',
+    attrs: { type: 'button', 'aria-label': '更多操作', 'aria-haspopup': 'menu', 'aria-expanded': 'false' },
+    html: icon('more-horizontal', 13),
+    on: { click: (event) => { event.stopPropagation(); openRowMenu(ctx, node, event.currentTarget); } },
+  });
+  return { starBtn, moreBtn };
+}
 
-    grid.appendChild(h('div', {
-      class: 'gcard' + (isFolder ? ' is-folder' : ''),
-      dataset: { id: node.id, selected: selected ? 'true' : 'false', kind: node.kind || 'file' },
-      attrs: { role: 'listitem', tabindex: '0', draggable: 'true', 'aria-selected': selected ? 'true' : 'false', 'aria-label': node.name },
-      on: {
-        click: (event) => ctx.onRowClick(node, event),
-        keydown: (event) => ctx.onRowKey(event, node),
-        contextmenu: (event) => { event.preventDefault(); ctx.onSelectOnly(node, event); openRowMenu(ctx, node, moreBtn); },
-        dragstart: (event) => { if (ctx.onRowDragStart) ctx.onRowDragStart(node, event); },
-        dragend: (event) => { if (ctx.onRowDragEnd) ctx.onRowDragEnd(node, event); },
-        ...dropTargetHandlers(ctx, node),
-      },
+/**
+ * The card element and everything a card shares: identity attributes, the
+ * single-click / keyboard / context-menu / drag behaviours, and the folder
+ * drop target. `children` are appended in order.
+ */
+function gridCard(ctx, node, selected, extraClass, moreBtn, children) {
+  const card = h('div', {
+    class: 'gcard' + (extraClass ? ' ' + extraClass : ''),
+    dataset: { id: node.id, selected: selected ? 'true' : 'false', kind: node.kind || 'file' },
+    attrs: { role: 'listitem', tabindex: '0', draggable: 'true', 'aria-selected': selected ? 'true' : 'false', 'aria-label': node.name },
+    on: {
+      click: (event) => ctx.onRowClick(node, event),
+      keydown: (event) => ctx.onRowKey(event, node),
+      contextmenu: (event) => { event.preventDefault(); ctx.onSelectOnly(node, event); openRowMenu(ctx, node, moreBtn); },
+      dragstart: (event) => { if (ctx.onRowDragStart) ctx.onRowDragStart(node, event); },
+      dragend: (event) => { if (ctx.onRowDragEnd) ctx.onRowDragEnd(node, event); },
+      ...dropTargetHandlers(ctx, node),
     },
-      selectionBox(ctx, node, selected, 'card-pick'),
-      thumb,
-      h('div', { class: 'gname' },
-        h('span', { text: node.name }),
-      ),
-      h('div', { class: 'gmeta', text: isFolder ? '文件夹' : bytes(node.size) + ' · ' + relativeTime(node.updatedAt) }),
-      h('div', { class: 'gactions' }, starBtn, moreBtn),
-    ));
+  });
+  for (const child of children) if (child) card.appendChild(child);
+  return card;
+}
+
+/** A picture/file card: thumbnail on top, the same caption it always had. */
+function renderFileCard(ctx, node, selected) {
+  const trash = isTrashRoute(ctx);
+  const kind = fileKind(node.mime, node.name);
+  const thumb = h('div', { class: 'thumb' });
+  // Trashed files are not served by the thumbnail routes, so the icon stays.
+  const gridSource = trash ? null : thumbnailSourceFor(node);
+  if (kind === 'image') {
+    thumb.appendChild(raw(icon('file-image', 26)));
+    // A format no route can decode has no thumbnail to ask for; the icon IS
+    // the answer, and asking would only produce a failed request per row.
+    if (gridSource) {
+      thumbnailLoader.watch(thumb, () => thumbFor(node, THUMBNAIL_WIDTH, gridSource).then((url) => {
+        if (!thumb.isConnected) return;
+        const img = h('img', { attrs: { alt: '', loading: 'lazy', decoding: 'async', draggable: 'false', src: url } });
+        thumb.replaceChildren(img);
+      }).catch(() => { /* keep the icon placeholder */ }));
+    }
+  } else {
+    thumb.innerHTML = icon(kindIcon(kind, node.name), 26);
   }
+
+  const { starBtn, moreBtn } = cardActions(ctx, node);
+  return gridCard(ctx, node, selected, '', moreBtn, [
+    selectionBox(ctx, node, selected, 'card-pick'),
+    thumb,
+    gnameWithLocation(ctx, node),
+    trash
+      ? trashMetaEl(node, 'gmeta trash-meta', { typography: false })
+      : h('div', { class: 'gmeta', text: bytes(node.size) + ' · ' + relativeTime(node.updatedAt) }),
+    h('div', { class: 'gactions' }, starBtn, moreBtn),
+  ]);
+}
+
+/**
+ * A directory card: a warm icon block beside a two-line name and its counts.
+ *
+ * It has no thumbnail, so it must not borrow the picture card's 88px media
+ * box — that empty box and the blank line under it were why a folder looked
+ * like a broken photo.
+ */
+function renderFolderCard(ctx, node, selected) {
+  const trash = isTrashRoute(ctx);
+  const { starBtn, moreBtn } = cardActions(ctx, node);
+  return gridCard(ctx, node, selected, 'is-folder', moreBtn, [
+    selectionBox(ctx, node, selected, 'card-pick'),
+    h('div', { class: 'gfolder-icon', html: icon('folder', 20) }),
+    h('div', { class: 'gfolder-body' },
+      gnameWithLocation(ctx, node),
+      trash
+        ? trashMetaEl(node, 'gmeta trash-meta', { typography: false })
+        : h('div', { class: 'gmeta', text: folderMetaText(node) }),
+    ),
+    h('div', { class: 'gactions' }, starBtn, moreBtn),
+  ]);
+}
+
+/**
+ * Grid view. Folders and files get one grid each: a photo card is 88px tall
+ * before its caption, and a folder sharing a row with one was stretched to
+ * that height with an empty thumbnail-shaped hole above its name. Source order
+ * is kept inside each grid; a folder-only view is a single grid (there is
+ * nothing to separate, and it gets no extra heading).
+ */
+function renderGrid(ctx, nodes) {
+  const folders = [];
+  const files = [];
+  for (const node of nodes) (node.kind === 'folder' ? folders : files).push(node);
+
+  const grids = [];
+  if (folders.length) {
+    grids.push(gridElement('grid grid-folders', folders, (node) => renderFolderCard(ctx, node, ctx.state.selection.has(node.id))));
+  }
+  if (files.length) {
+    grids.push(gridElement('grid grid-files', files, (node) => renderFileCard(ctx, node, ctx.state.selection.has(node.id))));
+  }
+  return grids;
+}
+
+function gridElement(className, nodes, renderCard) {
+  const grid = h('div', { class: className, attrs: { role: 'list' } });
+  for (const node of nodes) grid.appendChild(renderCard(node));
   return grid;
 }
 
@@ -374,10 +604,38 @@ export function trashRetentionNote(stats) {
   return '删除的文件会先进入回收站，' + trashRetentionClause(stats);
 }
 
+/**
+ * The empty list, which is two different answers in the trash.
+ *
+ * "回收站是空的" must only appear when the bin really holds nothing. A filtered
+ * no-match is the filter's answer: it names what was searched for, offers a way
+ * back to the unfiltered bin, and never borrows the retention sentence (which
+ * would read as "there is nothing to restore").
+ */
 function emptyFolder(ctx) {
   const route = ctx.state.route;
   const isTrash = route.name === 'trash';
   const isStarred = route.name === 'starred';
+  if (isTrash && isTrashFilterActive(route)) {
+    return h('div', { class: 'empty' },
+      raw(icon('search', 30)),
+      h('b', { text: '没有匹配的回收站项目' }),
+      h('p', { text: trashFilterEmptyText(route) }),
+      h('button', {
+        class: 'btn',
+        attrs: { type: 'button', title: '清除回收站筛选' },
+        // Named for what it does to the list, not just "清除筛选": the form
+        // above already has a button with that label, and two identical names
+        // a few pixels apart are ambiguous to a screen reader.
+        text: '清除筛选并显示全部',
+        on: {
+          click: () => {
+            if (typeof ctx.navigate === 'function') ctx.navigate('/trash');
+          },
+        },
+      }),
+    );
+  }
   return h('div', { class: 'empty' },
     raw(icon(isTrash ? 'trash' : isStarred ? 'star' : 'folder', 30)),
     h('b', { text: isTrash ? '回收站是空的' : isStarred ? '还没有星标文件' : '这个文件夹还是空的' }),

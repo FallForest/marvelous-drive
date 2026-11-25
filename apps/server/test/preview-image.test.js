@@ -1,7 +1,6 @@
 import assert from 'node:assert/strict'
 import { after, before, describe, it } from 'node:test'
 import { startServer, uniqueEmail } from './helpers.js'
-import { decodeToPng } from '../src/routes/preview-image.js'
 import { isNormalizable, previewSize } from '../src/text/image-normalize.js'
 
 /**
@@ -10,15 +9,22 @@ import { isNormalizable, previewSize } from '../src/text/image-normalize.js'
  * The decoder is a 960 KB WASM module and is optional in a checkout, so the
  * tests split in two: the pure re-encode path (always runs) and the route
  * itself (runs when libheif resolves, and asserts a clean 503 when it does not).
+ *
+ * `../src/routes/preview-image.js` is imported inside `before`, after
+ * `startServer()` has pointed the process at a throwaway data directory: the
+ * route module reaches config.js, db.js and storage/backend.js at module load,
+ * and a static import would bind them to the checkout's own database and spools.
  */
 
 let app
 let api
 let token
+let decodeToPng
 
 before(async () => {
   app = await startServer()
   api = app.client
+  ;({ decodeToPng } = await import('../src/routes/preview-image.js'))
   const registered = await api('POST', '/api/v1/auth/register', {
     body: { email: uniqueEmail(), password: 'preview image password' },
   })
@@ -26,6 +32,9 @@ before(async () => {
 })
 
 after(async () => {
+  // `before` can throw (a refused start, a decoder import failure). Teardown must
+  // then stay quiet instead of replacing that error with "undefined.close".
+  if (!app) return
   await app.close()
   app.cleanup()
 })

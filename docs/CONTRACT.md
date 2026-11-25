@@ -97,11 +97,39 @@ Endpoints (auth required unless marked public):
   is what the web client caches; `?parentId=<uuid>` returns only that folder's
   direct children; `?parentId=root` returns only the root level. `?trash=1`
   returns the trash instead; `?starred=1` starred nodes; `?kind=file|folder`;
-  `?sort=name|size|updated|created`.
+  `?sort=name|size|updated|created`. `?q=` on the trash list only is a trimmed,
+  case-insensitive literal filename substring (`%`, `_` and `\` are literal
+  characters), capped at 100 characters and composed with `kind` before
+  pagination. `?deletedWithin=24h|7d|30d` on the trash list only is a
+  **rolling UTC duration** measured back from the request (not a calendar day),
+  compared against `deletedAt` and composed with `q`/`kind` in the same WHERE
+  before `LIMIT`/`OFFSET`, so a continuation page stays inside the window. An
+  omitted or empty value means every deletion time; any other value on the
+  trash answers `400 INVALID_INPUT` rather than quietly meaning "everything".
+  Outside the trash the parameter is ignored, like `q`, so live listings keep
+  their existing contract.
+- Paged trash rows (`?trash=1` with `limit=`) also carry `trashGroup`, naming
+  the deletion operation a row belongs to: `batch:<trash_batch_id>` for rows
+  written since the column existed, `legacy:<deletedAt>` for rows older than
+  it. Every row of one deletion carries the same label on every page it
+  appears on, and two deletions inside the same millisecond stay separate.
+  The unpaged trash listing keeps its old shape and has no `trashGroup`.
 - `GET /api/v1/nodes/:id/breadcrumb` and `/nodes/:id/path` â€?`{path:[{id,name,kind}]}`
   from the root down.
 - `POST /api/v1/nodes/:id/archive` â€?stores the folder as a `.zip` file node next
   to it â†?`201 {node}`.
+- Default (legacy): the archive stays a `.zip` file node next to the folder,
+  `201 {node}`. Opt-in `?temporary=1` changes the payload to the carrier
+  `{id,name,size,mime,expiresAt,temporary:true}` and writes no file node.
+- Optional `?progress=1` keeps the streamed progress frames, then `complete`
+  carries whichever payload applies. A carrier is owner-only and fetched through
+  `GET /api/v1/archive-downloads/:id` (`Range` supported); idempotent
+  `DELETE /api/v1/archive-downloads/:id` releases it, `{ok:true}`.
+- Carriers live 24 h. An expired or unknown id answers
+  `404 ARCHIVE_DOWNLOAD_UNAVAILABLE` with no hint which; package again.
+- Folder and selection archives may use ZIP64 when file sizes, offsets or entry
+  count exceed standard ZIP limits; writers keep ordinary ZIP for smaller
+  archives, and unzip software must support ZIP64 for large outputs.
 - `GET /api/v1/files/:id/text?limit=` â€?`{text,truncated,mime}`, for previews and
   the push path (default 512 KiB, max 4 MiB).
 - `PATCH /api/v1/me` `{name}` â†?`{user}`.
@@ -115,6 +143,14 @@ Endpoints (auth required unless marked public):
 - `DELETE /api/v1/nodes/:id` â€?soft delete (trash), cascades to descendants.
   Missing `expectedVersion` is allowed.
 - `POST /api/v1/nodes/:id/restore` â€?restore node and trashed descendants.
+  It follows the same deletion operation that paged trash labels
+  `trashGroup` (`batch:<trash_batch_id>`), or, for legacy rows that predate
+  the column, the connected branch that shares the same original
+  `deletedAt` (nothing is backfilled). Restoring is one atomic transaction,
+  and the name is resolved inside the target folder namespace (which spans
+  workspace members): on a collision it becomes `name (restored)`, then
+  `name (restored) (1)`, `(2)`... until free. A member restoring a root node
+  renames against the row owner namespace. `200 {node}`.
 - `DELETE /api/v1/nodes/:id/permanent` â€?only for trashed nodes; removes blobs
   whose refcount drops to zero.
 - `PUT /api/v1/nodes/:id/star` `{starred:boolean}` â†?`{starred}`.
@@ -431,7 +467,16 @@ opens a `createReadStream` on stored content. Paths that must parse bytes anyway
 - `POST /api/v1/nodes/:id/share` `{permission:"viewer"|"downloader",expiresInDays?,password?,maxDownloads?}`
   â†?`201 {share:{id,token,url,permission,expiresAt,maxDownloads,downloads,hasPassword,createdAt}}`.
   `url` is `/s/<token>` on the same origin.
-- `GET /api/v1/nodes/:id/shares` â†?`{shares:[...]}`; `DELETE /api/v1/shares/:shareId`.
+- `GET /api/v1/nodes/:id/shares` â†?`{shares:[...]}`.
+- `GET /api/v1/shares?limit=&offset=` (auth) lists every link the current account
+  created, including links whose source node is in the trash. Order is descending
+  creation with `id` descending as the tiebreaker; `limit` defaults to 50 (max
+  100) and `offset` to 0. Answers `{shares,limit,offset,hasMore}`; each link is
+  the standard share object plus `state: "active"|"expired"|"exhausted"|"trashed"`,
+  `usable` (true only while `active`), `canDownload` (permission is `downloader`)
+  and `node:{id,name,kind,deletedAt}`.
+- `DELETE /api/v1/shares/:shareId` only revokes a link created by the current
+  account (`404` otherwise), including one whose source is already trashed.
 - Public, no auth: `GET /api/v1/shared/:token` â†?`{share:{token,permission,expiresAt,node:{id,name,size,mime,kind}},
   protected:boolean, locked:false}`; when a password is set the response is `401`
   with `code:"SHARE_LOCKED"` until a valid `?password=` (or `X-Share-Password`)

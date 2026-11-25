@@ -8,13 +8,19 @@
  *   - one compact entry in the global topbar, always reachable while the page
  *     is open, with a count and a progress hairline;
  *   - one panel listing every task: single files, batches and ZIP archives;
- *   - a task that reports exactly what it knows: packaging (total unknown),
- *     transferring (real response bytes, percent only with a trusted length),
- *     handed to the browser, canceled or failed with a readable reason.
+ *   - a task that reports exactly what it knows: packaging (real server-side
+ *     entry/byte progress when reported, otherwise indeterminate), transferring
+ *     (real response bytes, percent only with a trusted length), handed to the
+ *     browser, canceled or failed with a readable reason.
  *
  * The transport stays in api.js. A task only describes "prepare (optional) →
  * fetch → save", so the ZIP flow can refuse to delete its carrier until the
  * save really happened, and a retry can reuse a carrier that already exists.
+ *
+ * A ZIP carrier is either a real node (an older server) or, on a current one, a
+ * row in the archive-download registry that carries its own expiry. Only the
+ * temporary kind is fetched through its own route, and only it can be dropped:
+ * when the registry no longer has it, the next retry packages it again.
  *
  * Rendering is deliberately plain: the panel is built once, rows are keyed by
  * task id and updated in place. Progress repaints are throttled, because a
@@ -23,9 +29,14 @@
 
 import { h, raw } from './dom.js';
 import { icon, bytes } from './format.js';
-import { fetchBlob, saveBlob, contentUrl } from './api.js';
+import { fetchBlob, saveBlob, contentUrl, archiveDownloadUrl, saveDownloadStream } from './api.js';
 import { registerPopup } from './focus.js';
 import { formatSpeed } from './upload.js';
+
+/* The streamed-to-disk save lives with the transport (api.js) so both download
+   paths share one set of status and length rules; it is re-exported here because
+   this module is the download surface a page imports from. */
+export { saveDownloadStream };
 
 let counter = 0;
 
@@ -45,6 +56,25 @@ function messageOf(error) {
   return text || '下载失败，请重试。';
 }
 
+/** A carrier built by the archive-download registry instead of a real node. */
+function isTemporaryCarrier(carrier) {
+  return Boolean(carrier) && carrier.temporary === true;
+}
+
+/**
+ * True once a temporary carrier's own expiry has passed.
+ *
+ * `expiresAt` is the registry's ISO timestamp. A missing or unreadable one is
+ * no proof of expiry — the fetch then answers ARCHIVE_DOWNLOAD_UNAVAILABLE,
+ * which is handled one step later — so only a parsed, past date qualifies.
+ */
+function carrierExpired(carrier, now) {
+  const expires = carrier && carrier.expiresAt;
+  if (!expires) return false;
+  const at = Date.parse(String(expires));
+  return Number.isFinite(at) && at <= now;
+}
+
 /** Remove every child: the fake DOM used by node --test has no replaceChildren. */
 function clearNode(el) {
   while (el.childNodes.length) el.removeChild(el.childNodes[0]);
@@ -59,6 +89,7 @@ function setHidden(el, hidden) {
 /** The state word a task leads with. */
 const DOWNLOAD_STATE_LABEL = Object.freeze({
   packaging: '正在打包',
+  waiting: '准备保存',
   starting: '准备下载',
   transferring: '正在传输',
   saving: '正在交给浏览器保存',
@@ -67,13 +98,113 @@ const DOWNLOAD_STATE_LABEL = Object.freeze({
   canceled: '已取消',
 });
 
+/** Marks a malformed field in a packaging event (a value the server may not send). */
+const INVALID = Symbol('invalid');
+
+/**
+ * One numeric field of a packaging event.
+ *
+ * Missing/null is "unknown"; anything that is not a finite, non-negative number
+ * (entry counts must also be whole) invalidates the whole event. Numbers are
+ * not coerced from strings: an event the page cannot trust is not shown.
+ */
+function eventCount(value, integer) {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) return INVALID;
+  if (integer && !Number.isInteger(value)) return INVALID;
+  return value;
+}
+
+/**
+ * The trusted part of a packaging progress event, or null.
+ *
+ * `{ entriesCompleted, entriesTotal, bytesCompleted, bytesTotal }`: entry counts
+ * are whole numbers, byte counts are finite non-negative numbers, and at least
+ * one of them has to be present. A completed value above its total is not
+ * rejected (a server may count differently) but the ratio is clamped by the
+ * caller, exactly like transfer bytes.
+ */
+function normalizePackagingProgress(event) {
+  if (!event || typeof event !== 'object') return null;
+  const entriesCompleted = eventCount(event.entriesCompleted, true);
+  const entriesTotal = eventCount(event.entriesTotal, true);
+  const bytesCompleted = eventCount(event.bytesCompleted, false);
+  const bytesTotal = eventCount(event.bytesTotal, false);
+  if ([entriesCompleted, entriesTotal, bytesCompleted, bytesTotal].includes(INVALID)) return null;
+  if (entriesCompleted === null && entriesTotal === null && bytesCompleted === null && bytesTotal === null) return null;
+  return { entriesCompleted, entriesTotal, bytesCompleted, bytesTotal };
+}
+
+/**
+ * The frozen snapshot kept on the task: the validated event without the fields
+ * the server left out, so `task.packagingProgress` reads like the event itself
+ * and a later mutation of the caller's object cannot rewrite painted numbers.
+ */
+function packagingSnapshot(validated) {
+  const snapshot = {};
+  for (const key of ['entriesCompleted', 'entriesTotal', 'bytesCompleted', 'bytesTotal']) {
+    if (validated[key] !== null) snapshot[key] = validated[key];
+  }
+  return Object.freeze(snapshot);
+}
+
+/**
+ * What packaging can honestly say, plus the ratio it implies.
+ *
+ * The ratio comes from content bytes when the server gave a nonzero byte total,
+ * and from processed entries otherwise (an archive with no byte total yet, or a
+ * zero-byte one). With neither, `percent` is null and the caller falls back to
+ * the indeterminate bar: a packer that never reports stays as unknown as before.
+ */
+function packagingStatus(progress) {
+  const event = normalizePackagingProgress(progress);
+  if (!event) return null;
+  const { entriesCompleted, entriesTotal, bytesCompleted, bytesTotal } = event;
+  const parts = [];
+  let percent = null;
+  const entriesKnown = entriesTotal !== null && entriesTotal > 0;
+  // A server that counts one more entry than it announced must not print
+  // "21/20", and the ratio is clamped exactly like transfer bytes.
+  const entriesDone = entriesKnown && entriesCompleted !== null
+    ? Math.min(entriesCompleted, entriesTotal)
+    : entriesCompleted;
+
+  if (bytesTotal !== null && bytesTotal > 0 && bytesCompleted !== null) {
+    percent = Math.min(1, bytesCompleted / bytesTotal);
+  } else if (entriesKnown && entriesCompleted !== null) {
+    percent = Math.min(1, entriesCompleted / entriesTotal);
+  }
+  if (percent !== null) parts.push(Math.round(percent * 100) + '%');
+
+  // Content bytes as the server counted them: X / Y, or just Y when it has not
+  // reported a completed figure yet. "已处理 X" never pretends to be a total.
+  if (bytesTotal !== null) {
+    parts.push(bytesCompleted !== null
+      ? bytes(bytesCompleted) + ' / ' + bytes(bytesTotal)
+      : '内容共 ' + bytes(bytesTotal));
+  } else if (bytesCompleted !== null && bytesCompleted > 0) {
+    parts.push('已处理 ' + bytes(bytesCompleted));
+  }
+
+  if (entriesKnown) {
+    parts.push(entriesDone === null
+      ? '共 ' + entriesTotal + ' 项'
+      : '已处理 ' + entriesDone + '/' + entriesTotal + ' 项');
+  } else if (entriesCompleted !== null && entriesCompleted > 0) {
+    parts.push('已处理 ' + entriesCompleted + ' 项');
+  }
+
+  if (!parts.length) return null;
+  return { detail: '打包中 · ' + parts.join(' · '), percent };
+}
+
 /**
  * The one honest sentence about a task, plus the bar ratio it implies.
  *
- * `percent` is null whenever the response did not give a trustworthy total:
- * packaging, a chunked/compressed response, or an unknown-length stream. The UI
- * then shows an indeterminate bar and the bytes received, never a guessed 0%
- * that would sit at "almost done" for a whole minute.
+ * `percent` is null whenever the task did not give a trustworthy total: packaging
+ * without a progress event, a chunked/compressed response, or an unknown-length
+ * stream. The UI then shows an indeterminate bar and the bytes received, never a
+ * guessed 0% that would sit at "almost done" for a whole minute.
  *
  * Returns { label, detail, percent }.
  */
@@ -85,7 +216,16 @@ export function downloadStatus(task) {
   const total = Number.isFinite(t.total) && t.total >= 0 ? Number(t.total) : null;
   const speed = Number(t.speed) > 0 ? formatSpeed(t.speed) : '';
 
-  if (state === 'packaging') return { label, detail: '总量未知 · 打包完成后开始下载', percent: null };
+  if (state === 'packaging') {
+    const pack = packagingStatus(t.packagingProgress);
+    if (pack) return { label, detail: pack.detail, percent: pack.percent };
+    return { label, detail: '打包中 · 总量未知 · 打包完成后开始下载', percent: null };
+  }
+  if (state === 'waiting') {
+    // Nothing moved yet: the caller's own sentence (a server-side pack, a disk
+    // picker) is the only honest detail. Never a guessed percentage.
+    return { label, detail: t.waitingDetail || '正在准备下载…', percent: null };
+  }
   if (state === 'starting') return { label, detail: '正在连接…', percent: null };
   if (state === 'transferring') {
     if (total === 0) {
@@ -106,7 +246,14 @@ export function downloadStatus(task) {
     const percent = total === null ? null : 1;
     return { label, detail: total !== null ? bytes(total) : '已收 ' + bytes(received), percent };
   }
-  if (state === 'done') return { label, detail: bytes(received) || '已完成', percent: 1 };
+  if (state === 'done') {
+    // A streamed save already wrote the file: "交给浏览器保存" would be a lie.
+    return {
+      label: t.savedToDisk ? '已保存到磁盘' : label,
+      detail: bytes(received) || '已完成',
+      percent: 1,
+    };
+  }
   if (state === 'failed') {
     return { label, detail: t.message || '下载失败，可以重试。', percent: total ? Math.min(1, received / total) : null };
   }
@@ -119,15 +266,23 @@ export function downloadStatus(task) {
 /**
  * One download center. `options` exists for tests: transport and the final save
  * are injectable, and the DOM is only built when entry()/open() ask for it.
+ *
+ * `options.panelId` names the panel element. The drive keeps the default id, so
+ * every existing entry point is unchanged; a second center on the same document
+ * (the anonymous share page) passes its own id so two panels never share one.
  */
 export function createDownloadCenter(options) {
   const opts = options || {};
+  const panelId = String(opts.panelId || 'downloads-panel');
   const deps = {
     fetchBlob: opts.fetchBlob || fetchBlob,
     saveBlob: opts.saveBlob || saveBlob,
+    saveDownloadStream: opts.saveDownloadStream || saveDownloadStream,
     contentUrl: opts.contentUrl || contentUrl,
+    archiveDownloadUrl: opts.archiveDownloadUrl || archiveDownloadUrl,
     now: opts.now || (() => Date.now()),
     setTimeout: opts.setTimeout || ((fn, ms) => setTimeout(fn, ms)),
+    clearTimeout: opts.clearTimeout || ((handle) => clearTimeout(handle)),
     makeAbortController: opts.makeAbortController || (() => new AbortController()),
   };
 
@@ -142,6 +297,7 @@ export function createDownloadCenter(options) {
   let paintTimer = 0;
   let lastPaintAt = 0;
   let escapeBound = false;
+  let destroyed = false;
   /** Release for focus.js while the panel is open; null while it is closed. */
   let releasePopup = null;
 
@@ -152,7 +308,9 @@ export function createDownloadCenter(options) {
       id: 'dl-' + deps.now().toString(36) + '-' + (++counter),
       name: String(spec.name || '下载'),
       kind: spec.kind === 'archive' ? 'archive' : 'file',
-      state: spec.prepare ? 'packaging' : 'starting',
+      // A caller-supplied transfer may have to prepare something before it can
+      // move bytes; say so instead of "connecting" to a URL that is not fetched.
+      state: spec.prepare ? 'packaging' : (typeof spec.transfer === 'function' ? 'waiting' : 'starting'),
       phase: spec.prepare ? 'packaging' : 'transfer',
       received: 0,
       total: null,
@@ -160,6 +318,12 @@ export function createDownloadCenter(options) {
       error: null,
       message: '',
       carrier: null,
+      /** Last validated packaging event ({entriesCompleted, ...}) or null. */
+      packagingProgress: null,
+      /** The sentence a caller-owned transfer shows before its first byte. */
+      waitingDetail: typeof spec.waitingDetail === 'string' ? spec.waitingDetail : '',
+      /** True once an attempt saved its bytes itself (not through the browser). */
+      savedToDisk: false,
       settled: false,
       spec,
       controller: null,
@@ -174,6 +338,13 @@ export function createDownloadCenter(options) {
       retry() {
         if (!task.settled) return task;
         if (task.state !== 'failed' && task.state !== 'canceled') return task;
+        // A temporary carrier past its expiry can never be fetched again: drop
+        // it before this attempt starts so it packages exactly once instead of
+        // spending a round trip to be told the registry no longer has it. A
+        // legacy carrier is a real node with no expiry, and is never touched.
+        if (spec.prepare && isTemporaryCarrier(task.carrier) && carrierExpired(task.carrier, deps.now())) {
+          task.carrier = null;
+        }
         task.promise = execute(task);
         return task;
       },
@@ -216,6 +387,15 @@ export function createDownloadCenter(options) {
     task.received = 0;
     task.total = null;
     task.speed = 0;
+    // The disk save flag belongs to one attempt: a failed streamed save retried
+    // through a Blob must not still claim "已保存到磁盘".
+    task.savedToDisk = false;
+    // A caller-owned transfer may have something to finish before its first
+    // byte (a server-side pack, a disk picker); say so in its own words.
+    task.waitingDetail = typeof spec.waitingDetail === 'string' ? spec.waitingDetail : '';
+    // A retry is a new attempt: last attempt's packaging numbers must not be
+    // painted over the new one before it reports anything of its own.
+    task.packagingProgress = null;
     task.settled = false;
     const controller = deps.makeAbortController();
     task.controller = controller;
@@ -243,7 +423,9 @@ export function createDownloadCenter(options) {
     };
 
     const progress = (loaded, total) => {
-      if (signal.aborted) return;
+      // A late chunk from an abandoned attempt must not paint over the retry
+      // that replaced it.
+      if (signal.aborted || task.settled || task.controller !== controller) return;
       task.received = Math.max(0, Number(loaded) || 0);
       task.total = Number.isFinite(total) && total >= 0 ? Number(total) : null;
       const now = deps.now();
@@ -266,13 +448,31 @@ export function createDownloadCenter(options) {
       publish(false);
     };
 
+    /**
+     * Packaging progress from the artifact route.
+     *
+     * The event is validated before it is kept, and it is only kept while THIS
+     * attempt is still packaging with THIS controller: a late event from a
+     * canceled or already-finished build must not overwrite the live row or
+     * paint a stale percentage over a retry that started afterwards.
+     */
+    const packaging = (event) => {
+      if (signal.aborted || task.settled || task.controller !== controller) return;
+      if (task.state !== 'packaging') return;
+      const validated = normalizePackagingProgress(event);
+      if (!validated) return;
+      task.packagingProgress = packagingSnapshot(validated);
+      publish(false);
+    };
+
     try {
       if (spec.prepare && !task.carrier) {
         task.state = 'packaging';
         task.phase = 'packaging';
         task.total = null;
+        task.packagingProgress = null;
         publish(true);
-        const carrier = await spec.prepare({ signal });
+        const carrier = await spec.prepare({ signal, onProgress: packaging });
         if (!carrier || !carrier.id) throw new Error('服务器没有返回压缩包。');
         // Record the carrier BEFORE looking at the signal: a cancel that landed
         // while the archive was being built still created it on the server, and
@@ -285,22 +485,95 @@ export function createDownloadCenter(options) {
 
       if (signal.aborted) throw abortError();
       task.phase = 'transfer';
-      task.state = 'starting';
+      // A caller that owns the bytes says so before anything is fetched: the row
+      // shows its own sentence, never a guessed percentage over unknown work.
+      task.state = typeof spec.transfer === 'function' ? 'waiting' : 'starting';
       publish(true);
 
+      if (typeof spec.transfer === 'function') {
+        // The transfer writes the file itself (a disk picker, a server-side pack)
+        // and resolves once its bytes are saved to disk. It is called with no
+        // await in between, so a picker still holds the click's user activation.
+        const saved = await spec.transfer({ signal, onProgress: progress });
+        if (signal.aborted) throw abortError();
+        let size = saved && Number.isFinite(saved.size) ? Number(saved.size) : null;
+        if (size === null && saved && spec.url
+          && (typeof saved.createWritable === 'function' || saved.kind === 'file')) {
+          // A transfer may answer with the file handle itself instead of saving:
+          // stream the bytes into it here, still never through a Blob.
+          const written = await deps.saveDownloadStream(String(spec.url), saved, {
+            auth: spec.auth !== false,
+            signal,
+            onProgress: progress,
+          });
+          if (signal.aborted) throw abortError();
+          size = written && Number.isFinite(written.size) ? Number(written.size) : task.received;
+        }
+        if (size === null) size = task.total;
+        task.savedToDisk = true;
+        task.speed = 0;
+        task.state = 'done';
+        if (size !== null) task.total = size;
+        task.received = task.total !== null ? task.total : task.received;
+        task.settled = true;
+        publish(true);
+        // Same release contract as a fetched delivery: the caller's cleanup runs
+        // only after the save really happened, off the task's own promise.
+        if (typeof spec.onDelivered === 'function') {
+          Promise.resolve().then(() => spec.onDelivered(task.carrier)).catch(() => {});
+        }
+        return { state: 'done', error: null, message: '', carrier: task.carrier, task };
+      }
+
       const target = task.carrier || spec.node;
-      if (!target || !target.id) throw new Error('找不到要下载的文件。');
-      const blob = await deps.fetchBlob(deps.contentUrl(target.id, { download: true }), {
-        signal,
-        onProgress: progress,
-      });
+      // A direct URL needs no node: the share page builds its own /shared/…
+      // route. The private session keeps reading a node's content route, and a
+      // temporary carrier its own archive route.
+      let url;
+      let direct = false;
+      if (target && target.id) {
+        // A temporary carrier is only reachable through its own route; every
+        // server-supplied URL is ignored, so the page never fetches a full URL it
+        // was handed. A legacy carrier node keeps reading its content route.
+        url = isTemporaryCarrier(target)
+          ? deps.archiveDownloadUrl(target.id)
+          : deps.contentUrl(target.id, { download: true });
+      } else if (spec.url) {
+        url = String(spec.url);
+        direct = true;
+      } else {
+        throw new Error('找不到要下载的文件。');
+      }
+      // The private session's call shape is untouched: its options carry exactly
+      // the signal and listener they always did. A caller-built URL is the
+      // anonymous path, so it passes its auth intent and optional limit.
+      const fetchOptions = { signal, onProgress: progress };
+      if (direct) {
+        // Public share bytes never carry the drive session's bearer token.
+        fetchOptions.auth = spec.auth !== false;
+        if (spec.maxBytes !== undefined) fetchOptions.maxBytes = spec.maxBytes;
+      }
+      let blob;
+      try {
+        blob = await deps.fetchBlob(url, fetchOptions);
+      } catch (error) {
+        // The registry no longer has these bytes. Forget the carrier so the next
+        // user retry builds it once more; a cancel and an ordinary transfer
+        // failure both keep it, so those retries still reuse what exists.
+        if (isTemporaryCarrier(target) && error && error.code === 'ARCHIVE_DOWNLOAD_UNAVAILABLE') {
+          task.carrier = null;
+        }
+        throw error;
+      }
       if (signal.aborted) throw abortError();
 
       task.phase = 'deliver';
       task.state = 'saving';
       if (blob && Number.isFinite(blob.size)) task.received = Math.max(task.received, blob.size);
       publish(true);
-      await deps.saveBlob(blob, target.name || spec.filename || task.name);
+      // A spec may name the file it wants saved; the private session keeps
+      // using the node name, exactly as before.
+      await deps.saveBlob(blob, spec.filename || (target && target.name) || task.name);
 
       task.state = 'done';
       if (blob && Number.isFinite(blob.size)) task.total = blob.size;
@@ -308,6 +581,11 @@ export function createDownloadCenter(options) {
       task.speed = 0;
       task.settled = true;
       publish(true);
+      // Cleanup is the caller's business and this attempt already succeeded: run
+      // it in a microtask so a throwing or slow release cannot fail the task.
+      if (typeof spec.onDelivered === 'function') {
+        Promise.resolve().then(() => spec.onDelivered(task.carrier)).catch(() => {});
+      }
       return { state: 'done', error: null, message: '', carrier: task.carrier, task };
     } catch (error) {
       return stop(error);
@@ -328,6 +606,13 @@ export function createDownloadCenter(options) {
     }
     lastPaintAt = now;
     paint();
+  }
+
+  /** Drop a throttled repaint that has not run: it would outlive its center. */
+  function cancelPaint() {
+    if (!paintTimer) return;
+    try { deps.clearTimeout(paintTimer); } catch { /* already fired */ }
+    paintTimer = 0;
   }
 
   function paint() {
@@ -390,6 +675,12 @@ export function createDownloadCenter(options) {
       if (task.state === 'transferring' || task.state === 'starting' || task.state === 'saving') {
         if (task.total && task.total > 0) ratio = Math.max(ratio || 0, Math.min(1, task.received / task.total));
         else unknown = true;
+      } else if (task.state === 'packaging') {
+        // Packaging counts toward the hairline only with a real number from the
+        // server; without one the whole bar stays indeterminate, as before.
+        const pack = packagingStatus(task.packagingProgress);
+        if (pack && pack.percent !== null) ratio = Math.max(ratio || 0, pack.percent);
+        else unknown = true;
       } else {
         unknown = true;
       }
@@ -450,7 +741,12 @@ export function createDownloadCenter(options) {
         : canceled + ' 个已取消，可以重试';
     }
     if (!tasks.length) return '暂无下载';
-    return '已全部交给浏览器保存';
+    // A streamed save wrote its own file; only the Blob path handed bytes to the
+    // browser's own download machinery.
+    let saved = 0;
+    for (const task of tasks) if (task.savedToDisk) saved += 1;
+    if (saved === 0) return '已全部交给浏览器保存';
+    return saved === tasks.length ? '已全部保存到磁盘' : saved + ' 个已保存到磁盘';
   }
 
   function rowFor(task) {
@@ -507,7 +803,8 @@ export function createDownloadCenter(options) {
 
     const percent = status.percent;
     const indeterminate = percent === null
-      && (task.state === 'packaging' || task.state === 'starting' || task.state === 'transferring' || task.state === 'saving');
+      && (task.state === 'waiting' || task.state === 'packaging' || task.state === 'starting'
+        || task.state === 'transferring' || task.state === 'saving');
     row.bar.classList.toggle('is-indeterminate', indeterminate);
     row.bar.setAttribute('aria-valuetext', status.label + ' ' + status.detail);
     if (percent === null) row.bar.removeAttribute('aria-valuenow');
@@ -518,6 +815,10 @@ export function createDownloadCenter(options) {
   /* ── panel + entry chrome ─────────────────────────────────────── */
 
   function ensurePanel() {
+    // A destroyed center must not resurrect itself: a late reveal() from a task
+    // that finished after destroy() would otherwise re-add the panel and its
+    // Escape listener to a page this instance no longer owns.
+    if (destroyed) return null;
     if (panel) return panel;
     listEl = h('div', { class: 'dl-list', attrs: { role: 'list' } });
     summaryEl = h('span', { class: 'dl-summary', attrs: { role: 'status', 'aria-live': 'polite' } });
@@ -535,7 +836,7 @@ export function createDownloadCenter(options) {
     });
     panel = h('section', {
       class: 'downloads',
-      attrs: { id: 'downloads-panel', 'aria-label': '下载任务', hidden: 'hidden' },
+      attrs: { id: panelId, 'aria-label': '下载任务', hidden: 'hidden' },
     },
       h('header', { class: 'dl-head' },
         raw(icon('download', 14)),
@@ -566,7 +867,7 @@ export function createDownloadCenter(options) {
   }
 
   function open() {
-    if (!panel) ensurePanel();
+    if (!ensurePanel()) return;
     panelOpen = true;
     panel.removeAttribute('hidden');
     // The panel is appended to <body>, like a menu, so a dialog or drawer on top
@@ -641,7 +942,7 @@ export function createDownloadCenter(options) {
   function entry() {
     const button = h('button', {
       class: 'icon-btn dl-entry',
-      attrs: { type: 'button', 'aria-controls': 'downloads-panel' },
+      attrs: { type: 'button', 'aria-controls': panelId },
       html: icon('download', 15),
       on: { click: () => toggle() },
     });
@@ -661,6 +962,42 @@ export function createDownloadCenter(options) {
     return button;
   }
 
+  /**
+   * Release this center completely: used by a page that owns a second center
+   * (the public share route) and outlives it.
+   *
+   * Every task this center started is canceled through its own controller, so a
+   * retry that lands afterwards can never be mistaken for the live one. The
+   * panel leaves the document, its Escape listener is removed, a queued repaint
+   * is cleared and the popup registration is released: nothing of this instance
+   * keeps painting into a page it no longer belongs to.
+   */
+  function destroy() {
+    if (destroyed) return;
+    destroyed = true;
+    for (const task of tasks) {
+      if (!task.settled) task.cancel();
+    }
+    tasks.length = 0;
+    rows.clear();
+    cancelPaint();
+    setDirty = true;
+    entryState = null;
+    panelOpen = false;
+    if (releasePopup) {
+      try { releasePopup(); } catch { /* registration is already gone */ }
+      releasePopup = null;
+    }
+    if (escapeBound) {
+      escapeBound = false;
+      try { document.removeEventListener('keydown', onEscape, true); } catch { /* detached document */ }
+    }
+    if (panel && panel.parentNode) panel.parentNode.removeChild(panel);
+    panel = null;
+    listEl = null;
+    summaryEl = null;
+  }
+
   return {
     start,
     entry,
@@ -669,6 +1006,7 @@ export function createDownloadCenter(options) {
     toggle,
     clearFinished,
     reset,
+    destroy,
     tasks,
     get openState() { return panelOpen; },
   };

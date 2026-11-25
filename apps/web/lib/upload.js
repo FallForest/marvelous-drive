@@ -11,14 +11,17 @@
  * the normal flow silently.
  *
  * Both flows publish progress through an EventTarget-like emitter so the queue
- * UI subscribes once per item. SHA-256 is computed with crypto.subtle and sent
- * as X-Checksum-Sha256 / session sha256 so the server can reject corruption.
+ * UI subscribes once per item. SHA-256 is computed with crypto.subtle for small
+ * inputs and on a shared background worker for a large Blob (see sha256.js), and
+ * sent as X-Checksum-Sha256 / session sha256 so the server can reject corruption.
  */
 
 import { putRaw, request } from './api.js';
-import { sha256Stream } from './sha256.js';
+import { sha256Stream, sha256Background } from './sha256.js';
 
 export const SIMPLE_LIMIT = 8 * 1024 * 1024; // 8 MiB
+/** Above this a local Blob is hashed on the shared background worker. */
+const BACKGROUND_HASH_LIMIT = 64 * 1024 * 1024; // 64 MiB
 const CHUNK_SIZE = 8 * 1024 * 1024;   // 8 MiB, matches the contract default
 export const INSTANT_LIMIT = 1024 * 1024;    // only files above 1 MiB probe for a dedup hit
 export const UPLOAD_CONCURRENCY = 3;         // transfers in flight at once
@@ -46,7 +49,10 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-/** Tiny emitter: on(event, fn) -> off(). Events: progress, state, done. */
+/**
+ * Tiny emitter: on(event, fn) -> off().
+ * Events: progress (network bytes), hash-progress (hashing bytes), state, done.
+ */
 function createEmitter() {
   const listeners = new Map();
   return {
@@ -69,13 +75,37 @@ function supportsSubtle() {
   return !!(typeof crypto !== 'undefined' && crypto.subtle && typeof crypto.subtle.digest === 'function');
 }
 
-/** Lowercase SHA-256, including insecure HTTP origins and large local files. */
-export async function sha256(blob) {
-  if (!supportsSubtle() || (blob instanceof Blob && blob.size > 64 * 1024 * 1024)) return sha256Stream(blob);
+/**
+ * Lowercase SHA-256, including insecure HTTP origins and large local files.
+ *
+ * Optional { signal, onProgress }: cancellation is checked before the read and
+ * after the digest, and onProgress(loadedBytes) only ever reports bytes that
+ * were really hashed — the whole input, once, at the end.
+ *
+ * A large Blob (> 64 MiB) is hashed on the shared background worker so a folder
+ * of big files no longer blocks the page for seconds; the byte progress it
+ * reports is real, slice by slice. Everything else keeps its old route: WebCrypto
+ * for an in-memory buffer or a small Blob, and the bounded main-thread stream
+ * when the origin has no crypto.subtle. If no worker can run (an old browser, a
+ * CSP that blocks worker-src, a broken module) the same stream takes over, so
+ * correctness never depends on the worker.
+ */
+export async function sha256(blob, { signal, onProgress } = {}) {
+  if (signal && signal.aborted) throw abortError();
+  const report = typeof onProgress === 'function' ? onProgress : null;
+  if (blob instanceof Blob && blob.size > BACKGROUND_HASH_LIMIT) {
+    return sha256Background(blob, { signal, onProgress: report });
+  }
+  if (!supportsSubtle()) {
+    return sha256Stream(blob, { signal, onProgress: report }); // HTTP fallback, same contract
+  }
   let buffer;
   if (blob instanceof Blob) buffer = await blob.arrayBuffer();
   else buffer = blob;
+  if (signal && signal.aborted) throw abortError();
   const digest = await crypto.subtle.digest('SHA-256', buffer);
+  if (signal && signal.aborted) throw abortError();
+  if (report) report(buffer.byteLength);
   return Array.from(new Uint8Array(digest)).map((b) => b.toString(16).padStart(2, '0')).join('');
 }
 
@@ -237,6 +267,9 @@ export function createUploadTask(options) {
     resumed: Boolean(resumeSessionId),
     chunkSize: CHUNK_SIZE,
     hash: opts.hash || '', // cached SHA-256: a retry must not re-read the whole file
+    // Bytes of the current hashing pass that the hasher really reported, or null
+    // until it reports. Never folded into `uploaded`: hashing is not transfer.
+    hashBytes: null,
     deduplicated: false, // true when the server already held these bytes
     error: null,
     node: null,
@@ -332,9 +365,28 @@ export function createUploadTask(options) {
     setState('hashing');
     try {
       // Hash once per task, not once per attempt: a 2 GiB file costs a full read.
+      // The signal makes hashing itself cancellable; an abort must propagate
+      // instead of degrading to an unhashed upload.
       let hash = task.hash;
       if (!hash) {
-        try { hash = await sha256(file); } catch { hash = ''; }
+        // Hashing is a stage with its own byte count, and it resets at the start
+        // of every real hashing pass. It is reported only on `hash-progress`:
+        // `progress` means network bytes, so a hashing tick there (0 network
+        // bytes by definition) reads to every consumer as a stalled transfer.
+        // Payload: { task, phase: 'hashing', hashBytes, hashTotal }.
+        task.hashBytes = null;
+        const onHashProgress = (loaded) => {
+          const size = Math.max(0, Number(file.size) || 0);
+          const next = Math.max(task.hashBytes || 0, Math.min(Math.max(0, Number(loaded) || 0), size));
+          task.hashBytes = next;
+          emitter.emit('hash-progress', { task, phase: 'hashing', hashBytes: next, hashTotal: size });
+        };
+        try {
+          hash = await sha256(file, { signal, onProgress: onHashProgress });
+        } catch (error) {
+          if (error && error.name === 'AbortError') throw error;
+          hash = '';
+        }
         task.hash = hash;
       }
       if (signal.aborted) throw abortError();
