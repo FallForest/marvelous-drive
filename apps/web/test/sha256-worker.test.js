@@ -58,14 +58,22 @@ function installFakeWorker(overrides) {
       const total = message.blob.size
       const slice = opts.slice || 4 * MiB
       let loaded = 0
-      const step = () => {
+      let slices = 0
+      const step = async () => {
         if (opts.dieAfter !== undefined && loaded >= opts.dieAfter) {
           if (this.onerror) this.onerror({ message: 'worker stopped' })
           return
         }
+        // A deterministic "still busy" state: after `holdAfter` slices the worker
+        // parks until the test releases it. A timing race (hash tick vs. test
+        // tick) would otherwise decide the outcome on a fast machine.
+        if (opts.holdAfter !== undefined && slices >= opts.holdAfter && opts.hold) {
+          await opts.hold
+        }
         if (this.canceled && this.canceled.has(id)) return
         if (this.terminated) return
         loaded = Math.min(total, loaded + slice)
+        slices += 1
         if (this.onmessage) this.onmessage({ data: { type: 'progress', id, loaded } })
         if (loaded < total) { setTimeout(step, 0); return }
         digestOf(message.blob).then((hash) => {
@@ -177,7 +185,12 @@ describe('background SHA-256 worker', () => {
   })
 
   it('rejects an aborted hash immediately and tells the worker to stop', async () => {
-    const fake = installFakeWorker({ slice: MiB })
+    // The worker parks after its first slice until this resolves, so the abort
+    // always lands mid-hash. Waiting a fixed 5 ms instead made the case pass on a
+    // slow machine and fail on a fast one, where 4 MiB hashed inside the wait.
+    let release
+    const hold = new Promise((resolve) => { release = resolve })
+    const fake = installFakeWorker({ slice: MiB, holdAfter: 1, hold })
     try {
       const client = await fake.client()
       const controller = new AbortController()
@@ -185,11 +198,13 @@ describe('background SHA-256 worker', () => {
       await wait(5)
       controller.abort()
       await assert.rejects(started, (error) => error.name === 'AbortError')
+      release()
       const worker = fake.created[0]
       await wait(20)
       assert.equal(worker.messages.filter((message) => message.type === 'cancel').length, 1)
       assert.equal(worker.terminated, false, 'the shared worker survives one canceled file')
     } finally {
+      release()
       fake.restore()
     }
   })
